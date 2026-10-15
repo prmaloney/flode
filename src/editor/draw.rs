@@ -4,8 +4,8 @@ use crate::editor::knob::{self};
 use crate::editor::piano::{self};
 use crate::nodes::map;
 use crate::nodes::{
-    pin_y, Category, FlodeNode, Port, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH, ROW_KNOB_DIAMETER,
-    TITLE_INSET,
+    Category, FlodeNode, Port, RowShape, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
+    ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
 };
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text};
@@ -272,28 +272,33 @@ pub(super) fn draw_node(
 
     draw_collapse_arrow(frame, node);
 
-    // A collapsed node shows only its header. Its pins are dots at the header's edges, and wires
-    // still attach to them.
-    if node.collapsed {
-        for port in node.input_ports() {
-            if let Some(point) = node.input_point(port) {
-                draw_pin_dot(frame, point, port);
-            }
-        }
-        for port in node.output_ports() {
-            if let Some(point) = node.output_point(port) {
-                draw_pin_dot(frame, point, port);
-            }
-        }
-        return;
-    }
-
     // Each row has an optional input pin on the left edge, a knob with its name and value, and an
-    // optional output pin on the right edge.
+    // optional output pin on the right edge. A row in a folded section, or in a collapsed node,
+    // keeps only its pins, packed close together, and wires still attach to them.
+    let places = node.row_places();
     for (row_index, row) in node.rows().iter().enumerate() {
-        let y = node.position.y + pin_y(row_index);
+        let place = places[row_index];
+        let y = node.position.y + place.y;
         let left = node.position.x;
         let right = node.position.x + NODE_WIDTH;
+
+        match place.shape {
+            RowShape::Hidden => continue,
+            RowShape::SectionHeader(n) => {
+                draw_section_header(frame, node, n, y, covered, zoom);
+                continue;
+            }
+            RowShape::Packed => {
+                if let Some(port) = row.input {
+                    draw_packed_pin_dot(frame, Point::new(left, y), port);
+                }
+                if let Some(port) = row.output {
+                    draw_packed_pin_dot(frame, Point::new(right, y), port);
+                }
+                continue;
+            }
+            RowShape::Full => {}
+        }
 
         if let Some(id) = row.knob {
             let driven = graph.is_driven(index, id);
@@ -371,10 +376,17 @@ pub(super) fn draw_node(
         }
     }
 
+    // A collapsed node is its header and its pins, and nothing below them.
+    if node.collapsed {
+        return;
+    }
+
     {
         let labels = node.switch_labels();
         for (index, label) in labels.iter().enumerate() {
-            draw_switch(frame, node, index, label, covered, zoom);
+            if node.switch_shown(index) {
+                draw_switch(frame, node, index, label, covered, zoom);
+            }
         }
     }
 
@@ -421,6 +433,65 @@ pub(super) fn draw_node(
     }
 }
 
+/// The header of a section: a band across the node with an arrow and the section's title. The
+/// arrow points down when the section is open and right when it is folded.
+pub(super) fn draw_section_header(
+    frame: &mut Frame,
+    node: &FlodeNode,
+    section: usize,
+    y: f32,
+    covered: &[Rectangle],
+    zoom: f32,
+) {
+    let left = node.position.x;
+    let band = Rectangle {
+        x: left + 6.0,
+        y: y - SECTION_HEIGHT / 2.0 + 2.0,
+        width: NODE_WIDTH - 12.0,
+        height: SECTION_HEIGHT - 4.0,
+    };
+    frame.fill(&rounded_rect(band, DROPDOWN_CORNER_RADIUS), SECTION_COLOR);
+
+    let folded = node.section_collapsed(section);
+    let x = left + SECTION_ARROW_X;
+    let arrow = if folded {
+        Path::new(|builder| {
+            builder.move_to(Point::new(x - 2.0, y - 3.5));
+            builder.line_to(Point::new(x + 2.5, y));
+            builder.line_to(Point::new(x - 2.0, y + 3.5));
+            builder.close();
+        })
+    } else {
+        Path::new(|builder| {
+            builder.move_to(Point::new(x - 3.5, y - 2.0));
+            builder.line_to(Point::new(x + 3.5, y - 2.0));
+            builder.line_to(Point::new(x, y + 2.5));
+            builder.close();
+        })
+    };
+    frame.fill(&arrow, SECTION_TEXT_COLOR);
+
+    let title = node
+        .kind
+        .behavior()
+        .sections()
+        .get(section)
+        .map_or("", |section| section.title);
+    draw_text(
+        frame,
+        covered,
+        zoom,
+        Text {
+            content: title.to_string(),
+            position: Point::new(left + SECTION_ARROW_X + 12.0, y),
+            color: SECTION_TEXT_COLOR,
+            size: 12.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        },
+    );
+}
+
 /// The arrow in the header. It points down when the node is open and right when it is collapsed.
 pub(super) fn draw_collapse_arrow(frame: &mut Frame, node: &FlodeNode) {
     let x = node.position.x + ARROW_CENTER_X;
@@ -449,6 +520,19 @@ pub(super) fn draw_pin_dot(frame: &mut Frame, point: Point, port: Port) {
         frame.fill(&Path::circle(point, PIN_RADIUS), TERMINAL_COLOR);
     } else {
         frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), CONTROL_COLOR);
+    }
+}
+
+/// A pin of a folded section or node: the same colors as an ordinary pin, but smaller, so a tight
+/// stack of them does not run together.
+pub(super) fn draw_packed_pin_dot(frame: &mut Frame, point: Point, port: Port) {
+    if port.is_audio() {
+        frame.fill(
+            &Path::circle(point, PACKED_PIN_RADIUS + 0.5),
+            TERMINAL_COLOR,
+        );
+    } else {
+        frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), CONTROL_COLOR);
     }
 }
 

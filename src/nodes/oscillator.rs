@@ -1,11 +1,16 @@
 //! The oscillator node. It makes the sound: a waveform with unison, detune, and phase randomness.
 
-use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row, Section};
 use crate::dsp::noise::NoiseType;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 
 pub struct Oscillator;
+
+/// The numbers of the oscillator's sections, as `Row::section` and `sections` use them.
+const SECTION_PITCH: usize = 0;
+const SECTION_UNISON: usize = 1;
+const SECTION_WARP: usize = 2;
 
 /// The waveform dropdown's rows. The LFO uses the same list.
 pub const WAVEFORM_LABELS: [&str; 5] = ["Sine", "Saw", "Square", "Triangle", "Noise"];
@@ -18,30 +23,54 @@ impl NodeBehavior for Oscillator {
         "Oscillator"
     }
 
-    /// The rows in the order they show. The waveform and noise dropdowns sit together, and the warp
-    /// dropdown sits directly above the warp amount.
+    /// The rows in the order they show. The waveform and noise dropdowns lead. The shape row has
+    /// the envelope input and the audio output, so both pins stay in the same place whatever is
+    /// folded. Level and pan follow, and the rest is in three sections that fold: pitch, unison,
+    /// and warp. The warp dropdown sits directly above the warp amount.
     fn rows(&self, node: &FlodeNode) -> Vec<Row> {
-        // The waveform leads, with the noise type under it. The warp dropdown sits right above the
-        // warp amount.
         let mut rows = vec![Row::control(Control::Dropdown(0))];
         if waveform(node) == Waveform::Noise {
             rows.push(Row::control(Control::Dropdown(2)));
         }
         // The envelope input shapes this oscillator's amplitude, one copy per voice.
-        rows.push(Row::input(Port::Shape));
+        rows.push(Row::input(Port::Shape).with_output(Port::Audio));
+        rows.push(Row::driven_knob(KnobId::OscGain));
+        rows.push(Row::driven_knob(KnobId::Pan));
+
         // The transpose knobs shift the oscillator's pitch. A control wire can drive each one.
+        rows.push(Row::section(SECTION_PITCH));
         rows.push(Row::driven_knob(KnobId::Coarse));
         rows.push(Row::driven_knob(KnobId::Fine));
         rows.push(Row::driven_knob(KnobId::Octave));
-        rows.push(Row::driven_knob(KnobId::Unison).with_output(Port::Audio));
+
+        rows.push(Row::section(SECTION_UNISON));
+        rows.push(Row::driven_knob(KnobId::Unison));
         rows.push(Row::driven_knob(KnobId::Detune));
         rows.push(Row::driven_knob(KnobId::Spread));
         rows.push(Row::driven_knob(KnobId::PhaseRandom));
+
+        rows.push(Row::section(SECTION_WARP));
         rows.push(Row::control(Control::Dropdown(1)));
         rows.push(Row::driven_knob(KnobId::WarpAmount));
-        rows.push(Row::driven_knob(KnobId::Pan));
-        rows.push(Row::driven_knob(KnobId::OscGain));
         rows
+    }
+
+    /// Pitch and warp start folded, since they are touched less than the unison.
+    fn sections(&self) -> &'static [Section] {
+        &[
+            Section {
+                title: "Pitch",
+                collapsed: true,
+            },
+            Section {
+                title: "Unison",
+                collapsed: false,
+            },
+            Section {
+                title: "Warp",
+                collapsed: true,
+            },
+        ]
     }
 
     fn audio_out(&self) -> bool {

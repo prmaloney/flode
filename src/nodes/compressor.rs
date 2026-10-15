@@ -1,7 +1,7 @@
 //! The compressor node. The Multiband switch turns it into an OTT style three band compressor,
 //! which shows its Depth knob.
 
-use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row, Section};
 
 pub struct Compressor;
 
@@ -15,8 +15,6 @@ impl NodeBehavior for Compressor {
             Row::input(Port::Audio).with_output(Port::Audio),
             Row::driven_knob(KnobId::Threshold),
             Row::driven_knob(KnobId::Ratio),
-            Row::driven_knob(KnobId::CompAttack),
-            Row::driven_knob(KnobId::CompRelease),
             Row::driven_knob(KnobId::Makeup),
             Row::driven_knob(KnobId::Mix),
         ];
@@ -26,7 +24,18 @@ impl NodeBehavior for Compressor {
             rows.push(Row::plain_knob(KnobId::Depth));
         }
         rows.push(Row::control(Control::Switch(0)));
+        // The attack and release fold away, since they are set once and left.
+        rows.push(Row::section(0));
+        rows.push(Row::driven_knob(KnobId::CompAttack));
+        rows.push(Row::driven_knob(KnobId::CompRelease));
         rows
+    }
+
+    fn sections(&self) -> &'static [Section] {
+        &[Section {
+            title: "Timing",
+            collapsed: true,
+        }]
     }
 
     fn audio_in(&self) -> bool {

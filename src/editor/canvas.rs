@@ -176,6 +176,13 @@ impl<'a> NodeEditor<'a> {
                 self.graph.nodes[index].collapsed = !self.graph.nodes[index].collapsed;
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
+            // A section header folds or opens its section.
+            if let Some(section) = node.section_header_at(point) {
+                self.graph.selected = Some(index);
+                self.graph.dropdown_menu = None;
+                self.graph.nodes[index].toggle_section(section);
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
             {
                 let labels = node.switch_labels();
                 let hit = (0..labels.len()).find(|&i| node.switch_bounds(i).contains(point));

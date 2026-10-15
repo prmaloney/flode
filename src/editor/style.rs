@@ -33,6 +33,15 @@ pub(super) const MENU_CORNER_RADIUS: f32 = 6.0;
 
 pub(super) const NODE_BODY_COLOR: Color = Color::from_rgb(0.24, 0.24, 0.27);
 pub(super) const NODE_HEADER_COLOR: Color = Color::from_rgb(0.30, 0.30, 0.36);
+/// The band behind a section's title, darker than the node's body so it reads as a recess, with
+/// light text and arrow on it.
+pub(super) const SECTION_COLOR: Color = Color::from_rgb(0.17, 0.17, 0.20);
+pub(super) const SECTION_TEXT_COLOR: Color = Color::from_rgb(0.82, 0.82, 0.88);
+/// The pins of a folded section or node are drawn smaller than ordinary pins, so a tight stack of
+/// them stays readable.
+pub(super) const PACKED_PIN_RADIUS: f32 = 3.0;
+/// The arrow of a section header sits this far from the node's left edge.
+pub(super) const SECTION_ARROW_X: f32 = 18.0;
 /// The body and header of a node that is muted or bypassed, darker than a live node's.
 pub(super) const NODE_OFF_BODY_COLOR: Color = Color::from_rgb(0.19, 0.19, 0.21);
 pub(super) const NODE_OFF_HEADER_COLOR: Color = Color::from_rgb(0.23, 0.23, 0.26);

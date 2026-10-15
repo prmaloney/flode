@@ -172,6 +172,7 @@ mod slot_tests {
             y: 0.0,
             collapsed: false,
             bypassed: false,
+            sections_collapsed: Vec::new(),
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -211,6 +212,7 @@ mod slot_tests {
             y: 0.0,
             collapsed: false,
             bypassed: false,
+            sections_collapsed: Vec::new(),
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -447,6 +449,7 @@ mod envelope_migration_tests {
             y: 0.0,
             collapsed: false,
             bypassed: false,
+            sections_collapsed: Vec::new(),
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -1355,5 +1358,388 @@ mod default_graph_tests {
             .map(|n| engine.process_sample(n).peak())
             .fold(0.0f32, f32::max);
         assert_eq!(after, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::nodes::{
+        RowShape, COLLAPSED_PADDING, HEADER_HEIGHT, NODE_WIDTH, PACKED_PITCH, PIN_ROW0_Y,
+        ROW_PITCH, SECTION_HEIGHT,
+    };
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn node(kind: NodeKind) -> FlodeNode {
+        FlodeNode::new(kind, Point::new(100.0, 100.0))
+    }
+
+    // Nodes with no sections lay out as before.
+
+    /// A node with no sections puts its rows at the old steady pitch, so the nodes that never
+    /// needed sections do not move.
+    #[test]
+    fn a_node_with_no_sections_keeps_its_old_layout() {
+        for kind in [
+            NodeKind::Filter,
+            NodeKind::Mix,
+            NodeKind::Lfo,
+            NodeKind::Reverb,
+        ] {
+            let node = node(kind);
+            for (index, place) in node.row_places().iter().enumerate() {
+                assert_eq!(place.shape, RowShape::Full, "{kind:?}");
+                assert_eq!(place.y, PIN_ROW0_Y + index as f32 * ROW_PITCH, "{kind:?}");
+            }
+        }
+    }
+
+    // Sections.
+
+    /// The oscillator starts with pitch and warp folded and unison open.
+    #[test]
+    fn the_oscillator_starts_with_pitch_and_warp_folded() {
+        let osc = node(NodeKind::Oscillator);
+        assert_eq!(osc.sections_collapsed, vec![true, false, true]);
+        assert!(osc.section_collapsed(0) && !osc.section_collapsed(1) && osc.section_collapsed(2));
+    }
+
+    /// A folded section keeps its pins, packed together, and drops its knobs.
+    #[test]
+    fn a_folded_section_keeps_its_pins_and_drops_its_knobs() {
+        let osc = node(NodeKind::Oscillator);
+        let rows = osc.rows();
+        let packed: Vec<usize> = (0..rows.len())
+            .filter(|&i| osc.row_places()[i].shape == RowShape::Packed)
+            .collect();
+        // Coarse, fine, and octave are folded and keep their pins.
+        assert_eq!(packed.len(), 4);
+        assert!(osc.input_point(Port::Knob(KnobId::Coarse)).is_some());
+        assert!(osc.input_point(Port::Knob(KnobId::Fine)).is_some());
+        assert!(osc.input_point(Port::Knob(KnobId::Octave)).is_some());
+        assert!(osc.input_point(Port::Knob(KnobId::WarpAmount)).is_some());
+        let shown: Vec<KnobId> = osc.knob_slots().iter().map(|slot| slot.id).collect();
+        assert!(!shown.contains(&KnobId::Coarse));
+        assert!(!shown.contains(&KnobId::WarpAmount));
+        assert!(shown.contains(&KnobId::Unison) && shown.contains(&KnobId::OscGain));
+    }
+
+    /// Packed pins sit one packed pitch apart, and a pin of an open section sits a full row down.
+    #[test]
+    fn packed_pins_sit_close_together() {
+        let mut osc = node(NodeKind::Oscillator);
+        let at = |osc: &FlodeNode, id| osc.input_point(Port::Knob(id)).unwrap();
+        let (coarse, fine, octave) = (
+            at(&osc, KnobId::Coarse),
+            at(&osc, KnobId::Fine),
+            at(&osc, KnobId::Octave),
+        );
+        assert_eq!(fine.y - coarse.y, PACKED_PITCH);
+        assert_eq!(octave.y - fine.y, PACKED_PITCH);
+        assert_eq!(coarse.x, osc.position.x);
+
+        osc.toggle_section(0);
+        let (coarse, fine) = (at(&osc, KnobId::Coarse), at(&osc, KnobId::Fine));
+        assert_eq!(fine.y - coarse.y, ROW_PITCH);
+    }
+
+    /// Folding a section moves what is under it up, and opening it moves it back.
+    #[test]
+    fn folding_a_section_moves_the_rows_under_it() {
+        let mut osc = node(NodeKind::Oscillator);
+        let unison = |osc: &FlodeNode| osc.input_point(Port::Knob(KnobId::Unison)).unwrap().y;
+        let height = |osc: &FlodeNode| osc.height();
+        let (closed_unison, closed_height) = (unison(&osc), height(&osc));
+        osc.toggle_section(0);
+        assert!(unison(&osc) > closed_unison);
+        assert!(height(&osc) > closed_height);
+        osc.toggle_section(0);
+        assert_eq!(unison(&osc), closed_unison);
+        assert_eq!(height(&osc), closed_height);
+    }
+
+    /// The oscillator's envelope input and audio output share a row above every section, so
+    /// neither moves when a section folds.
+    #[test]
+    fn the_envelope_pin_and_audio_pin_do_not_move_when_sections_fold() {
+        let mut osc = node(NodeKind::Oscillator);
+        let before = (
+            osc.input_point(Port::Shape).unwrap(),
+            osc.output_point(Port::Audio).unwrap(),
+        );
+        assert_eq!(before.0.y, before.1.y);
+        for section in 0..3 {
+            osc.toggle_section(section);
+        }
+        assert_eq!(osc.input_point(Port::Shape).unwrap(), before.0);
+        assert_eq!(osc.output_point(Port::Audio).unwrap(), before.1);
+    }
+
+    /// The default oscillator is short enough to sit above the key strip in the default window.
+    #[test]
+    fn the_default_oscillator_clears_the_keyboard() {
+        let graph = Graph::default();
+        let bottom = graph.nodes[0].position.y + graph.nodes[0].height();
+        let strip_top = 712.0 - crate::editor::piano::STRIP_HEIGHT;
+        assert!(bottom <= strip_top, "bottom {bottom}, strip {strip_top}");
+    }
+
+    /// A dropdown in a folded section is not on show, and one in an open section is.
+    #[test]
+    fn a_dropdown_in_a_folded_section_is_hidden() {
+        let mut osc = node(NodeKind::Oscillator);
+        let warp = |osc: &FlodeNode| osc.dropdowns().iter().any(|d| d.which == 1);
+        assert!(!warp(&osc));
+        let at = Point::new(osc.position.x + 40.0, osc.position.y + 200.0);
+        assert!(osc.dropdown_at(at).is_none());
+        osc.toggle_section(2);
+        assert!(warp(&osc));
+        // The wave dropdown above the sections never hides.
+        assert!(osc.dropdowns().iter().any(|d| d.which == 0));
+    }
+
+    /// A switch above a folded section stays on show, and folding does not touch other nodes.
+    #[test]
+    fn a_switch_above_a_folded_section_stays_on_show() {
+        let compressor = node(NodeKind::Compressor);
+        assert!(compressor.section_collapsed(0));
+        assert!(compressor.switch_shown(0));
+        let delay = node(NodeKind::Delay);
+        assert!(delay.switch_shown(0));
+    }
+
+    /// Toggling a section that does not exist does nothing.
+    #[test]
+    fn toggling_a_missing_section_does_nothing() {
+        let mut filter = node(NodeKind::Filter);
+        filter.toggle_section(0);
+        assert!(filter.sections_collapsed.is_empty());
+        let mut osc = node(NodeKind::Oscillator);
+        osc.toggle_section(9);
+        assert_eq!(osc.sections_collapsed, vec![true, false, true]);
+    }
+
+    // Clicks.
+
+    fn click(graph: &mut Graph, at: Point) -> Option<Message> {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor
+            .update(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1024.0,
+                    height: 712.0,
+                },
+                Cursor::Available(at),
+            )
+            .1
+    }
+
+    /// A press on a section's header folds or opens it, and selects the node.
+    #[test]
+    fn pressing_a_section_header_folds_it() {
+        let mut graph = minimal_graph();
+        let header = graph.nodes[0]
+            .row_places()
+            .iter()
+            .position(|p| p.shape == RowShape::SectionHeader(0))
+            .unwrap();
+        let y = graph.nodes[0].position.y + graph.nodes[0].row_places()[header].y;
+        let at = Point::new(graph.nodes[0].position.x + 80.0, y);
+        assert!(graph.nodes[0].section_collapsed(0));
+        graph.selected = None;
+        assert!(matches!(click(&mut graph, at), Some(Message::GraphChanged)));
+        assert!(!graph.nodes[0].section_collapsed(0));
+        assert_eq!(graph.selected, Some(0));
+        click(&mut graph, at);
+        assert!(graph.nodes[0].section_collapsed(0));
+    }
+
+    /// The header is the whole band across the node, and a click below it is not a header press.
+    #[test]
+    fn only_the_header_band_folds_a_section() {
+        let osc = node(NodeKind::Oscillator);
+        let places = osc.row_places();
+        let header = places
+            .iter()
+            .find(|p| p.shape == RowShape::SectionHeader(1))
+            .unwrap();
+        let x = osc.position.x + 5.0;
+        let top = osc.position.y + header.y - SECTION_HEIGHT / 2.0;
+        assert_eq!(osc.section_header_at(Point::new(x, top + 2.0)), Some(1));
+        assert_eq!(
+            osc.section_header_at(Point::new(x, top + SECTION_HEIGHT + 2.0)),
+            None
+        );
+    }
+
+    // Collapsed nodes.
+
+    /// A collapsed node is its header over its pins, packed. Every pin is still there.
+    #[test]
+    fn a_collapsed_node_keeps_every_pin_packed_under_the_header() {
+        let mut osc = node(NodeKind::Oscillator);
+        let open_inputs = osc.input_ports();
+        let open_outputs = osc.output_ports();
+        osc.collapsed = true;
+        assert_eq!(osc.input_ports(), open_inputs);
+        assert_eq!(osc.output_ports(), open_outputs);
+
+        let mut ys = Vec::new();
+        for port in &open_inputs {
+            let at = osc.input_point(*port).expect("the pin is still there");
+            assert_eq!(at.x, osc.position.x);
+            assert!(
+                osc.bounds().contains(Point::new(at.x + 1.0, at.y)),
+                "{port:?}"
+            );
+            assert!(at.y > osc.position.y + HEADER_HEIGHT, "{port:?}");
+            ys.push(at.y);
+        }
+        // The pins are one packed pitch apart, top to bottom.
+        for pair in ys.windows(2) {
+            assert_eq!(pair[1] - pair[0], PACKED_PITCH);
+        }
+        let out = osc.output_point(Port::Audio).unwrap();
+        assert_eq!(out.x, osc.position.x + NODE_WIDTH);
+    }
+
+    /// A collapsed node is only as tall as its pins need, much shorter than the open node.
+    #[test]
+    fn a_collapsed_node_is_short() {
+        let mut osc = node(NodeKind::Oscillator);
+        let open = osc.height();
+        osc.collapsed = true;
+        let pins = osc.input_ports().len() as f32;
+        let expected = HEADER_HEIGHT + 2.0 * COLLAPSED_PADDING + pins * PACKED_PITCH;
+        assert!((osc.height() - expected).abs() < 1.0, "{}", osc.height());
+        assert!(osc.height() < open / 2.0);
+    }
+
+    /// A collapsed node shows no knobs, dropdowns, switches, or section headers.
+    #[test]
+    fn a_collapsed_node_shows_only_pins() {
+        let mut compressor = node(NodeKind::Compressor);
+        compressor.collapsed = true;
+        assert!(compressor.knob_slots().is_empty());
+        assert!(compressor.dropdowns().is_empty());
+        assert!(!compressor.switch_shown(0));
+        assert!(compressor
+            .row_places()
+            .iter()
+            .all(|p| !matches!(p.shape, RowShape::SectionHeader(_) | RowShape::Full)));
+        assert_eq!(compressor.section_header_at(Point::new(110.0, 200.0)), None);
+    }
+
+    /// A collapsed node's pins pack from the top, so a wire into one lands inside the node.
+    #[test]
+    fn expanding_a_collapsed_node_restores_its_layout() {
+        let mut osc = node(NodeKind::Oscillator);
+        let open = osc.height();
+        let pin = osc.input_point(Port::Knob(KnobId::Unison)).unwrap();
+        osc.collapsed = true;
+        assert_ne!(osc.input_point(Port::Knob(KnobId::Unison)).unwrap(), pin);
+        osc.collapsed = false;
+        assert_eq!(osc.input_point(Port::Knob(KnobId::Unison)).unwrap(), pin);
+        assert_eq!(osc.height(), open);
+    }
+
+    // Wires and pins.
+
+    /// A control wire to a knob in a folded section connects, and its end follows the pin when the
+    /// section opens.
+    #[test]
+    fn a_wire_to_a_folded_knob_connects_and_follows_the_pin() {
+        let mut graph = minimal_graph();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 400.0));
+        graph.connect(lfo, Port::Shape, 0, Port::Knob(KnobId::Fine));
+        let wire = *graph
+            .connections
+            .iter()
+            .find(|c| c.input == Port::Knob(KnobId::Fine))
+            .expect("the wire is made");
+        let folded = graph.nodes[0]
+            .input_point(Port::Knob(KnobId::Fine))
+            .unwrap();
+        assert!(graph.link_curve(&wire).is_some());
+
+        graph.nodes[0].toggle_section(0);
+        let open = graph.nodes[0]
+            .input_point(Port::Knob(KnobId::Fine))
+            .unwrap();
+        assert!(open.y > folded.y);
+        assert!(graph.link_curve(&wire).is_some());
+    }
+
+    /// Where two packed pins are both in reach, the nearer one is picked.
+    #[test]
+    fn the_nearest_pin_wins_among_packed_pins() {
+        let graph = minimal_graph();
+        let osc = &graph.nodes[0];
+        let coarse = osc.input_point(Port::Knob(KnobId::Coarse)).unwrap();
+        let fine = osc.input_point(Port::Knob(KnobId::Fine)).unwrap();
+        // Both are inside the hit radius from the point between them, a little nearer to fine.
+        let between = Point::new(coarse.x, coarse.y + PACKED_PITCH * 0.6);
+        assert_eq!(
+            graph.terminal_at(between),
+            Some(Terminal::In(0, Port::Knob(KnobId::Fine)))
+        );
+        let nearer_coarse = Point::new(coarse.x, coarse.y + PACKED_PITCH * 0.3);
+        assert_eq!(
+            graph.terminal_at(nearer_coarse),
+            Some(Terminal::In(0, Port::Knob(KnobId::Coarse)))
+        );
+        let _ = fine;
+    }
+
+    // Saving and copying.
+
+    /// The folds are saved, and a save from before sections loads with each kind's own folds.
+    #[test]
+    fn the_folds_survive_saving() {
+        let mut graph = minimal_graph();
+        graph.nodes[0].toggle_section(0);
+        graph.nodes[0].toggle_section(1);
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.nodes[0].sections_collapsed, vec![false, true, true]);
+
+        let mut json = serde_json::to_value(graph.to_saved()).unwrap();
+        for node in json["nodes"].as_array_mut().unwrap() {
+            node.as_object_mut().unwrap().remove("sections_collapsed");
+        }
+        let old: SavedGraph = serde_json::from_value(json).unwrap();
+        let loaded = Graph::from_saved(&old);
+        assert_eq!(loaded.nodes[0].sections_collapsed, vec![true, false, true]);
+    }
+
+    /// Every wire of a saved graph survives whatever is folded, since the pins never go away.
+    #[test]
+    fn folding_never_drops_a_wire_on_load() {
+        let mut graph = minimal_graph();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 400.0));
+        graph.connect(lfo, Port::Shape, 0, Port::Knob(KnobId::Coarse));
+        graph.connect(lfo, Port::Shape, 0, Port::Knob(KnobId::WarpAmount));
+        let wires = graph.connections.len();
+        for collapsed in [true, false] {
+            graph.nodes[0].collapsed = collapsed;
+            let loaded = Graph::from_saved(&graph.to_saved());
+            assert_eq!(loaded.connections.len(), wires, "collapsed {collapsed}");
+        }
+    }
+
+    /// A copy keeps its folds.
+    #[test]
+    fn a_duplicate_keeps_the_folds() {
+        let mut graph = minimal_graph();
+        graph.nodes[0].toggle_section(2);
+        let copy = graph.duplicate_node(0).unwrap();
+        assert_eq!(
+            graph.nodes[copy].sections_collapsed,
+            graph.nodes[0].sections_collapsed
+        );
     }
 }

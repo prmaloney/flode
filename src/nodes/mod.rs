@@ -52,9 +52,43 @@ pub const SWITCH_ROW_HEIGHT: f32 = 22.0;
 /// The transfer curve of a map node: a box about as wide as the node's body.
 pub const CURVE_HEIGHT: f32 = 96.0;
 
-/// Vertical offset of a pin row, measured from the top of the node.
-pub fn pin_y(row: usize) -> f32 {
-    PIN_ROW0_Y + row as f32 * ROW_PITCH
+/// The header row of a section: its arrow and title.
+pub const SECTION_HEIGHT: f32 = 22.0;
+/// The gap between pins that are packed together, in a collapsed section or a collapsed node.
+pub const PACKED_PITCH: f32 = 9.0;
+/// Space above and below the packed pins of a collapsed node.
+pub const COLLAPSED_PADDING: f32 = 5.0;
+
+/// A group of rows that can fold away. It starts at a row with `Control::Section` and runs to the
+/// next one, or to the end of the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Section {
+    pub title: &'static str,
+    /// True if the section starts folded.
+    pub collapsed: bool,
+}
+
+/// How a row is laid out right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowShape {
+    /// The row at full size, with its knob, label, and controls.
+    Full,
+    /// A row folded away that still has pins. Its pins stay, close together, with no labels or
+    /// knob.
+    Packed,
+    /// A row folded away that has no pins. It takes no space.
+    Hidden,
+    /// The header of section `n`.
+    SectionHeader(usize),
+}
+
+/// Where a row sits in its node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowPlace {
+    /// The height of the row's middle, measured from the top of the node. Pins and knobs sit
+    /// here.
+    pub y: f32,
+    pub shape: RowShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,9 +291,21 @@ pub enum Control {
     Switch(usize),
     /// The transfer curve of a map.
     Curve,
+    /// The header of section number `n`. The rows after it, up to the next header, fold with it.
+    Section(usize),
 }
 
 impl Row {
+    /// True if the row has a pin on either edge.
+    pub fn has_pins(&self) -> bool {
+        self.input.is_some() || self.output.is_some()
+    }
+
+    /// The header of section `n`.
+    pub fn section(n: usize) -> Self {
+        Self::control(Control::Section(n))
+    }
+
     /// A knob with its own control pin. A control wire can drive it.
     pub fn driven_knob(id: KnobId) -> Self {
         Self {
@@ -338,6 +384,11 @@ pub trait NodeBehavior: Sync {
         Bypass::None
     }
 
+    /// The sections the node's rows are grouped into, by number. A kind with none has fixed rows.
+    fn sections(&self) -> &'static [Section] {
+        &[]
+    }
+
     /// Knobs this kind starts at a value other than the knob's own default, in plain units.
     fn defaults(&self) -> &'static [(KnobId, f32)] {
         &[]
@@ -396,6 +447,8 @@ pub struct FlodeNode {
     /// True while the node is muted or bypassed, as its kind's `bypass` says. A kind that can't
     /// be bypassed ignores it.
     pub bypassed: bool,
+    /// Whether each section of the node is folded, by section number.
+    pub sections_collapsed: Vec<bool>,
     /// Normalized knob values, indexed by `KnobId as usize`. A node reads the ones its rows show.
     values: [f32; KnobId::COUNT],
     /// The row chosen in each dropdown, indexed by dropdown.
@@ -417,6 +470,12 @@ impl FlodeNode {
             position,
             collapsed: false,
             bypassed: false,
+            sections_collapsed: kind
+                .behavior()
+                .sections()
+                .iter()
+                .map(|section| section.collapsed)
+                .collect(),
             values: std::array::from_fn(|i| KnobId::ALL[i].default_normalized()),
             choices: Vec::new(),
             switches: Vec::new(),
@@ -444,6 +503,7 @@ impl FlodeNode {
         let mut copy = FlodeNode::new(self.kind, position);
         copy.collapsed = self.collapsed;
         copy.bypassed = self.bypassed;
+        copy.sections_collapsed = self.sections_collapsed.clone();
         copy.values = self.values;
         copy.choices = self.choices.clone();
         copy.switches = self.switches.clone();
@@ -501,6 +561,101 @@ impl FlodeNode {
         self.values[id as usize] = id.default_normalized();
     }
 
+    /// Whether section `n` is folded.
+    pub fn section_collapsed(&self, n: usize) -> bool {
+        self.sections_collapsed.get(n).copied().unwrap_or(false)
+    }
+
+    /// Folds section `n` if it is open, and opens it if it is folded.
+    pub fn toggle_section(&mut self, n: usize) {
+        let count = self.kind.behavior().sections().len();
+        if n >= count {
+            return;
+        }
+        if self.sections_collapsed.len() < count {
+            self.sections_collapsed.resize(count, false);
+        }
+        self.sections_collapsed[n] = !self.sections_collapsed[n];
+    }
+
+    /// Where each row sits, top to bottom, in the same order as `rows`.
+    ///
+    /// An open node lays its rows at a steady pitch, with a section header between groups. A row in
+    /// a folded section keeps its pins and drops everything else: the pins pack close together
+    /// under the section's header. A node folded as a whole does the same for every row, with no
+    /// section headers, so a collapsed node is its header over a short stack of pins.
+    pub fn row_places(&self) -> Vec<RowPlace> {
+        let mut top = if self.collapsed {
+            HEADER_HEIGHT + COLLAPSED_PADDING
+        } else {
+            HEADER_HEIGHT
+        };
+        let mut section = None;
+        self.rows()
+            .iter()
+            .map(|row| {
+                if let Some(Control::Section(n)) = row.control {
+                    section = Some(n);
+                    if self.collapsed {
+                        return RowPlace {
+                            y: top,
+                            shape: RowShape::Hidden,
+                        };
+                    }
+                    let y = top + SECTION_HEIGHT / 2.0;
+                    top += SECTION_HEIGHT;
+                    return RowPlace {
+                        y,
+                        shape: RowShape::SectionHeader(n),
+                    };
+                }
+                let folded = self.collapsed || section.is_some_and(|n| self.section_collapsed(n));
+                if !folded {
+                    let y = top + ROW_PITCH / 2.0;
+                    top += ROW_PITCH;
+                    RowPlace {
+                        y,
+                        shape: RowShape::Full,
+                    }
+                } else if row.has_pins() {
+                    let y = top + PACKED_PITCH / 2.0;
+                    top += PACKED_PITCH;
+                    RowPlace {
+                        y,
+                        shape: RowShape::Packed,
+                    }
+                } else {
+                    RowPlace {
+                        y: top,
+                        shape: RowShape::Hidden,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// The section whose header is under `point`, if there is one. A node folded as a whole has no
+    /// headers on show.
+    pub fn section_header_at(&self, point: Point) -> Option<usize> {
+        if self.collapsed {
+            return None;
+        }
+        self.row_places()
+            .iter()
+            .find_map(|place| match place.shape {
+                RowShape::SectionHeader(n) => {
+                    let header = Rectangle {
+                        x: self.position.x,
+                        y: self.position.y + place.y - SECTION_HEIGHT / 2.0,
+                        width: NODE_WIDTH,
+                        height: SECTION_HEIGHT,
+                    };
+                    header.contains(point).then_some(n)
+                }
+                _ => None,
+            })
+    }
+
     /// The labels of this node's switches, top to bottom.
     pub fn switch_labels(&self) -> &'static [&'static str] {
         self.kind.behavior().switch_labels()
@@ -516,11 +671,15 @@ impl FlodeNode {
     /// The node's dropdowns, in the order its rows list them, with where each one sits.
     pub fn dropdowns(&self) -> Vec<Dropdown> {
         let labels = self.kind.behavior().dropdowns(self);
+        let places = self.row_places();
         self.rows()
             .iter()
             .enumerate()
             .filter_map(|(index, row)| match row.control {
-                Some(Control::Dropdown(which)) => Some((index, which)),
+                // A dropdown in a folded section is not on show.
+                Some(Control::Dropdown(which)) if places[index].shape == RowShape::Full => {
+                    Some((index, which))
+                }
                 _ => None,
             })
             .filter_map(|(index, which)| {
@@ -539,7 +698,7 @@ impl FlodeNode {
                     selected: self.choice(which).min(labels.len().saturating_sub(1)),
                     bounds: Rectangle {
                         x: self.position.x + DROPDOWN_INSET,
-                        y: self.position.y + pin_y(index) - DROPDOWN_HEIGHT / 2.0,
+                        y: self.position.y + places[index].y - DROPDOWN_HEIGHT / 2.0,
                         width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
                         height: DROPDOWN_HEIGHT,
                     },
@@ -606,24 +765,39 @@ impl FlodeNode {
             .collect()
     }
 
-    /// Full height of the node. A collapsed node is only its header. Each row's control takes the
-    /// space of its row, so the height runs to the lowest one.
+    /// Full height of the node. Each row's control takes the space of its row, so the height runs
+    /// to the lowest one. A node folded as a whole is its header and its packed pins.
     pub fn height(&self) -> f32 {
-        if self.collapsed {
-            return HEADER_HEIGHT;
-        }
+        let rows = self.rows();
         let bottom = self
-            .rows()
+            .row_places()
             .iter()
-            .enumerate()
-            .map(|(index, row)| match row.control {
-                Some(Control::Curve) => pin_y(index) - ROW_PITCH / 2.0 + CURVE_HEIGHT,
-                Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
-                    pin_y(index) + SWITCH_ROW_HEIGHT / 2.0
-                }
-                None => pin_y(index) + ROW_PITCH / 2.0,
+            .zip(&rows)
+            .map(|(place, row)| match place.shape {
+                RowShape::Hidden => 0.0,
+                RowShape::Packed => place.y + PACKED_PITCH / 2.0,
+                RowShape::SectionHeader(_) => place.y + SECTION_HEIGHT / 2.0,
+                RowShape::Full => match row.control {
+                    Some(Control::Curve) => place.y - ROW_PITCH / 2.0 + CURVE_HEIGHT,
+                    Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
+                        place.y + SWITCH_ROW_HEIGHT / 2.0
+                    }
+                    _ => place.y + ROW_PITCH / 2.0,
+                },
             })
-            .fold(pin_y(0), f32::max);
+            .fold(PIN_ROW0_Y, f32::max);
+        if self.collapsed {
+            // A collapsed node with no pins is only its header.
+            let packed = self
+                .row_places()
+                .iter()
+                .any(|place| place.shape == RowShape::Packed);
+            return if packed {
+                bottom + COLLAPSED_PADDING
+            } else {
+                HEADER_HEIGHT
+            };
+        }
         bottom + 8.0
     }
 
@@ -652,27 +826,36 @@ impl FlodeNode {
             .iter()
             .position(|row| row.control == Some(Control::Curve))
             .unwrap_or(0);
+        let places = self.row_places();
         Rectangle {
             x: self.position.x + DROPDOWN_INSET,
-            y: self.position.y + pin_y(index) - ROW_PITCH / 2.0,
+            y: self.position.y + places.get(index).map_or(PIN_ROW0_Y, |p| p.y) - ROW_PITCH / 2.0,
             width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
             height: CURVE_HEIGHT,
         }
     }
 
-    /// The row of switch `index`, on the row that holds it.
+    /// The row of switch `index`, on the row that holds it. A switch in a folded section, or in a
+    /// folded node, is not on show and has no area.
     pub fn switch_bounds(&self, index: usize) -> Rectangle {
         let row = self
             .rows()
             .iter()
             .position(|row| row.control == Some(Control::Switch(index)))
             .unwrap_or(0);
+        let place = self.row_places().get(row).copied();
+        let shown = place.is_some_and(|place| place.shape == RowShape::Full);
         Rectangle {
             x: self.position.x + DROPDOWN_INSET,
-            y: self.position.y + pin_y(row) - SWITCH_ROW_HEIGHT / 2.0,
+            y: self.position.y + place.map_or(PIN_ROW0_Y, |p| p.y) - SWITCH_ROW_HEIGHT / 2.0,
             width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
-            height: SWITCH_ROW_HEIGHT,
+            height: if shown { SWITCH_ROW_HEIGHT } else { 0.0 },
         }
+    }
+
+    /// True if switch `index` is on show.
+    pub fn switch_shown(&self, index: usize) -> bool {
+        self.switch_bounds(index).height > 0.0
     }
 
     /// The collapse arrow's hit area in the header.
@@ -685,13 +868,12 @@ impl FlodeNode {
         }
     }
 
-    /// The height of a pin's row. A collapsed node puts every pin at the header's center.
+    /// The height of a pin's row, from the top of the node. Pins of a folded section or a folded
+    /// node sit close together.
     pub fn pin_offset(&self, row: usize) -> f32 {
-        if self.collapsed {
-            HEADER_HEIGHT / 2.0
-        } else {
-            pin_y(row)
-        }
+        self.row_places()
+            .get(row)
+            .map_or(HEADER_HEIGHT / 2.0, |place| place.y)
     }
 
     /// Where a port's wire attaches for an input, or None if this node has no such input.
@@ -720,16 +902,21 @@ impl FlodeNode {
         if self.collapsed {
             return Vec::new();
         }
+        let places = self.row_places();
         self.rows()
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
                 let id = row.knob?;
+                // A knob in a folded section is not on show. Its pin still is.
+                if places[index].shape != RowShape::Full {
+                    return None;
+                }
                 Some(KnobSlot {
                     id,
                     center: Point::new(
                         self.position.x + ROW_KNOB_CENTER_X,
-                        self.position.y + pin_y(index),
+                        self.position.y + places[index].y,
                     ),
                     pinned: row.input == Some(Port::Knob(id)),
                 })

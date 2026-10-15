@@ -195,19 +195,31 @@ impl Graph {
 
     /// Returns the terminal under `point`, if any.
     pub(super) fn terminal_at(&self, point: Point) -> Option<Terminal> {
+        // Pins of a folded section or node sit closer together than the hit radius, so more than
+        // one can be in reach. The nearest one wins.
+        let mut best: Option<(f32, Terminal)> = None;
+        let mut consider = |at: Point, terminal: Terminal| {
+            if near(at, point) {
+                let (dx, dy) = (at.x - point.x, at.y - point.y);
+                let distance = dx * dx + dy * dy;
+                if best.is_none_or(|(closest, _)| distance < closest) {
+                    best = Some((distance, terminal));
+                }
+            }
+        };
         for (index, node) in self.nodes.iter().enumerate() {
             for port in node.output_ports() {
-                if node.output_point(port).is_some_and(|p| near(p, point)) {
-                    return Some(Terminal::Out(index, port));
+                if let Some(at) = node.output_point(port) {
+                    consider(at, Terminal::Out(index, port));
                 }
             }
             for port in node.input_ports() {
-                if node.input_point(port).is_some_and(|p| near(p, point)) {
-                    return Some(Terminal::In(index, port));
+                if let Some(at) = node.input_point(port) {
+                    consider(at, Terminal::In(index, port));
                 }
             }
         }
-        None
+        best.map(|(_, terminal)| terminal)
     }
 
     /// Returns the top-most node under `point`, if any.

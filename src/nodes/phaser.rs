@@ -1,6 +1,6 @@
 //! The phaser node. A dropdown picks how many all-pass stages it runs.
 
-use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row, Section};
 
 pub struct Phaser;
 
@@ -18,12 +18,21 @@ impl NodeBehavior for Phaser {
             Row::input(Port::Audio).with_output(Port::Audio),
             Row::driven_knob(KnobId::LfoRate),
             Row::driven_knob(KnobId::Depth),
+            Row::driven_knob(KnobId::Mix),
+            Row::control(Control::Dropdown(0)),
+            // The rest of the sweep's shape folds away.
+            Row::section(0),
             Row::driven_knob(KnobId::Feedback),
             Row::driven_knob(KnobId::Center),
             Row::driven_knob(KnobId::Spread),
-            Row::driven_knob(KnobId::Mix),
-            Row::control(Control::Dropdown(0)),
         ]
+    }
+
+    fn sections(&self) -> &'static [Section] {
+        &[Section {
+            title: "Sweep",
+            collapsed: true,
+        }]
     }
 
     fn audio_in(&self) -> bool {

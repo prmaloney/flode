@@ -31,6 +31,10 @@ pub struct SavedNode {
     /// Missing in graphs saved before nodes could be switched off. Those load switched on.
     #[serde(default)]
     pub(super) bypassed: bool,
+    /// Which sections of the node are folded, by section number. Missing in graphs saved before
+    /// sections existed. Those load with each kind's own starting folds.
+    #[serde(default)]
+    pub(super) sections_collapsed: Vec<bool>,
     /// The dropdown rows, for oscillators, filters, and LFOs. Each one is a dropdown in order.
     #[serde(default)]
     pub(super) choices: Vec<usize>,
@@ -67,6 +71,7 @@ impl SavedNode {
             y: node.position.y,
             collapsed: node.collapsed,
             bypassed: node.bypassed,
+            sections_collapsed: node.sections_collapsed.clone(),
             choices: node.choices.to_vec(),
             choice: 0,
             switches: node.switches.to_vec(),
@@ -83,6 +88,11 @@ impl SavedNode {
         let mut node = FlodeNode::new(self.kind, Point::new(self.x, self.y));
         node.collapsed = self.collapsed;
         node.bypassed = self.bypassed;
+        for (section, &collapsed) in self.sections_collapsed.iter().enumerate() {
+            if section < node.sections_collapsed.len() {
+                node.sections_collapsed[section] = collapsed;
+            }
+        }
         node.choices = self.choices.clone();
         if self.choices.is_empty() {
             node.choices.push(self.choice);
