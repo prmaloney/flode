@@ -127,7 +127,7 @@ impl FlodeParams {
 impl Plugin for Flode {
     const NAME: &'static str = "Flode";
     const VENDOR: &'static str = "Patrick Maloney";
-    const URL: &'static str = "";
+    const URL: &'static str = "https://github.com/prmaloney/flode";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
