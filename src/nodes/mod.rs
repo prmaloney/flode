@@ -7,6 +7,7 @@
 //! beside it, and an output pin on the right edge. Under the rows a node can have one extra
 //! control, which is a dropdown or a switch.
 
+pub mod connection;
 pub mod envelope;
 pub mod filter;
 pub mod input;

@@ -2,12 +2,12 @@
 
 use crate::dsp::svf::FilterType;
 use crate::dsp::wavetable::Waveform;
+use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::{FlodeNode, NodeKind, Port};
 use nih_plug_iced::Point;
 use serde::{Deserialize, Serialize};
 
-use super::graph::*;
 
 /// The node graph as saved with the project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

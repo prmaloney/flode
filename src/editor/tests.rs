@@ -1,6 +1,7 @@
 //! Tests for the editor's graph model.
 
 use crate::dsp::wavetable::Waveform;
+use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::oscillator;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port};

@@ -1,7 +1,8 @@
 //! The graph model and its editing state: nodes, wires, and what the mouse is doing to them.
 
 use crate::editor::piano::Piano;
-use crate::nodes::filter::{self};
+use crate::nodes::connection::Connection;
+use crate::nodes::filter;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::lfo;
 use crate::nodes::map;
@@ -14,18 +15,8 @@ use crate::patch::control::{
 };
 use crate::routing::{Branch, EnvelopeSettings, Globals, LaneChain, LfoSettings, MixChain};
 use nih_plug_iced::{Point, Vector};
-use serde::{Deserialize, Serialize};
 
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
-
-/// A wire from an output port on one node to an input port on another.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Connection {
-    pub from: usize,
-    pub out: Port,
-    pub to: usize,
-    pub input: Port,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Terminal {
@@ -123,18 +114,6 @@ impl Default for Graph {
         graph.refresh_slots();
         graph
     }
-}
-
-/// True if a connection joins ports that exist and carry the same kind of signal. Audio goes to
-/// audio, and control goes to a knob.
-pub(super) fn link_is_valid(nodes: &[FlodeNode], link: &Connection) -> bool {
-    let (Some(from), Some(to)) = (nodes.get(link.from), nodes.get(link.to)) else {
-        return false;
-    };
-    link.from != link.to
-        && (link.out == Port::Audio) == link.input.is_audio()
-        && from.output_point(link.out).is_some()
-        && to.input_point(link.input).is_some()
 }
 
 impl Graph {
@@ -437,7 +416,7 @@ impl Graph {
         // Knob links name a node's own knobs. Wires drop out if their pins are gone.
         let connections = links
             .into_iter()
-            .filter(|link| link_is_valid(&nodes, link))
+            .filter(|link| link.is_valid(&nodes))
             .collect();
         let mut graph = Self::with(nodes, connections);
         graph.refresh_slots();
@@ -695,7 +674,7 @@ impl Graph {
             to,
             input,
         };
-        if !link_is_valid(&self.nodes, &link) {
+        if !link.is_valid(&self.nodes) {
             return;
         }
         self.connections
