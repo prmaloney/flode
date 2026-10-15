@@ -307,16 +307,10 @@ impl Graph {
     pub(super) fn link_under(&self, node: usize) -> Option<usize> {
         let dragged = &self.nodes[node];
         let behavior = dragged.kind.behavior();
-        // Audio nodes splice into audio wires. A node with more than one audio input, such as a
-        // mix node, has nowhere obvious to splice a single wire, so it is wired by hand instead.
-        // A node with a control input and output, such as a map, splices into a wire that drives
-        // a knob.
-        let audio_inputs = dragged
-            .input_ports()
-            .iter()
-            .filter(|p| p.is_audio())
-            .count();
-        let audio_node = behavior.audio_in() && behavior.audio_out() && audio_inputs <= 1;
+        // Audio nodes splice into audio wires. A node with several audio inputs, such as a mix
+        // node, takes the wire on its first one. A node with a control input and output, such as a
+        // map, splices into a wire that drives a knob.
+        let audio_node = behavior.audio_in() && behavior.audio_out();
         let control_node = dragged.input_ports().contains(&Port::Shape)
             && dragged.output_ports().contains(&Port::Shape);
         if !(audio_node || control_node) {
@@ -344,13 +338,19 @@ impl Graph {
     }
 
     /// Splices `node` into the connection `link`: the old source feeds the node, and the node
-    /// feeds the old target. Control wires are spliced through the node's shape pins.
+    /// feeds the old target. Control wires are spliced through the node's shape pins. An audio
+    /// wire goes into the node's first audio input, which is the top one on a node with several,
+    /// such as signal A on a mix.
     pub(super) fn insert_into(&mut self, node: usize, link: usize) {
         let old = self.connections[link];
         let (input, out) = if old.out.is_control_out() {
             (Port::Shape, Port::Shape)
         } else {
-            (Port::Audio, Port::Audio)
+            let first_audio = self.nodes[node]
+                .input_ports()
+                .into_iter()
+                .find(|port| port.is_audio());
+            (first_audio.unwrap_or(Port::Audio), Port::Audio)
         };
         self.connections[link] = Connection {
             from: old.from,

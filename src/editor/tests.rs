@@ -525,6 +525,46 @@ mod mix_tests {
         assert!(matches!(first_input.params, StageParams::Filter(_)));
     }
 
+    /// A mix node dropped on an audio wire splices in with the old source on input A, the top one,
+    /// and the mix feeding the old target.
+    #[test]
+    fn a_mix_dropped_on_an_audio_wire_joins_at_input_a() {
+        let mut graph = Graph::default();
+        let curve = graph.link_curve(&graph.connections[0]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        let mix = graph.add_node(NodeKind::Mix, Point::new(middle.x - 80.0, middle.y - 20.0));
+
+        assert_eq!(graph.link_under(mix), Some(0));
+        graph.insert_into(mix, 0);
+        graph.refresh_slots();
+
+        assert_eq!(graph.connections.len(), 2);
+        assert_eq!(graph.connections[0].from, 0);
+        assert_eq!(graph.connections[0].to, mix);
+        assert_eq!(graph.connections[0].input, Port::AudioIn(0));
+        assert_eq!(graph.connections[1].from, mix);
+        assert_eq!(graph.connections[1].out, Port::Audio);
+        assert_eq!(graph.connections[1].input, Port::Slot(0));
+
+        // The oscillator feeds signal A, and signal B waits for a wire.
+        let lane = graph.patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 2);
+        assert_eq!(lane.stages[1].inputs, [Some(0), None]);
+    }
+
+    /// A source with no audio input still does not splice into a wire.
+    #[test]
+    fn an_oscillator_dropped_on_an_audio_wire_does_not_splice() {
+        let mut graph = Graph::default();
+        let curve = graph.link_curve(&graph.connections[0]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        let osc = graph.add_node(
+            NodeKind::Oscillator,
+            Point::new(middle.x - 80.0, middle.y - 20.0),
+        );
+        assert_eq!(graph.link_under(osc), None);
+    }
+
     /// A chain without a mix node is a single oscillator.
     #[test]
     fn a_plain_oscillator_chain_is_one_stage() {
