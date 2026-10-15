@@ -4,7 +4,7 @@ use crate::editor::piano::Piano;
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::MAX_SLOTS;
-use crate::nodes::{Category, FlodeNode, NodeKind, Port, NODE_WIDTH};
+use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
@@ -419,6 +419,15 @@ impl Graph {
         let index = self.nodes.len() - 1;
         self.selected = Some(index);
         index
+    }
+
+    /// Makes `node` follow the cursor, centred on `point`, until the next press sets it down. A
+    /// press that lands while a wire is under the node splices the node into that wire.
+    pub(super) fn start_placing(&mut self, node: usize, point: Point) {
+        let grab = Vector::new(NODE_WIDTH / 2.0, HEADER_HEIGHT / 2.0);
+        self.nodes[node].position = Point::new(point.x - grab.x, point.y - grab.y);
+        self.selected = Some(node);
+        self.interaction = Interaction::Placing { node, grab };
     }
 
     /// How far a copy of a node sits from the original, so it does not hide it.

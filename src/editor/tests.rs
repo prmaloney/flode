@@ -760,6 +760,7 @@ mod bypass_and_duplicate_tests {
     use crate::editor::canvas::{Message, NodeEditor};
     use crate::editor::piano::PianoEvent;
     use crate::editor::style::MENU_ITEM_HEIGHT;
+    use crate::nodes::{HEADER_HEIGHT, NODE_WIDTH};
     use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
     use nih_plug_iced::mouse;
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
@@ -1083,10 +1084,15 @@ mod bypass_and_duplicate_tests {
         assert!(graph.nodes[0].bypassed);
         assert!(graph.menu.is_none());
 
+        // Duplicate leaves the copy in the placing state, following the cursor.
         let mut graph = Graph::default();
         click_entry(&mut graph, 0);
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.selected, Some(2));
+        assert!(matches!(
+            graph.interaction,
+            Interaction::Placing { node: 2, .. }
+        ));
 
         let mut graph = Graph::default();
         click_entry(&mut graph, 2);
@@ -1139,6 +1145,14 @@ mod bypass_and_duplicate_tests {
         assert!(!editor.graph.nodes[1].bypassed);
     }
 
+    fn move_cursor(editor: &mut NodeEditor, to: Point) {
+        editor.update(
+            Event::Mouse(mouse::Event::CursorMoved { position: to }),
+            bounds(),
+            Cursor::Available(to),
+        );
+    }
+
     /// Shift+D copies the selected node and selects the copy.
     #[test]
     fn shift_d_duplicates_the_selected_node() {
@@ -1149,6 +1163,57 @@ mod bypass_and_duplicate_tests {
         assert!(matches!(message, Some(Message::GraphChanged)));
         assert_eq!(editor.graph.nodes.len(), 3);
         assert_eq!(editor.graph.selected, Some(2));
+    }
+
+    /// The copy is placing: it sits centred under the cursor, follows it, and the next press sets
+    /// it down where it is.
+    #[test]
+    fn a_duplicate_follows_the_cursor_until_the_next_press() {
+        use nih_plug_iced::Vector;
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        let grab = Vector::new(NODE_WIDTH / 2.0, HEADER_HEIGHT / 2.0);
+
+        let first = Point::new(400.0, 300.0);
+        move_cursor(&mut editor, first);
+        press(&mut editor, KeyCode::D, Modifiers::SHIFT);
+        assert!(matches!(
+            editor.graph.interaction,
+            Interaction::Placing { node: 2, .. }
+        ));
+        let at = editor.graph.nodes[2].position;
+        assert_eq!((at.x, at.y), (first.x - grab.x, first.y - grab.y));
+
+        // It follows the cursor.
+        let second = Point::new(600.0, 250.0);
+        move_cursor(&mut editor, second);
+        let at = editor.graph.nodes[2].position;
+        assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
+
+        // The next press sets it down, and it stays when the cursor moves on.
+        editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds(),
+            Cursor::Available(second),
+        );
+        assert!(matches!(editor.graph.interaction, Interaction::Idle));
+        move_cursor(&mut editor, Point::new(100.0, 100.0));
+        let at = editor.graph.nodes[2].position;
+        assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
+    }
+
+    /// While a copy is being placed, Shift+D does not make another.
+    #[test]
+    fn shift_d_waits_while_a_node_is_being_placed() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        press(&mut editor, KeyCode::D, Modifiers::SHIFT);
+        release(&mut editor, KeyCode::D);
+        let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
+        assert!(message.is_none());
+        assert_eq!(editor.graph.nodes.len(), 3);
     }
 
     /// A plain D still plays a note, and does not copy anything.

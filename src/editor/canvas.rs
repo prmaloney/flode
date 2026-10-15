@@ -3,7 +3,7 @@
 
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
-use crate::nodes::{NodeKind, HEADER_HEIGHT, NODE_WIDTH, ROW_KNOB_DIAMETER};
+use crate::nodes::{NodeKind, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{
     event::{self, Event},
@@ -77,7 +77,7 @@ impl<'a> NodeEditor<'a> {
             if let Some(item) = menu_item_at(menu, point) {
                 match item {
                     MenuItem::Duplicate => {
-                        self.graph.duplicate_node(menu.node);
+                        self.duplicate_and_place(menu.node, point);
                     }
                     MenuItem::Bypass => {
                         self.graph.toggle_bypass(menu.node);
@@ -253,7 +253,15 @@ impl<'a> NodeEditor<'a> {
         };
         match shortcut {
             Shortcut::ToggleBypass => self.graph.toggle_bypass(index),
-            Shortcut::Duplicate => self.graph.duplicate_node(index).is_some(),
+            // The copy appears under the cursor. While a node is already being placed, the
+            // shortcut waits, so one press sets down one node.
+            Shortcut::Duplicate => {
+                if matches!(self.graph.interaction, Interaction::Placing { .. }) {
+                    return false;
+                }
+                let cursor = self.graph.view.to_world(self.graph.last_screen);
+                self.duplicate_and_place(index, cursor)
+            }
         }
     }
 
@@ -289,11 +297,20 @@ impl<'a> NodeEditor<'a> {
     /// Adds a node of `kind` centered on `point` and makes it follow the cursor until the next
     /// press places it.
     pub(super) fn place(&mut self, kind: NodeKind, point: Point) {
-        let grab = Vector::new(NODE_WIDTH / 2.0, HEADER_HEIGHT / 2.0);
-        let node = self
-            .graph
-            .add_node(kind, Point::new(point.x - grab.x, point.y - grab.y));
-        self.graph.interaction = Interaction::Placing { node, grab };
+        let node = self.graph.add_node(kind, point);
+        self.graph.start_placing(node, point);
+    }
+
+    /// Copies a node and makes the copy follow the cursor, like a node just added from the pill,
+    /// until the next press sets it down. Returns false for a node that can't be copied.
+    pub(super) fn duplicate_and_place(&mut self, index: usize, point: Point) -> bool {
+        match self.graph.duplicate_node(index) {
+            Some(copy) => {
+                self.graph.start_placing(copy, point);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Right press: selects the node under the cursor and opens its menu. A right press
