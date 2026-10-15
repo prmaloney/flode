@@ -4,7 +4,6 @@ use super::stage::StageState;
 use super::*;
 use crate::dsp::envelope::EnvPhase;
 use crate::dsp::mix::MixMode;
-use crate::dsp::warp::WarpMode;
 use crate::nodes::knobs::KnobId;
 use crate::patch::control::{KnobValue, MapStage, Param, Route, Source, MAX_MAPS};
 use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageParams, StageSpec};
@@ -289,103 +288,6 @@ fn a_driven_cutoff_follows_each_voices_own_envelope() {
         .collect();
     assert_eq!(cutoffs.len(), 2);
     assert!(cutoffs[0] > cutoffs[1] * 2.0, "{cutoffs:?}");
-}
-
-/// The power of `signal` at `freq`, from the Goertzel recurrence.
-fn power_at(signal: &[f32], freq: f32) -> f32 {
-    let coef = 2.0 * (std::f32::consts::TAU * freq / 44100.0).cos();
-    let (mut s1, mut s2) = (0.0f32, 0.0f32);
-    for &x in signal {
-        let s0 = x + coef * s1 - s2;
-        s2 = s1;
-        s1 = s0;
-    }
-    s1 * s1 + s2 * s2 - coef * s1 * s2
-}
-
-/// FM done in the mix node and FM done by the oscillator's own warp are the same modulation, so
-/// the same two sines give the same spectrum. The mix reads signal A from a delay line, and the
-/// oscillator reads its table at a moved phase.
-#[test]
-fn mix_fm_matches_the_oscillators_fm_warp() {
-    const DEPTH: f32 = 0.5;
-    let modulator = || osc(OscillatorParams::default());
-
-    // The oscillator way: the carrier warps its own phase by the modulator.
-    let warped = OscillatorParams {
-        warp: WarpMode::Fm,
-        warp_amount: Param::fixed(KnobId::WarpAmount, DEPTH),
-        ..OscillatorParams::default()
-    };
-    let by_warp = patch_with(
-        0,
-        &[
-            modulator(),
-            StageSpec::new(StageParams::Oscillator(warped)).with_input(0, 0),
-        ],
-    );
-
-    // The mix way: a plain carrier and a plain modulator go into an FM mix.
-    let fm_mix = StageSpec::new(StageParams::Mix(MixParams {
-        mode: MixMode::Fm,
-        amount: Param::fixed(KnobId::Mix, DEPTH),
-    }))
-    .with_input(0, 0)
-    .with_input(1, 1);
-    let by_mix = patch_with(0, &[osc(OscillatorParams::default()), modulator(), fm_mix]);
-
-    // Both play A4, so the sidebands land on the harmonics of 440 Hz.
-    let harmonics = |patch: &Patch| -> Vec<f32> {
-        let mut engine = engine_on(patch);
-        engine.note_on(69, 1.0);
-        let out = render(&mut engine, 14000);
-        let tail = &out[3000..];
-        (1..=4)
-            .map(|k| power_at(tail, 440.0 * k as f32))
-            .collect::<Vec<_>>()
-    };
-    let (warp, mix) = (harmonics(&by_warp), harmonics(&by_mix));
-    for k in 1..4 {
-        // Each harmonic's share of the carrier's power agrees to within a quarter.
-        let warp_share = warp[k] / warp[0];
-        let mix_share = mix[k] / mix[0];
-        assert!(
-            (mix_share / warp_share - 1.0).abs() < 0.25,
-            "harmonic {}: warp {warp_share}, mix {mix_share}",
-            k + 1
-        );
-    }
-}
-
-/// An FM pair plays through the engine: the modulator runs first in each voice, the carrier
-/// reads it, and the result differs from the same carrier with no modulator.
-#[test]
-fn an_fm_pair_sounds_different_from_the_plain_carrier() {
-    let carrier = |warp| OscillatorParams {
-        warp,
-        warp_amount: Param::fixed(KnobId::WarpAmount, 0.6),
-        ..OscillatorParams::default()
-    };
-    let modulator = osc(OscillatorParams {
-        octave: Param::fixed(KnobId::Octave, 1.0),
-        ..OscillatorParams::default()
-    });
-    let fm = StageSpec::new(StageParams::Oscillator(carrier(WarpMode::Fm))).with_input(0, 0);
-
-    let mut with_fm = engine_on(&patch_with(0, &[modulator, fm]));
-    let mut plain = engine_on(&patch_with(0, &[osc(carrier(WarpMode::None))]));
-    with_fm.note_on(60, 1.0);
-    plain.note_on(60, 1.0);
-
-    let fm_out = render(&mut with_fm, 4410);
-    let plain_out = render(&mut plain, 4410);
-    assert!(peak(&fm_out) > 0.05);
-    let difference: f32 = fm_out
-        .iter()
-        .zip(&plain_out)
-        .map(|(a, b)| (a - b).abs())
-        .sum();
-    assert!(difference > 1.0, "{difference}");
 }
 
 /// A wide unison stack through a filter, then a mix, keeps its stereo image to the output.

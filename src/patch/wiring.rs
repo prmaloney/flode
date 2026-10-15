@@ -377,7 +377,6 @@ impl LaneBuilder {
 mod tests {
     use super::*;
     use crate::dsp::mix::MixMode;
-    use crate::dsp::warp::WarpMode;
     use nih_plug_iced::Point;
 
     fn node(kind: NodeKind) -> FlodeNode {
@@ -640,57 +639,6 @@ mod tests {
             let audio_ports = ports.iter().filter(|port| port.is_audio()).count();
             assert_eq!(audio_ports, params.input_count(), "{kind:?}");
         }
-    }
-
-    /// One oscillator wired to another's FM input feeds it, and the modulator is placed first.
-    #[test]
-    fn an_oscillator_can_feed_anothers_fm_input() {
-        let mut carrier = node(NodeKind::Oscillator);
-        carrier.choose(1, WarpMode::Fm as usize);
-        let nodes = vec![node(NodeKind::Oscillator), carrier, node(NodeKind::Output)];
-        let links = vec![audio(0, 1, Port::AudioIn(0)), audio(1, 2, Port::Slot(0))];
-        let lane = lane(nodes, links, 2);
-        assert_eq!(lane.stages.len(), 2);
-        assert_eq!(lane.stages[1].inputs, [Some(0), None]);
-        assert!(in_signal_order(&lane));
-    }
-
-    /// The same wire does nothing once the warp is not FM, and the modulator drops out of the
-    /// slot, since nothing else reads it.
-    #[test]
-    fn the_fm_wire_is_ignored_under_other_warps() {
-        let nodes = vec![
-            node(NodeKind::Oscillator),
-            node(NodeKind::Oscillator),
-            node(NodeKind::Output),
-        ];
-        let links = vec![audio(0, 1, Port::AudioIn(0)), audio(1, 2, Port::Slot(0))];
-        let lane = lane(nodes, links, 2);
-        assert_eq!(lane.stages.len(), 1);
-        assert_eq!(lane.stages[0].inputs, [None, None]);
-    }
-
-    /// A modulator can also play: wired to the FM input and to a mix, it runs once and feeds both.
-    #[test]
-    fn a_modulator_can_also_be_heard() {
-        let mut carrier = node(NodeKind::Oscillator);
-        carrier.choose(1, WarpMode::Fm as usize);
-        let nodes = vec![
-            node(NodeKind::Oscillator), // 0: modulator
-            carrier,                    // 1
-            node(NodeKind::Mix),        // 2
-            node(NodeKind::Output),     // 3
-        ];
-        let links = vec![
-            audio(0, 1, Port::AudioIn(0)),
-            audio(0, 2, Port::AudioIn(0)),
-            audio(1, 2, Port::AudioIn(1)),
-            audio(2, 3, Port::Slot(0)),
-        ];
-        let lane = lane(nodes, links, 3);
-        assert_eq!(lane.stages.len(), 3);
-        assert_eq!(lane.stages[1].inputs[0], Some(0));
-        assert_eq!(lane.stages[2].inputs, [Some(0), Some(1)]);
     }
 
     /// A node that makes no audio makes no stage.

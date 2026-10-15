@@ -15,8 +15,7 @@
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::delay::DELAY_CAPACITY;
 use crate::dsp::frame::Frame;
-use crate::dsp::mix::MixMode;
-use crate::dsp::warp::fm_depth;
+use crate::dsp::mix::{fm_depth, MixMode};
 use crate::patch::stage::{MixParams, MAX_INPUTS};
 
 pub struct Mix;

@@ -15,6 +15,17 @@ pub enum MixMode {
     Fm = 3,
 }
 
+/// How far a full-scale modulator moves the phase at the top of the mix amount, in cycles. One
+/// cycle is a modulation index of about 6.3. Tuned by ear.
+const FM_MAX_CYCLES: f32 = 2.0;
+
+/// How far the modulator pushes the phase, in cycles, per unit of modulator signal. The curve is
+/// squared so the low end of the knob has fine control, where the sound changes fastest.
+pub fn fm_depth(amount: f32) -> f32 {
+    let a = amount.clamp(0.0, 1.0);
+    a * a * FM_MAX_CYCLES
+}
+
 impl MixMode {
     /// Every mode, in the order the dropdown lists them.
     pub const ALL: [MixMode; 4] = [
@@ -64,6 +75,16 @@ mod tests {
     #[test]
     fn am_at_zero_mix_passes_a_through() {
         assert_eq!(MixMode::Am.combine(0.3, 0.9, 0.0), 0.3);
+    }
+
+    /// FM depth grows with the amount, starts at nothing, and tops out at its maximum.
+    #[test]
+    fn fm_depth_rises_from_zero_to_its_maximum() {
+        assert_eq!(fm_depth(0.0), 0.0);
+        assert_eq!(fm_depth(1.0), FM_MAX_CYCLES);
+        assert!(fm_depth(0.25) < fm_depth(0.5) && fm_depth(0.5) < fm_depth(1.0));
+        // The knob clamps, so a driven amount can't push past the maximum.
+        assert_eq!(fm_depth(3.0), FM_MAX_CYCLES);
     }
 
     #[test]

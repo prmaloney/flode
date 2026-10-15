@@ -35,17 +35,17 @@ fn busy_patch() -> Patch {
             .with_input(1, 1),
         StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 3),
     ]);
-    // A second slot plays an FM pair: a sine modulator feeding a saw carrier.
-    let carrier = OscillatorParams {
+    // A second slot plays a warped, panned saw.
+    let warped = OscillatorParams {
         waveform: Waveform::Saw,
-        warp: WarpMode::Fm,
+        warp: WarpMode::Pwm,
         warp_amount: Param::fixed(KnobId::WarpAmount, 0.8),
+        pan: Param::fixed(KnobId::Pan, -0.5),
         ..OscillatorParams::default()
     };
-    patch.lanes[1].stages.extend([
-        StageSpec::new(StageParams::Oscillator(OscillatorParams::default())),
-        StageSpec::new(StageParams::Oscillator(carrier)).with_input(0, 0),
-    ]);
+    patch.lanes[1]
+        .stages
+        .push(StageSpec::new(StageParams::Oscillator(warped)));
     // A third slot mixes two oscillators by FM, which runs a delay line per voice.
     let fm_mix = MixParams {
         mode: MixMode::Fm,

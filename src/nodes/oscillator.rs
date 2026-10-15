@@ -39,11 +39,6 @@ impl NodeBehavior for Oscillator {
         rows.push(Row::driven_knob(KnobId::PhaseRandom));
         rows.push(Row::control(Control::Dropdown(1)));
         rows.push(Row::driven_knob(KnobId::WarpAmount));
-        // Under the FM warp, another oscillator's output wired here modulates this one's phase.
-        // It sits below the amount so the warp dropdown stays put when the mode changes.
-        if warp_mode(node) == WarpMode::Fm {
-            rows.push(Row::input(Port::AudioIn(0)).labelled("FM"));
-        }
         rows.push(Row::driven_knob(KnobId::Pan));
         rows.push(Row::driven_knob(KnobId::OscGain));
         rows
@@ -79,12 +74,15 @@ pub fn noise_type(node: &FlodeNode) -> NoiseType {
 
 /// The warp mode an oscillator node applies.
 pub fn warp_mode(node: &FlodeNode) -> WarpMode {
-    WarpMode::ALL[node.choice(1).min(WarpMode::ALL.len() - 1)]
+    WarpMode::ALL
+        .get(node.choice(1))
+        .copied()
+        .unwrap_or_default()
 }
 
 /// The warp dropdown's rows.
-pub const WARP_LABELS: [&str; 9] = [
-    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize", "FM",
+pub const WARP_LABELS: [&str; 8] = [
+    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize",
 ];
 
 #[cfg(test)]
@@ -101,23 +99,25 @@ mod tests {
     #[test]
     fn the_warp_labels_match_the_modes() {
         assert_eq!(WARP_LABELS.len(), WarpMode::ALL.len());
-        assert_eq!(WARP_LABELS[WarpMode::Fm as usize], "FM");
+        assert!(!WARP_LABELS.contains(&"FM"));
     }
 
-    /// The FM pin shows only under the FM warp, below the warp amount, and says what it is.
+    /// An oscillator has no audio input under any warp. FM is a mix node mode.
     #[test]
-    fn the_fm_input_shows_only_under_the_fm_warp() {
+    fn an_oscillator_has_no_audio_input() {
         let mut node = oscillator();
-        assert!(!node.input_ports().contains(&Port::AudioIn(0)));
+        for choice in 0..WarpMode::ALL.len() {
+            node.choose(1, choice);
+            assert!(!node.input_ports().iter().any(|port| port.is_audio()));
+        }
+    }
 
-        node.choose(1, WarpMode::Fm as usize);
-        assert_eq!(warp_mode(&node), WarpMode::Fm);
-        let rows = node.rows();
-        let fm = rows
-            .iter()
-            .position(|row| row.input == Some(Port::AudioIn(0)))
-            .expect("an FM input row");
-        assert_eq!(rows[fm].label, Some("FM"));
-        assert_eq!(rows[fm - 1].knob, Some(KnobId::WarpAmount));
+    /// A graph saved while the oscillator had an FM warp holds a choice past the last mode. It
+    /// loads as no warp, not as whichever mode is last.
+    #[test]
+    fn a_saved_choice_past_the_last_warp_means_none() {
+        let mut node = oscillator();
+        node.choose(1, WarpMode::ALL.len());
+        assert_eq!(warp_mode(&node), WarpMode::None);
     }
 }
