@@ -151,3 +151,59 @@ impl KnobValue {
         id.to_plain(self.normalized(levels))
     }
 }
+
+/// A knob a stage reads. It pairs the knob's id with the node's value and control route, so a
+/// stage never repeats which knob it is reading.
+#[allow(dead_code)] // Used once the engine runs the stage arena.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Param {
+    id: KnobId,
+    knob: KnobValue,
+}
+
+#[allow(dead_code)]
+impl Param {
+    pub const fn new(id: KnobId, knob: KnobValue) -> Self {
+        Self { id, knob }
+    }
+
+    /// A param at the knob's default value, with no control wire.
+    pub fn default_of(id: KnobId) -> Self {
+        Self::fixed(id, id.default_plain())
+    }
+
+    /// A param held at `plain`, in the knob's own units, with no control wire.
+    pub fn fixed(id: KnobId, plain: f32) -> Self {
+        Self::new(
+            id,
+            KnobValue {
+                value: id.to_normalized(plain),
+                route: None,
+            },
+        )
+    }
+
+    /// The value now, in the knob's own units. A driven knob follows its control source.
+    pub fn plain(&self, levels: &ControlLevels) -> f32 {
+        self.knob.plain(self.id, levels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fixed_param_reads_back_its_value() {
+        let levels = ControlLevels::default();
+        assert_eq!(Param::fixed(KnobId::Octave, 1.0).plain(&levels), 1.0);
+        assert!((Param::fixed(KnobId::Detune, 40.0).plain(&levels) - 40.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_default_param_reads_the_knobs_default() {
+        let levels = ControlLevels::default();
+        let unison = Param::default_of(KnobId::Unison).plain(&levels);
+        assert_eq!(unison, KnobId::Unison.default_plain());
+    }
+}

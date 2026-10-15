@@ -1,0 +1,322 @@
+//! Audio stages at run time. Each kind of stage implements `AudioStage`: it builds its per-voice
+//! state when a note starts, and makes one output sample per tick from its input samples. The
+//! patch describes a slot's stages as a flat arena, and `evaluate` runs the arena for one voice.
+//!
+//! Dispatch goes through `StageParams` and `StageState`, two closed enums, so the audio thread
+//! never allocates or calls through a trait object.
+
+mod filter;
+mod mix;
+mod oscillator;
+
+use crate::dsp::envelope::Adsr;
+use crate::dsp::rng::Rng;
+use crate::dsp::wavetable::WaveTables;
+use crate::patch::control::{ControlLevels, ENV_SLOTS};
+use crate::patch::stage::{LaneGraph, StageParams, MAX_INPUTS, MAX_STAGES};
+
+pub use filter::{Filter, FilterState};
+pub use mix::Mix;
+pub use oscillator::{Oscillator, OscillatorState};
+
+/// One kind of audio node, run once per voice. `Params` is what the patch says about the stage,
+/// and `State` is what a voice remembers between samples.
+pub trait AudioStage {
+    type Params;
+    type State;
+    /// How many audio inputs the stage reads. A source has none.
+    const INPUTS: usize;
+
+    /// Builds a voice's state for this stage when a note starts.
+    fn start(params: &Self::Params, ctx: &mut StartContext) -> Self::State;
+
+    /// One output sample. `inputs` holds the samples on the stage's audio inputs, with silence on
+    /// an input that has no wire.
+    fn process(
+        params: &Self::Params,
+        state: &mut Self::State,
+        inputs: &[f32; MAX_INPUTS],
+        tick: &mut Tick,
+    ) -> f32;
+}
+
+/// What a stage reads when a note starts.
+pub struct StartContext<'a> {
+    pub levels: &'a ControlLevels,
+    pub rng: &'a mut Rng,
+}
+
+/// What every stage reads while it runs for one voice and one sample.
+pub struct Tick<'a> {
+    /// The control levels this voice sees: its own envelopes, and the shared LFO and MIDI levels.
+    pub levels: &'a ControlLevels,
+    /// The voice's envelope copies, one per envelope node and then the bypass copy.
+    pub envs: &'a [Adsr; ENV_SLOTS],
+    pub velocity: f32,
+    /// The voice's pitch, as a phase step per sample.
+    pub pitch_step: f32,
+    /// True while any envelope node is in the patch.
+    pub envelopes_active: bool,
+    pub tables: &'a WaveTables,
+    pub sample_rate: f32,
+    /// The share of the gap a smoothed value closes each sample.
+    pub smooth: f32,
+    pub rng: &'a mut Rng,
+}
+
+/// A voice's memory for one stage.
+#[derive(Clone, Copy)]
+pub enum StageState {
+    /// A slot of the arena that holds no stage.
+    Empty,
+    Oscillator(OscillatorState),
+    Filter(FilterState),
+    Mix,
+}
+
+impl StageState {
+    /// The state of a voice's whole arena before any note has started.
+    pub const ARENA: [StageState; MAX_STAGES] = [StageState::Empty; MAX_STAGES];
+
+    /// Builds the state a stage starts a note with.
+    pub fn start(params: &StageParams, ctx: &mut StartContext) -> Self {
+        match params {
+            StageParams::Oscillator(p) => Self::Oscillator(Oscillator::start(p, ctx)),
+            StageParams::Filter(p) => Self::Filter(Filter::start(p, ctx)),
+            StageParams::Mix(p) => {
+                Mix::start(p, ctx);
+                Self::Mix
+            }
+        }
+    }
+
+    /// One sample from a stage. A state that does not match its stage makes silence, which only
+    /// happens if a patch changes under a voice. The next note starts clean.
+    pub fn process(
+        &mut self,
+        params: &StageParams,
+        inputs: &[f32; MAX_INPUTS],
+        tick: &mut Tick,
+    ) -> f32 {
+        match (params, self) {
+            (StageParams::Oscillator(p), Self::Oscillator(s)) => {
+                Oscillator::process(p, s, inputs, tick)
+            }
+            (StageParams::Filter(p), Self::Filter(s)) => Filter::process(p, s, inputs, tick),
+            (StageParams::Mix(p), Self::Mix) => Mix::process(p, &mut (), inputs, tick),
+            _ => 0.0,
+        }
+    }
+}
+
+/// Starts every stage of a slot for a new voice.
+pub fn start_arena(graph: &LaneGraph, ctx: &mut StartContext) -> [StageState; MAX_STAGES] {
+    let mut states = StageState::ARENA;
+    for (state, spec) in states.iter_mut().zip(&graph.stages) {
+        *state = StageState::start(&spec.params, ctx);
+    }
+    states
+}
+
+/// Runs a slot's stages for one voice and one sample, and returns what the last stage makes. The
+/// arena is in signal order, so each stage finds its inputs already computed.
+pub fn evaluate(graph: &LaneGraph, states: &mut [StageState; MAX_STAGES], tick: &mut Tick) -> f32 {
+    let mut outputs = [0.0f32; MAX_STAGES];
+    for (index, spec) in graph.stages.iter().enumerate() {
+        let inputs = spec
+            .inputs
+            .map(|source| source.map_or(0.0, |i| outputs[i as usize]));
+        outputs[index] = states[index].process(&spec.params, &inputs, tick);
+    }
+    graph
+        .stages
+        .len()
+        .checked_sub(1)
+        .map_or(0.0, |root| outputs[root])
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! Owns what a `Tick` borrows, so a test can run a stage without an engine around it.
+
+    use super::*;
+    use crate::dsp::envelope::Adsr;
+
+    pub struct Rig {
+        pub levels: ControlLevels,
+        pub envs: [Adsr; ENV_SLOTS],
+        pub tables: WaveTables,
+        pub rng: Rng,
+        pub pitch_step: f32,
+    }
+
+    impl Rig {
+        /// A rig at 440 Hz and 44.1 kHz, with the bypass envelope open.
+        pub fn new() -> Self {
+            let mut envs = [Adsr::START; ENV_SLOTS];
+            envs[ENV_SLOTS - 1].level = 1.0;
+            Self {
+                levels: ControlLevels::default(),
+                envs,
+                tables: WaveTables::new(),
+                rng: Rng::default(),
+                pitch_step: 440.0 / 44100.0,
+            }
+        }
+
+        pub fn start_context(&mut self) -> StartContext<'_> {
+            StartContext {
+                levels: &self.levels,
+                rng: &mut self.rng,
+            }
+        }
+
+        pub fn tick(&mut self) -> Tick<'_> {
+            Tick {
+                levels: &self.levels,
+                envs: &self.envs,
+                velocity: 1.0,
+                pitch_step: self.pitch_step,
+                envelopes_active: false,
+                tables: &self.tables,
+                sample_rate: 44100.0,
+                smooth: 0.01,
+                rng: &mut self.rng,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::Rig;
+    use super::*;
+    use crate::dsp::mix::MixMode;
+    use crate::dsp::wavetable::Waveform;
+    use crate::nodes::knobs::KnobId;
+    use crate::patch::control::Param;
+    use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageSpec};
+
+    fn osc(waveform: Waveform) -> StageSpec {
+        StageSpec::new(StageParams::Oscillator(OscillatorParams {
+            waveform,
+            ..OscillatorParams::default()
+        }))
+    }
+
+    fn low_pass(cutoff: f32, source: u8) -> StageSpec {
+        StageSpec::new(StageParams::Filter(FilterParams {
+            cutoff: Param::fixed(KnobId::Cutoff, cutoff),
+            resonance: Param::fixed(KnobId::Resonance, 0.0),
+            ..FilterParams::default()
+        }))
+        .with_input(0, source)
+    }
+
+    fn mix(mode: MixMode, amount: f32, a: u8, b: u8) -> StageSpec {
+        StageSpec::new(StageParams::Mix(MixParams {
+            mode,
+            amount: Param::fixed(KnobId::Mix, amount),
+        }))
+        .with_input(0, a)
+        .with_input(1, b)
+    }
+
+    fn lane(stages: &[StageSpec]) -> LaneGraph {
+        let mut lane = LaneGraph::silent(Param::default_of(KnobId::Slot1));
+        lane.stages.extend(stages.iter().copied());
+        lane
+    }
+
+    /// Runs one voice of a lane for `samples` and returns the peak after the first half.
+    fn peak(lane: &LaneGraph, samples: usize) -> f32 {
+        let mut rig = Rig::new();
+        let mut states = start_arena(lane, &mut rig.start_context());
+        let mut peak = 0.0f32;
+        for n in 0..samples {
+            let out = evaluate(lane, &mut states, &mut rig.tick());
+            if n >= samples / 2 {
+                peak = peak.max(out.abs());
+            }
+        }
+        peak
+    }
+
+    #[test]
+    fn an_empty_lane_is_silent() {
+        assert_eq!(peak(&lane(&[]), 1000), 0.0);
+    }
+
+    /// A single oscillator reaches the output.
+    #[test]
+    fn a_lone_oscillator_plays() {
+        assert!(peak(&lane(&[osc(Waveform::Sine)]), 4000) > 0.9);
+    }
+
+    /// A filter sits inside one branch of a mix. The old chain could not do this. At zero mix the
+    /// output is branch A, which the low pass has all but removed.
+    #[test]
+    fn a_filter_can_sit_inside_a_mix_branch() {
+        let stages = |amount| {
+            lane(&[
+                osc(Waveform::Sine),
+                osc(Waveform::Square),
+                low_pass(60.0, 0),
+                mix(MixMode::Crossfade, amount, 2, 1),
+            ])
+        };
+        let filtered_a = peak(&stages(0.0), 8000);
+        let plain_b = peak(&stages(1.0), 8000);
+        assert!(filtered_a < 0.1, "{filtered_a}");
+        assert!(plain_b > 0.9, "{plain_b}");
+    }
+
+    /// Two filters in a row cut more than one.
+    #[test]
+    fn filters_in_series_both_run() {
+        let one = lane(&[osc(Waveform::Sine), low_pass(200.0, 0)]);
+        let two = lane(&[osc(Waveform::Sine), low_pass(200.0, 0), low_pass(200.0, 1)]);
+        assert!(peak(&two, 8000) < peak(&one, 8000) * 0.7);
+    }
+
+    /// An input with no wire is silence, so a crossfade to it fades the other signal out.
+    #[test]
+    fn an_unwired_input_is_silent() {
+        let unwired = StageSpec::new(StageParams::Mix(MixParams {
+            mode: MixMode::Crossfade,
+            amount: Param::fixed(KnobId::Mix, 1.0),
+        }))
+        .with_input(0, 0);
+        assert!(peak(&lane(&[osc(Waveform::Sine), unwired]), 4000) < 1e-3);
+    }
+
+    /// One oscillator wired to both inputs runs once and feeds both. Ring modulating it with
+    /// itself can only be positive.
+    #[test]
+    fn one_stage_can_feed_two_inputs() {
+        let lane = lane(&[osc(Waveform::Sine), mix(MixMode::RingMod, 1.0, 0, 0)]);
+        let mut rig = Rig::new();
+        let mut states = start_arena(&lane, &mut rig.start_context());
+        let lowest = (0..2000)
+            .map(|_| evaluate(&lane, &mut states, &mut rig.tick()))
+            .fold(f32::MAX, f32::min);
+        assert!(lowest >= 0.0, "{lowest}");
+    }
+
+    /// A voice's state for a stage that no longer matches its params makes silence, not a panic.
+    #[test]
+    fn a_mismatched_state_is_silent() {
+        let mut rig = Rig::new();
+        let params = StageParams::Mix(MixParams::default());
+        let mut state = StageState::Empty;
+        assert_eq!(state.process(&params, &[1.0, 1.0], &mut rig.tick()), 0.0);
+    }
+
+    /// Every stage kind reports how many inputs the compiler should wire.
+    #[test]
+    fn each_stage_declares_its_inputs() {
+        assert_eq!(Oscillator::INPUTS, 0);
+        assert_eq!(Filter::INPUTS, 1);
+        assert_eq!(Mix::INPUTS, 2);
+    }
+}

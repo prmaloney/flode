@@ -12,11 +12,14 @@ use std::sync::{Arc, Mutex};
 
 mod dsp;
 mod editor;
+#[allow(dead_code)] // The engine switches over to the stage arena in a later step.
+mod engine;
 mod nodes;
 mod patch;
 mod routing;
 
 use dsp::envelope::{Adsr, AdsrConfig, FADE_SECONDS};
+use dsp::gain::db_to_linear;
 use dsp::noise::{NoiseState, NoiseType};
 use dsp::pitch::transpose_ratio;
 use dsp::rng::Rng;
@@ -25,7 +28,7 @@ use dsp::warp::{warp_phase, warp_value, WarpMode};
 use dsp::wavetable::{WaveTables, Waveform};
 use editor::piano::PianoEvent;
 use nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
-use nodes::knobs::{KnobId, GAIN_MIN_DB, MAX_UNISON};
+use nodes::knobs::{KnobId, MAX_UNISON};
 use nodes::lfo;
 use nodes::output::{slot_knob, MAX_SLOTS};
 use patch::control::{ControlLevels, KnobValue, ENV_SLOTS, MAX_ENVELOPES, MAX_LFOS};
@@ -609,15 +612,6 @@ impl Default for FlodeParams {
             editor_state: editor::default_state(),
             graph: Mutex::new(editor::saved::SavedGraph::default()),
         }
-    }
-}
-
-/// The linear gain for a level in dB. A gain at its minimum is exactly silent.
-fn db_to_linear(db: f32) -> f32 {
-    if db <= GAIN_MIN_DB {
-        0.0
-    } else {
-        util::db_to_gain_fast(db)
     }
 }
 

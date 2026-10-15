@@ -7,7 +7,7 @@ use nih_plug::prelude::FloatRange;
 use serde::{Deserialize, Serialize};
 
 /// A gain knob's minimum, in dB. At this value the gain is exactly silent.
-pub const GAIN_MIN_DB: f32 = -30.0;
+pub const GAIN_MIN_DB: f32 = crate::dsp::gain::SILENT_DB;
 
 /// The most unison voices an oscillator can run.
 pub const MAX_UNISON: usize = 7;
