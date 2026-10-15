@@ -111,6 +111,23 @@ mod slot_tests {
             .any(|row| row.knob == Some(KnobId::Slot2)));
     }
 
+    /// Saving and loading a graph with several output slots keeps every wire. The slot pins show
+    /// only for connected slots, so a load has to count the wires before it checks them.
+    #[test]
+    fn wires_into_later_output_slots_survive_saving() {
+        let mut graph = Graph::default();
+        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
+        let third = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 400.0));
+        graph.connect(second, Port::Audio, 1, Port::Slot(1));
+        graph.connect(third, Port::Audio, 1, Port::Slot(2));
+        assert_eq!(graph.connections.len(), 3);
+
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.connections, graph.connections);
+        assert_eq!(loaded.nodes[1].used, 3);
+        assert!(loaded.patch().lanes[2].is_active());
+    }
+
     /// Two oscillators wired to two slots keep their own knobs. Turning one does not move the other.
     #[test]
     fn two_oscillators_keep_separate_knobs() {

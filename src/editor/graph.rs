@@ -110,6 +110,27 @@ impl Default for Graph {
     }
 }
 
+/// Sets how many slot pins each output node shows for these wires. A wire to a pin that is not
+/// shown is invalid, so a load calls this before it checks the wires it read.
+fn show_slots(nodes: &mut [FlodeNode], connections: &[Connection]) {
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if node.kind != NodeKind::Output {
+            continue;
+        }
+        let used = connections
+            .iter()
+            .filter(|c| c.to == index)
+            .filter_map(|c| match c.input {
+                Port::Slot(slot) => Some(slot + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        node.used = used.min(MAX_SLOTS);
+        node.slots = (node.used + 1).min(MAX_SLOTS);
+    }
+}
+
 impl Graph {
     pub(super) fn with(nodes: Vec<FlodeNode>, connections: Vec<Connection>) -> Self {
         Self {
@@ -240,6 +261,10 @@ impl Graph {
                 links[index].input = Port::Slot(taken);
             }
         }
+        // Slot pins show only for connected slots, so they are counted before the wires are
+        // checked. Otherwise every wire past the first slot would look like it has no pin.
+        let mut nodes = nodes;
+        show_slots(&mut nodes, &links);
         // Knob links name a node's own knobs. Wires drop out if their pins are gone.
         let connections = links
             .into_iter()
@@ -279,25 +304,7 @@ impl Graph {
     /// Sets how many slot pins each output node shows. A pin shows for each connected slot, and
     /// one empty pin sits below the last of them.
     pub(super) fn refresh_slots(&mut self) {
-        let used: Vec<usize> = (0..self.nodes.len())
-            .map(|index| {
-                self.connections
-                    .iter()
-                    .filter(|c| c.to == index)
-                    .filter_map(|c| match c.input {
-                        Port::Slot(slot) => Some(slot + 1),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect();
-        for (node, used) in self.nodes.iter_mut().zip(used) {
-            if node.kind == NodeKind::Output {
-                node.used = used.min(MAX_SLOTS);
-                node.slots = (node.used + 1).min(MAX_SLOTS);
-            }
-        }
+        show_slots(&mut self.nodes, &self.connections);
     }
 
     /// The audio connection that a node would be inserted into if dropped here. Only an
