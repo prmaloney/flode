@@ -156,6 +156,9 @@ pub struct Graph {
     pub(super) link_target: Option<usize>,
     /// The key on the strip the mouse holds down, and so the note it is playing.
     pub(super) mouse_note: Option<u8>,
+    /// True when the computer keyboard plays notes, which is in the standalone app. The strip
+    /// marks the keys it plays.
+    pub(super) computer_keys: bool,
     /// What the cursor is over, if it is over a dropdown or one of its open rows.
     pub(super) hover: Option<Hover>,
     /// The category whose list is open under the pill.
@@ -282,6 +285,7 @@ impl Graph {
             link_target: None,
             hover: None,
             mouse_note: None,
+            computer_keys: false,
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
@@ -419,10 +423,12 @@ impl Graph {
     fn replace_with(&mut self, fresh: Graph, macros: [f32; MACRO_COUNT]) {
         let view = self.view;
         let piano = std::mem::take(&mut self.piano);
+        let computer_keys = self.computer_keys;
         let dir = self.preset_dir.clone();
         *self = fresh;
         self.view = view;
         self.piano = piano;
+        self.computer_keys = computer_keys;
         self.preset_dir = dir;
         for (index, &value) in macros.iter().enumerate() {
             self.macro_edits.push(MacroEdit::Begin(index));

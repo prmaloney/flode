@@ -142,6 +142,7 @@ impl IcedEditor for FlodeEditor {
             Err(_) => graph::Graph::default(),
         };
         demo::apply(&mut graph);
+        graph.computer_keys = note_tx.is_some();
         link.publish(graph.patch());
         // The demo hook can hold a note down from the start, so a picture shows live signals.
         if let (Some(tx), Some(note)) = (&note_tx, demo::note()) {

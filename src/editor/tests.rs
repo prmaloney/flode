@@ -674,7 +674,7 @@ mod lfo_retrigger_tests {
 mod layering_tests {
     use super::*;
     use crate::editor::canvas::{Message, NodeEditor};
-    use crate::editor::piano;
+    use crate::editor::piano::{self, PianoEvent};
     use nih_plug_iced::mouse;
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
 
@@ -809,6 +809,84 @@ mod layering_tests {
             Cursor::Available(Point::new(500.0, strip.y + strip.height - 4.0)),
         );
         assert!(matches!(message, Some(Message::Note(_))), "{message:?}");
+    }
+
+    /// Presses the left mouse button at `at` in a 1024 by 712 editor.
+    fn press_at(graph: &mut Graph, at: Point) -> Option<Message> {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        };
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let (_, message) = editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            Cursor::Available(at),
+        );
+        message
+    }
+
+    fn button_center(direction: i32) -> Point {
+        let strip = piano::strip_bounds(Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        });
+        // The buttons sit in the column at the strip's left, in its lower half.
+        let x = if direction < 0 { 34.0 } else { 82.0 };
+        Point::new(x, strip.y + 44.0)
+    }
+
+    /// The octave buttons shift the keys by an octave, and play no note.
+    #[test]
+    fn the_octave_buttons_shift_the_keys() {
+        let mut graph = minimal_graph();
+        assert_eq!(graph.piano.octave(), 0);
+        assert!(press_at(&mut graph, button_center(1)).is_none());
+        assert_eq!(graph.piano.octave(), 1);
+        assert!(press_at(&mut graph, button_center(1)).is_none());
+        assert_eq!(graph.piano.octave(), 2);
+        assert!(press_at(&mut graph, button_center(-1)).is_none());
+        assert_eq!(graph.piano.octave(), 1);
+        assert!(graph.mouse_note.is_none());
+    }
+
+    /// After a shift, a click on the first key plays the note an octave up.
+    #[test]
+    fn a_click_after_a_shift_plays_the_shifted_note() {
+        let mut graph = minimal_graph();
+        press_at(&mut graph, button_center(1));
+        let strip = piano::strip_bounds(Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        });
+        let first_key = Point::new(piano::CONTROLS_WIDTH + 4.0, strip.y + strip.height - 4.0);
+        let message = press_at(&mut graph, first_key);
+        assert!(matches!(
+            message,
+            Some(Message::Note(PianoEvent::NoteOn { note: 60, .. }))
+        ));
+    }
+
+    /// The octave column has no keys. A press on it, away from the buttons, plays nothing and does
+    /// not start dragging the graph.
+    #[test]
+    fn a_press_in_the_octave_column_plays_nothing() {
+        let mut graph = minimal_graph();
+        let strip = piano::strip_bounds(Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        });
+        assert!(press_at(&mut graph, Point::new(6.0, strip.y + 4.0)).is_none());
+        assert!(graph.mouse_note.is_none());
+        assert_eq!(graph.piano.octave(), 0);
     }
 }
 

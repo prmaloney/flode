@@ -616,7 +616,12 @@ impl<'a> Program<Message> for NodeEditor<'a> {
             mouse::Event::ButtonPressed(mouse::Button::Left)
                 if strip.contains(screen) && !self.overlay_at(point, screen, bounds) =>
             {
-                let note = piano::key_at(strip, screen);
+                // The octave buttons shift the keys, as Z and X do.
+                if let Some(direction) = piano::octave_button_at(strip, screen) {
+                    self.graph.piano.shift_octave(direction);
+                    return (event::Status::Captured, None);
+                }
+                let note = piano::key_at(strip, piano::low_note(self.graph.piano.octave()), screen);
                 self.graph.mouse_note = note;
                 return match note {
                     Some(note) => (

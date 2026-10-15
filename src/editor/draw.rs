@@ -123,7 +123,23 @@ pub(super) fn draw_editor(
     super::meter::draw(&mut frame, bounds, output);
 
     let strip = piano::strip_bounds(bounds);
-    piano::draw_strip(&mut frame, strip, active_notes, graph.mouse_note);
+    // Text would show through a menu drawn over the strip, so the strip drops its labels then.
+    let strip_world = overlays[1];
+    let labels = !overlays[2..]
+        .iter()
+        .any(|overlay| overlaps(overlay, &strip_world));
+    piano::draw_strip(
+        &mut frame,
+        strip,
+        &piano::StripView {
+            octave: graph.piano.octave(),
+            sounding: active_notes,
+            pressed: graph.mouse_note,
+            computer_keys: graph.computer_keys,
+            hover: piano::octave_button_at(strip, graph.last_screen),
+            labels,
+        },
+    );
 
     // The open lists and the menu are drawn over the pill, in editor coordinates like the nodes.
     frame.with_save(|frame| {
