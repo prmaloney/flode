@@ -13,6 +13,11 @@
 //! curve below a low one. `depth` scales both curves in dB, so at 0.0 every band gain is unity.
 //! The total band gain is limited to +30 dB.
 //!
+//! The upward curve, the lift, has two guards against pops. It fades out below -60 dB, so a silent
+//! band is not wound up to the full boost while nothing plays. And it is smoothed apart from the
+//! downward curve, rising at the release rate and falling in about a millisecond, so a note that
+//! starts in a lifted band takes the lift away at once instead of at the attack knob's pace.
+//!
 //! The two modes run side by side while `multiband` changes and crossfade over a few ms. The
 //! unused path is reset once its weight reaches zero, so it never wakes up with stale state.
 
@@ -67,6 +72,15 @@ const NEUTRAL_THRESHOLD_DB: f32 = -18.0;
 /// The upward compression slope, as the fraction of the distance under the threshold that is
 /// recovered. 0.667 is a 3:1 upward ratio.
 const UPWARD_SLOPE: f32 = 2.0 / 3.0;
+/// How fast the upward lift drops when a band gets louder, in ms. A note that starts in a band
+/// that was being lifted takes the lift away within a few of these, where the cut still follows
+/// the attack knob.
+const LIFT_FALL_MS: f32 = 1.0;
+/// Upward compression lifts a band only while it is above this level, in dB, and fades out over
+/// the `UPWARD_FADE_DB` below it. Without a floor a silent band reads as -120 dB, so its gain
+/// climbs to the full boost while nothing plays, and the next note starts into it.
+const UPWARD_FLOOR_DB: f32 = -60.0;
+const UPWARD_FADE_DB: f32 = 15.0;
 /// The time constant of the single band detector in ms.
 const SINGLE_DETECTOR_MS: f32 = 4.0;
 /// The time constant for smoothing makeup, mix, and depth in ms.
@@ -181,6 +195,12 @@ struct Follower {
     cached_release_ms: f32,
     attack: f32,
     release: f32,
+    /// The gain the upward lift adds, in dB. It is kept apart from the gain that turns the signal
+    /// down, because the lift has to drop at once when a note starts, while the cut follows the
+    /// attack knob.
+    lift_db: f32,
+    cached_lift_release_ms: f32,
+    lift_rise: f32,
 }
 
 impl Follower {
@@ -192,7 +212,35 @@ impl Follower {
             cached_release_ms: -1.0,
             attack: 0.0,
             release: 0.0,
+            lift_db: 0.0,
+            cached_lift_release_ms: -1.0,
+            lift_rise: 0.0,
         }
+    }
+
+    /// Moves the lift toward `target_db`. It falls at `fall_coef`, which is fast, and rises at the
+    /// release rate. Returns it.
+    fn smooth_lift(
+        &mut self,
+        target_db: f32,
+        release_ms: f32,
+        fall_coef: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        if release_ms != self.cached_lift_release_ms {
+            self.cached_lift_release_ms = release_ms;
+            self.lift_rise = time_coef(release_ms, sample_rate);
+        }
+        let coef = if target_db < self.lift_db {
+            fall_coef
+        } else {
+            self.lift_rise
+        };
+        self.lift_db = target_db + coef * (self.lift_db - target_db);
+        if self.lift_db.abs() < 1e-20 {
+            self.lift_db = 0.0;
+        }
+        self.lift_db
     }
 
     /// Feeds one stereo frame to the detector and returns its level in dB.
@@ -413,6 +461,8 @@ pub struct Compressor {
     single_detector: f32,
     /// The detector coefficient of each multiband band.
     band_detectors: [f32; 3],
+    /// How fast the upward lift falls, the same for every band.
+    lift_fall: f32,
     crossover_coefs: CrossoverCoefs,
     crossovers: [Crossover; 2],
     single: Follower,
@@ -438,6 +488,7 @@ impl Compressor {
             fade_step: 1.0 / (MODE_FADE_MS * 0.001 * sample_rate),
             single_detector: time_coef(SINGLE_DETECTOR_MS, sample_rate),
             band_detectors: BANDS.map(|b| time_coef(b.detector_ms, sample_rate)),
+            lift_fall: time_coef(LIFT_FALL_MS, sample_rate),
             crossover_coefs,
             crossovers: [Crossover::new(&crossover_coefs); 2],
             single: Follower::new(),
@@ -528,16 +579,30 @@ impl Compressor {
             let band = Frame::new(left[i], right[i]);
             let follower = &mut self.bands[i];
             let level = follower.level_db(band, self.band_detectors[i]);
-            let down = knee_curve(level - (spec.down_db + shift), down_slope);
-            let up = knee_curve((spec.up_db + shift) - level, UPWARD_SLOPE);
-            let target = (self.depth * (down + up + spec.trim_db)).clamp(MAX_CUT_DB, MAX_BOOST_DB);
-            let gain_db = follower.smooth(
-                target,
+            // The cut follows the attack and release knobs.
+            let cut_target = knee_curve(level - (spec.down_db + shift), down_slope);
+            let cut_db = follower.smooth(
+                cut_target,
                 p.attack_ms * spec.time_scale,
                 p.release_ms * spec.time_scale,
                 self.sample_rate,
             );
-            out += band * db_to_gain(gain_db.min(MAX_BOOST_DB));
+
+            // The lift fades out under the floor, so a quiet or silent band is left alone. It rises
+            // at the release rate and falls fast, so a note that starts takes it away at once.
+            let above_floor =
+                ((level - (UPWARD_FLOOR_DB - UPWARD_FADE_DB)) / UPWARD_FADE_DB).clamp(0.0, 1.0);
+            let lift_target = knee_curve((spec.up_db + shift) - level, UPWARD_SLOPE) * above_floor;
+            let lift_db = follower.smooth_lift(
+                lift_target,
+                p.release_ms * spec.time_scale,
+                self.lift_fall,
+                self.sample_rate,
+            );
+
+            let gain_db =
+                (self.depth * (cut_db + lift_db + spec.trim_db)).clamp(MAX_CUT_DB, MAX_BOOST_DB);
+            out += band * db_to_gain(gain_db);
         }
         out
     }
@@ -1051,7 +1116,8 @@ mod tests {
     #[test]
     fn the_boost_is_limited() {
         for hz in [100.0, 1000.0, 8000.0] {
-            for amp in [1e-3, 1e-4, 1e-6] {
+            // The lift fades out under -60 dB, so these are the quiet levels it still reaches.
+            for amp in [1e-2, 3e-3, 1e-3] {
                 let p = CompressorParams {
                     ratio: 20.0,
                     // A high threshold knob moves the upward thresholds up, so the boost has room
@@ -1093,6 +1159,123 @@ mod tests {
             SR,
         );
         assert!(g_low < g_high - 5.0, "{g_low} {g_high}");
+    }
+
+    /// What plays before a note in the pop tests.
+    enum Before {
+        /// This many seconds of silence.
+        Silence(f32),
+        /// A loud note that dies away exponentially over a second, so the bands pass slowly down
+        /// through the levels that the upward lift works on.
+        DyingNote,
+        /// A second of a quiet tone at the same pitch, which the upward lift raises to its full
+        /// reach, so the note is a 30 dB jump out of a band that is being lifted.
+        QuietTone,
+    }
+
+    /// Plays a note after `before` and returns how far its first 100 ms overshoots its steady
+    /// level, as a ratio of peaks. The note has a 1 ms attack, like a synth voice with a fast
+    /// envelope.
+    fn onset_overshoot(p: &CompressorParams, hz: f32, amp: f32, before: Before) -> f32 {
+        let mut c = Compressor::new(SR);
+        match before {
+            Before::Silence(seconds) => {
+                for _ in 0..(SR * seconds) as usize {
+                    c.process(Frame::SILENT, p);
+                }
+            }
+            Before::QuietTone => {
+                for i in 0..SR as usize {
+                    c.process(Frame::mono(sine(i, hz, 0.003, SR)), p);
+                }
+            }
+            Before::DyingNote => {
+                for i in 0..(SR * 1.1) as usize {
+                    let t = i as f32 / SR;
+                    let fade = if t < 0.3 {
+                        1.0
+                    } else {
+                        (-(t - 0.3) / 0.12).exp()
+                    };
+                    c.process(Frame::mono(fade * sine(i, 150.0, 0.3, SR)), p);
+                }
+            }
+        }
+        let n = (SR * 1.5) as usize;
+        let attack = (SR * 0.001) as usize;
+        let out: Vec<f32> = (0..n)
+            .map(|i| {
+                let ramp = (i as f32 / attack as f32).min(1.0);
+                c.process(Frame::mono(ramp * sine(i, hz, amp, SR)), p).l
+            })
+            .collect();
+        let peak = |x: &[f32]| x.iter().fold(0.0f32, |peak, v| peak.max(v.abs()));
+        let head = peak(&out[..(SR * 0.1) as usize]);
+        let steady = peak(&out[n - (SR * 0.1) as usize..]);
+        head / steady
+    }
+
+    /// With no floor, a silent band read as -120 dB, so its upward lift climbed to the full +30 dB
+    /// while nothing played and the next note started into it, up to 16 times too loud. A quiet
+    /// note, which the downward side leaves alone, must start at about the level it settles to.
+    /// A loud note starts louder, the way it does through any compressor with an attack time, and
+    /// the highs, which have the shortest attack, get through the most.
+    #[test]
+    fn a_note_out_of_silence_does_not_pop() {
+        for silent in [0.3, 2.0] {
+            for hz in [60.0, 200.0, 1000.0, 5000.0, 9000.0] {
+                let quiet = onset_overshoot(&multi(), hz, 0.1, Before::Silence(silent));
+                assert!(
+                    quiet < 1.8,
+                    "{hz} Hz quiet note after {silent} s of silence: the start is {quiet}x"
+                );
+                let loud = onset_overshoot(&multi(), hz, 0.5, Before::Silence(silent));
+                assert!(
+                    loud < 5.0,
+                    "{hz} Hz loud note after {silent} s of silence: the start is {loud}x"
+                );
+            }
+        }
+    }
+
+    /// The lift has partly wound up by the time a dying note has fallen into its range. The next
+    /// note takes it away at once, so it does not start louder than it settles.
+    #[test]
+    fn a_note_after_a_dying_one_does_not_pop() {
+        for hz in [60.0, 200.0, 1000.0, 5000.0, 9000.0] {
+            let over = onset_overshoot(&multi(), hz, 0.1, Before::DyingNote);
+            assert!(
+                over < 1.8,
+                "{hz} Hz after a dying note: the start is {over}x"
+            );
+        }
+    }
+
+    /// A band the lift has raised to its full reach, hit by a note 30 dB louder. The lift drops at
+    /// its own fast rate instead of following the attack knob, so the note is not pushed through
+    /// at the lift's height while the gain catches up. With one smoother for the whole gain the
+    /// start was up to four times the settled level.
+    #[test]
+    fn a_jump_out_of_a_lifted_quiet_tone_does_not_pop() {
+        for hz in [60.0, 200.0, 1000.0, 5000.0, 9000.0] {
+            let over = onset_overshoot(&multi(), hz, 0.1, Before::QuietTone);
+            assert!(
+                over < 3.0,
+                "{hz} Hz: the start is {over}x the settled level"
+            );
+        }
+    }
+
+    /// Signals under the floor are left alone, so noise and silence are not lifted.
+    #[test]
+    fn signals_under_the_floor_are_not_lifted() {
+        for hz in [100.0, 1000.0, 8000.0] {
+            for amp in [1e-4, 1e-5, 1e-6] {
+                let g = multiband_gain_db(&multi(), hz, amp, SR);
+                // The bands' static trims add up to a few dB. The lift would add far more.
+                assert!(g < 3.0, "{hz} Hz at {amp}: {g} dB");
+            }
+        }
     }
 
     /// The largest sample-to-sample step of a buffer.
