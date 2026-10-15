@@ -213,6 +213,7 @@ mod slot_tests {
         let saved = SavedGraph {
             version: 0,
             preset_name: None,
+            preset_category: String::new(),
             nodes: vec![node(NodeKind::Oscillator), node(NodeKind::Output)],
             connections: vec![(0, 1)],
             links: Vec::new(),
@@ -493,6 +494,7 @@ mod envelope_migration_tests {
         let saved = SavedGraph {
             version: 0,
             preset_name: None,
+            preset_category: String::new(),
             nodes: vec![
                 node(NodeKind::Oscillator, 0.0),
                 node(NodeKind::Envelope, 100.0),
@@ -1821,6 +1823,7 @@ mod preset_ui_tests {
     use crate::editor::canvas::{Message, NodeEditor};
     use crate::editor::piano::PianoEvent;
     use crate::editor::style::MENU_ITEM_HEIGHT;
+    use crate::presets::Library;
     use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
     use nih_plug_iced::mouse;
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
@@ -1894,69 +1897,111 @@ mod preset_ui_tests {
         )
     }
 
-    /// The middle of row `row` in the preset list.
-    fn list_row(names: usize, row: usize) -> Point {
-        let list = preset_list_bounds(bounds(), names);
+    /// What the list shows for the presets in a test's folder.
+    fn library_of(dir: &TempDir) -> Library {
+        crate::presets::library_in(&dir.0)
+    }
+
+    /// The middle of row `row` in the main preset list.
+    fn list_row(library: &Library, row: usize) -> Point {
+        let list = preset_list_bounds(bounds(), library);
         Point::new(
             list.x + 20.0,
             list.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT,
         )
     }
 
-    /// Save a preset through the UI: open the list, pick Save as, type a name, press Enter. The
-    /// editor then saves it, which the test does by hand with the macro values it is given.
-    fn save_through_the_ui(graph: &mut Graph, name: &str, macros: [f32; 4]) {
-        let names = graph
+    /// The middle of row `row` in the submenu of category `category`.
+    fn sub_row(library: &Library, category: usize, row: usize) -> Point {
+        let sub = submenu_bounds(bounds(), library, category);
+        Point::new(sub.x + 20.0, sub.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT)
+    }
+
+    /// Save a preset through the UI: open the list, pick Save as, type a name, press Tab, type a
+    /// category, press Enter. The editor then saves it, which the test does by hand with the
+    /// macro values it is given.
+    fn save_through_the_ui(graph: &mut Graph, name: &str, category: &str, macros: [f32; 4]) {
+        let library = graph
             .preset_dir
             .as_deref()
-            .map_or(0, |d| crate::presets::list_in(d).len());
+            .map(crate::presets::library_in)
+            .unwrap_or_default();
         let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         click(&mut editor, presets_button());
-        click(&mut editor, list_row(names, 0));
+        click(&mut editor, list_row(&library, 0));
         assert!(editor.graph.name_entry.is_some());
-        // Clear the name the box started with, then type.
+        // Clear the name and category the box started with, then type.
         for _ in 0..60 {
             press_key(&mut editor, KeyCode::Backspace);
         }
         type_text(&mut editor, name);
+        press_key(&mut editor, KeyCode::Tab);
+        for _ in 0..60 {
+            press_key(&mut editor, KeyCode::Backspace);
+        }
+        type_text(&mut editor, category);
         let message = press_key(&mut editor, KeyCode::Enter);
         assert!(matches!(message, Some(Message::GraphChanged)));
         graph.save_pending_preset(macros);
     }
 
     #[test]
-    fn saving_through_the_ui_writes_a_named_preset() {
+    fn saving_through_the_ui_writes_a_named_preset_in_its_category() {
         let dir = TempDir::new("save");
         let mut graph = graph_in(&dir);
-        save_through_the_ui(&mut graph, "  Warm pad ", [0.1, 0.2, 0.3, 0.4]);
+        save_through_the_ui(&mut graph, "  Warm pad ", " Pad ", [0.1, 0.2, 0.3, 0.4]);
 
-        assert_eq!(crate::presets::list_in(&dir.0), ["Warm pad"]);
-        let saved = crate::presets::load_in(&dir.0, "Warm pad").unwrap();
+        let library = library_of(&dir);
+        assert_eq!(library.categories.len(), 1);
+        assert_eq!(library.categories[0].name, "Pad");
+        assert_eq!(library.categories[0].presets, ["Warm pad"]);
+        assert!(library.loose.is_empty());
+        let saved = crate::presets::load_in(&dir.0, "Pad", "Warm pad").unwrap();
         assert_eq!(saved.macros, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(graph.preset_name.as_deref(), Some("Warm pad"));
+        assert_eq!(graph.preset_category, "Pad");
         assert!(graph.name_entry.is_none() && graph.pending_save.is_none());
-        // The name stays with the project's saved graph.
-        assert_eq!(graph.to_saved().preset_name.as_deref(), Some("Warm pad"));
-        assert_eq!(
-            Graph::from_saved(&graph.to_saved()).preset_name.as_deref(),
-            Some("Warm pad")
-        );
+        // The name and category stay with the project's saved graph.
+        let reloaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(reloaded.preset_name.as_deref(), Some("Warm pad"));
+        assert_eq!(reloaded.preset_category, "Pad");
+    }
+
+    /// A preset saved with no category sits loose in the folder, and it is listed after the
+    /// categories.
+    #[test]
+    fn a_preset_with_no_category_is_listed_loose() {
+        let dir = TempDir::new("loose");
+        let mut graph = graph_in(&dir);
+        save_through_the_ui(&mut graph, "Plain", "", [0.0; 4]);
+        let library = library_of(&dir);
+        assert!(library.categories.is_empty());
+        assert_eq!(library.loose, ["Plain"]);
+        assert!(dir.0.join("Plain.flode").is_file());
     }
 
     /// Saving again under a name that is already there replaces that preset, and the box starts
-    /// with the current preset's name.
+    /// with the current preset's name and category.
     #[test]
-    fn saving_again_keeps_the_name_and_replaces_the_file() {
+    fn saving_again_keeps_the_name_and_category_and_replaces_the_file() {
         let dir = TempDir::new("again");
         let mut graph = graph_in(&dir);
-        save_through_the_ui(&mut graph, "Lead", [0.0; 4]);
+        save_through_the_ui(&mut graph, "Pluck", "Lead", [0.0; 4]);
         graph.start_name_entry();
-        assert_eq!(graph.name_entry.as_deref(), Some("Lead"));
+        let entry = graph.name_entry.clone().unwrap();
+        assert_eq!(
+            (entry.name.as_str(), entry.category.as_str()),
+            ("Pluck", "Lead")
+        );
         graph.confirm_name_entry();
         graph.save_pending_preset([0.9; 4]);
-        assert_eq!(crate::presets::list_in(&dir.0), ["Lead"]);
+        let library = library_of(&dir);
+        assert_eq!(library.categories.len(), 1);
+        assert_eq!(library.categories[0].presets, ["Pluck"]);
         assert_eq!(
-            crate::presets::load_in(&dir.0, "Lead").unwrap().macros,
+            crate::presets::load_in(&dir.0, "Lead", "Pluck")
+                .unwrap()
+                .macros,
             [0.9; 4]
         );
     }
@@ -1967,21 +2012,26 @@ mod preset_ui_tests {
         let dir = TempDir::new("load");
         let mut graph = graph_in(&dir);
         graph.add_node(NodeKind::Reverb, Point::new(400.0, 300.0));
-        save_through_the_ui(&mut graph, "Wet", [0.5, 0.6, 0.7, 0.8]);
+        save_through_the_ui(&mut graph, "Wet", "Pad", [0.5, 0.6, 0.7, 0.8]);
+        let library = library_of(&dir);
 
         let mut other = graph_in(&dir);
         other.delete_node(0);
         assert_eq!(other.nodes.len(), 2);
         let mut editor = NodeEditor::new(&mut other, ControlLevels::default(), [0; 2], [0.0; 2]);
+        // The list shows the category. Clicking it opens its submenu, and the preset is in that.
         click(&mut editor, presets_button());
         assert_eq!(
-            editor.graph.preset_list.as_deref(),
-            Some(&["Wet".to_string()][..])
+            editor.graph.preset_list.as_ref().map(|m| m.library.clone()),
+            Some(library.clone())
         );
-        let message = click(&mut editor, list_row(1, 1));
+        click(&mut editor, list_row(&library, 1));
+        assert_eq!(editor.graph.preset_list.as_ref().unwrap().open, Some(0));
+        let message = click(&mut editor, sub_row(&library, 0, 0));
         assert!(matches!(message, Some(Message::GraphChanged)));
 
         assert!(editor.graph.preset_list.is_none());
+        assert_eq!(editor.graph.preset_category, "Pad");
         assert_eq!(editor.graph.nodes.len(), 4);
         assert!(editor
             .graph
@@ -2009,7 +2059,7 @@ mod preset_ui_tests {
         let dir = TempDir::new("missing");
         let mut graph = graph_in(&dir);
         let count = graph.nodes.len();
-        assert!(!graph.load_preset("ghost"));
+        assert!(!graph.load_preset("Pad", "ghost"));
         assert_eq!(graph.nodes.len(), count);
         assert!(graph
             .status
@@ -2023,8 +2073,10 @@ mod preset_ui_tests {
         let dir = TempDir::new("keys");
         let mut graph = graph_in(&dir);
         graph.selected = Some(0);
-        graph.name_entry = Some(String::new());
+        graph.start_name_entry();
+        graph.name_entry.as_mut().unwrap().name.clear();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let name = |editor: &NodeEditor| editor.graph.name_entry.clone().unwrap();
 
         // 'a' is a piano key and 'm' is the bypass shortcut. Both are just letters here.
         let message = press_key(&mut editor, KeyCode::A);
@@ -2032,19 +2084,41 @@ mod preset_ui_tests {
         type_text(&mut editor, "am");
         press_key(&mut editor, KeyCode::M);
         assert!(!editor.graph.nodes[0].bypassed);
-        assert_eq!(editor.graph.name_entry.as_deref(), Some("am"));
+        assert_eq!(name(&editor).name, "am");
 
         // Characters a file name can't hold are dropped, and Backspace removes one.
         type_text(&mut editor, "a/b:c");
-        assert_eq!(editor.graph.name_entry.as_deref(), Some("amabc"));
+        assert_eq!(name(&editor).name, "amabc");
         press_key(&mut editor, KeyCode::Backspace);
-        assert_eq!(editor.graph.name_entry.as_deref(), Some("amab"));
+        assert_eq!(name(&editor).name, "amab");
+
+        // Tab moves the typing to the category, and back.
+        press_key(&mut editor, KeyCode::Tab);
+        assert_eq!(name(&editor).field, EntryField::Category);
+        type_text(&mut editor, "Bass");
+        assert_eq!(
+            (name(&editor).name.as_str(), name(&editor).category.as_str()),
+            ("amab", "Bass")
+        );
+        press_key(&mut editor, KeyCode::Up);
+        assert_eq!(name(&editor).field, EntryField::Name);
 
         // Enter with a blank name keeps the box open.
-        editor.graph.name_entry = Some("   ".to_string());
+        editor.graph.name_entry.as_mut().unwrap().name = "   ".to_string();
         press_key(&mut editor, KeyCode::Enter);
         assert!(editor.graph.name_entry.is_some());
         assert!(editor.graph.pending_save.is_none());
+
+        // Enter with a name takes the name and the category.
+        editor.graph.name_entry.as_mut().unwrap().name = " Dark ".to_string();
+        press_key(&mut editor, KeyCode::Enter);
+        assert!(editor.graph.name_entry.is_none());
+        assert_eq!(
+            editor.graph.pending_save,
+            Some(("Dark".to_string(), "Bass".to_string()))
+        );
+        editor.graph.pending_save = None;
+        editor.graph.start_name_entry();
 
         press_key(&mut editor, KeyCode::Escape);
         assert!(editor.graph.name_entry.is_none());
@@ -2056,13 +2130,15 @@ mod preset_ui_tests {
     fn the_name_has_a_length_limit() {
         let dir = TempDir::new("limit");
         let mut graph = graph_in(&dir);
-        graph.name_entry = Some(String::new());
+        graph.start_name_entry();
+        graph.name_entry.as_mut().unwrap().name.clear();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         type_text(&mut editor, &"x".repeat(100));
-        assert_eq!(
-            editor.graph.name_entry.as_ref().map(|t| t.chars().count()),
-            Some(crate::presets::MAX_NAME_LEN)
-        );
+        press_key(&mut editor, KeyCode::Tab);
+        type_text(&mut editor, &"y".repeat(100));
+        let entry = editor.graph.name_entry.clone().unwrap();
+        assert_eq!(entry.name.chars().count(), crate::presets::MAX_NAME_LEN);
+        assert_eq!(entry.category.chars().count(), crate::presets::MAX_NAME_LEN);
     }
 
     /// A key held when the box opens still ends its note when it comes up.
@@ -2073,7 +2149,7 @@ mod preset_ui_tests {
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         let on = press_key(&mut editor, KeyCode::A);
         assert!(matches!(on, Some(Message::Note(PianoEvent::NoteOn { .. }))));
-        editor.graph.name_entry = Some(String::new());
+        editor.graph.start_name_entry();
         let up = keyboard::Event::KeyReleased {
             key_code: KeyCode::A,
             modifiers: Modifiers::default(),
@@ -2090,7 +2166,7 @@ mod preset_ui_tests {
     fn a_press_outside_the_box_cancels_it() {
         let dir = TempDir::new("outside");
         let mut graph = graph_in(&dir);
-        graph.name_entry = Some("x".to_string());
+        graph.start_name_entry();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         let keys = Point::new(300.0, 700.0);
         let message = click(&mut editor, keys);
@@ -2098,7 +2174,7 @@ mod preset_ui_tests {
         assert!(editor.graph.name_entry.is_none());
 
         // A press inside the box leaves it open.
-        editor.graph.name_entry = Some("x".to_string());
+        editor.graph.start_name_entry();
         let inside = name_box_bounds(bounds());
         click(&mut editor, Point::new(inside.x + 10.0, inside.y + 10.0));
         assert!(editor.graph.name_entry.is_some());
@@ -2119,22 +2195,182 @@ mod preset_ui_tests {
         assert!(editor.graph.preset_list.is_none());
     }
 
-    /// Each row of the list is an action, the empty list has a note row that is not one, and a long
-    /// list stops above the keys.
+    /// A library of two categories and two loose presets, as the list shows it.
+    fn sample_library() -> Library {
+        use crate::presets::Category;
+        let category = |name: &str, presets: &[&str]| Category {
+            name: name.to_string(),
+            presets: presets.iter().map(|p| p.to_string()).collect(),
+        };
+        Library {
+            categories: vec![
+                category("Bass", &["Acid", "Sub", "Wob"]),
+                category("Pad", &["Warm"]),
+            ],
+            loose: vec!["One".to_string(), "Two".to_string()],
+        }
+    }
+
+    /// Each row of the list is an action: save, a category, or a loose preset. The row under an
+    /// empty list's save entry is a note, not an action.
     #[test]
     fn rows_map_to_actions() {
-        let names = 3;
-        let at = |row: usize| preset_row_at(bounds(), names, list_row(names, row));
+        let library = sample_library();
+        let menu = PresetMenu {
+            library: library.clone(),
+            open: None,
+        };
+        let at = |row: usize| preset_row_at(bounds(), &menu, list_row(&library, row));
         assert_eq!(at(0), Some(PresetRow::SaveAs));
-        assert_eq!(at(1), Some(PresetRow::Load(0)));
-        assert_eq!(at(3), Some(PresetRow::Load(2)));
-        // With none saved, the row under the save entry is a note, not a preset.
-        assert_eq!(preset_row_at(bounds(), 0, list_row(0, 1)), None);
-        // A long name list stops above the keys.
-        let list = preset_list_bounds(bounds(), 100);
-        assert!(list.y + list.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
+        assert_eq!(at(1), Some(PresetRow::Category(0)));
+        assert_eq!(at(2), Some(PresetRow::Category(1)));
+        assert_eq!(at(3), Some(PresetRow::Loose(0)));
+        assert_eq!(at(4), Some(PresetRow::Loose(1)));
+        assert_eq!(at(5), None);
+
+        let empty = PresetMenu {
+            library: Library::default(),
+            open: None,
+        };
+        assert_eq!(
+            preset_row_at(bounds(), &empty, list_row(&empty.library, 1)),
+            None
+        );
         assert_eq!(shorten("Short"), "Short");
         assert_eq!(shorten("A very long preset name").chars().count(), 10);
+    }
+
+    /// An open submenu has a row for each preset in its category. It sits beside the list, level
+    /// with its category, and does not overlap the list or run into the keys.
+    #[test]
+    fn the_submenu_holds_its_categorys_presets() {
+        let library = sample_library();
+        let menu = PresetMenu {
+            library: library.clone(),
+            open: Some(0),
+        };
+        let at = |row: usize| preset_row_at(bounds(), &menu, sub_row(&library, 0, row));
+        assert_eq!(at(0), Some(PresetRow::Sub(0, 0)));
+        assert_eq!(at(2), Some(PresetRow::Sub(0, 2)));
+        assert_eq!(at(3), None);
+
+        let list = preset_list_bounds(bounds(), &library);
+        for category in 0..2 {
+            let sub = submenu_bounds(bounds(), &library, category);
+            let apart = sub.x >= list.x + list.width || sub.x + sub.width <= list.x;
+            assert!(apart, "{category}");
+            assert!(sub.y >= list.y);
+            assert!(sub.y + sub.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
+            assert!(sub.x >= 0.0 && sub.x + sub.width <= bounds().width);
+        }
+        // The Bass submenu starts level with the Bass row.
+        let sub = submenu_bounds(bounds(), &library, 0);
+        assert_eq!(sub.y, list.y + MENU_ITEM_HEIGHT);
+        // With no submenu open, a point where it would be is not a row.
+        let closed = PresetMenu {
+            library: library.clone(),
+            open: None,
+        };
+        assert_eq!(
+            preset_row_at(bounds(), &closed, sub_row(&library, 0, 0)),
+            None
+        );
+    }
+
+    /// A very long list stops above the keys, in the list and in a submenu.
+    #[test]
+    fn long_lists_stop_above_the_keys() {
+        use crate::presets::Category;
+        let many = |prefix: &str| (0..100).map(|n| format!("{prefix}{n}")).collect::<Vec<_>>();
+        let library = Library {
+            categories: vec![Category {
+                name: "All".to_string(),
+                presets: many("p"),
+            }],
+            loose: many("l"),
+        };
+        let keys = bounds().height - crate::editor::piano::STRIP_HEIGHT;
+        let list = preset_list_bounds(bounds(), &library);
+        assert!(list.y + list.height <= keys);
+        let sub = submenu_bounds(bounds(), &library, 0);
+        assert!(sub.y + sub.height <= keys);
+        let (categories, loose) = preset_rows_shown(bounds(), &library);
+        assert_eq!(categories, 1);
+        assert!(loose > 0 && loose < 100);
+    }
+
+    /// Moving the cursor over a category opens its submenu, onto another row closes it, and
+    /// crossing the gap to the submenu leaves it open.
+    #[test]
+    fn hovering_a_category_opens_its_submenu() {
+        let dir = TempDir::new("hover");
+        let mut graph = graph_in(&dir);
+        let mut seed = graph_in(&dir);
+        save_through_the_ui(&mut seed, "Sub", "Bass", [0.0; 4]);
+        save_through_the_ui(&mut seed, "Plain", "", [0.0; 4]);
+        let library = library_of(&dir);
+        assert_eq!(library.categories.len(), 1);
+
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        let move_to = |editor: &mut NodeEditor, at: Point| {
+            editor.update(
+                Event::Mouse(mouse::Event::CursorMoved { position: at }),
+                bounds(),
+                Cursor::Available(at),
+            )
+        };
+        let open = |editor: &NodeEditor| editor.graph.preset_list.as_ref().unwrap().open;
+
+        move_to(&mut editor, list_row(&library, 1));
+        assert_eq!(open(&editor), Some(0));
+        // Off the list and onto the submenu, it stays.
+        move_to(&mut editor, sub_row(&library, 0, 0));
+        assert_eq!(open(&editor), Some(0));
+        move_to(&mut editor, Point::new(5.0, 400.0));
+        assert_eq!(open(&editor), Some(0));
+        // Onto the loose preset's row, it closes.
+        move_to(&mut editor, list_row(&library, 2));
+        assert_eq!(open(&editor), None);
+
+        // A click on a category row opens it, and a second click closes it.
+        click(&mut editor, list_row(&library, 1));
+        assert_eq!(open(&editor), Some(0));
+        click(&mut editor, list_row(&library, 1));
+        assert_eq!(open(&editor), None);
+        assert!(editor.graph.preset_list.is_some());
+    }
+
+    /// A loose preset loads from the main list.
+    #[test]
+    fn a_loose_preset_loads_from_the_main_list() {
+        let dir = TempDir::new("loose-load");
+        let mut seed = graph_in(&dir);
+        seed.add_node(NodeKind::Delay, Point::new(400.0, 300.0));
+        save_through_the_ui(&mut seed, "Plain", "", [0.0; 4]);
+        let library = library_of(&dir);
+
+        let mut graph = graph_in(&dir);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        click(&mut editor, list_row(&library, 1));
+        assert!(editor.graph.nodes.iter().any(|n| n.kind == NodeKind::Delay));
+        assert_eq!(editor.graph.preset_name.as_deref(), Some("Plain"));
+        assert_eq!(editor.graph.preset_category, "");
+    }
+
+    /// A category that is not usable keeps the box open and says so.
+    #[test]
+    fn a_bad_category_keeps_the_box_open() {
+        let dir = TempDir::new("bad-category");
+        let mut graph = graph_in(&dir);
+        graph.start_name_entry();
+        let entry = graph.name_entry.as_mut().unwrap();
+        entry.name = "Fine".to_string();
+        entry.category = ".hidden".to_string();
+        graph.confirm_name_entry();
+        assert!(graph.name_entry.is_some() && graph.pending_save.is_none());
+        assert!(graph.status.is_some());
     }
 }
 

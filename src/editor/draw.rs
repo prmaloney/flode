@@ -53,8 +53,11 @@ pub(super) fn draw_editor(
     if let Some(category) = graph.category_menu {
         overlays.push(view.rect_to_world(category_list_bounds(bounds, category)));
     }
-    if let Some(names) = &graph.preset_list {
-        overlays.push(view.rect_to_world(preset_list_bounds(bounds, names.len())));
+    if let Some(menu) = &graph.preset_list {
+        overlays.push(view.rect_to_world(preset_list_bounds(bounds, &menu.library)));
+        if let Some(open) = menu.open {
+            overlays.push(view.rect_to_world(submenu_bounds(bounds, &menu.library, open)));
+        }
     }
     if graph.name_entry.is_some() {
         overlays.push(view.rect_to_world(name_box_bounds(bounds)));
@@ -159,8 +162,8 @@ pub(super) fn draw_editor(
         draw_category_list(&mut frame, bounds, category, graph);
     }
     draw_preset_list(&mut frame, bounds, graph);
-    if let Some(text) = &graph.name_entry {
-        draw_name_entry(&mut frame, bounds, text);
+    if let Some(entry) = &graph.name_entry {
+        draw_name_entry(&mut frame, bounds, entry);
     }
 
     vec![frame.into_geometry()]
@@ -892,47 +895,132 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle, preset_name: Optio
     }
 }
 
-/// The list under the Presets button: "Save as...", then the saved names. The current preset is
-/// marked. An empty library says so.
+/// The text of one row of a list that starts at `list`.
+fn list_row_text(frame: &mut Frame, list: Rectangle, row: usize, content: String, color: Color) {
+    frame.fill_text(Text {
+        content,
+        position: Point::new(
+            list.x + 12.0,
+            list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
+        ),
+        color,
+        size: 13.0,
+        vertical_alignment: alignment::Vertical::Center,
+        ..Text::default()
+    });
+}
+
+/// A small arrow pointing right, at the right end of a row that opens a submenu.
+fn draw_submenu_arrow(frame: &mut Frame, list: Rectangle, row: usize) {
+    let x = list.x + list.width - 16.0;
+    let y = list.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT;
+    let arrow = Path::new(|builder| {
+        builder.move_to(Point::new(x - 2.0, y - 4.0));
+        builder.line_to(Point::new(x + 2.0, y));
+        builder.line_to(Point::new(x - 2.0, y + 4.0));
+    });
+    frame.stroke(
+        &arrow,
+        Stroke::default()
+            .with_color(TEXT_COLOR)
+            .with_width(1.5)
+            .with_line_cap(LineCap::Round),
+    );
+}
+
+/// The list under the Presets button: "Save as...", the categories, then the presets with none.
+/// A category with its submenu open is highlighted, and the submenu is drawn beside it. The
+/// current preset is marked. An empty library says so.
 pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
-    let Some(names) = &graph.preset_list else {
+    let Some(menu) = &graph.preset_list else {
         return;
     };
-    let list = preset_list_bounds(bounds, names.len());
+    let library = &menu.library;
+    let list = preset_list_bounds(bounds, library);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
-    let shown = preset_names_shown(bounds, names.len());
-    let row_text = |frame: &mut Frame, row: usize, content: String, color: Color| {
-        frame.fill_text(Text {
-            content,
-            position: Point::new(
-                list.x + 12.0,
-                list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
-            ),
-            color,
-            size: 13.0,
-            vertical_alignment: alignment::Vertical::Center,
-            ..Text::default()
-        });
-    };
-    row_text(frame, 0, "Save as...".to_string(), TEXT_COLOR);
-    if names.is_empty() {
-        row_text(frame, 1, "No presets yet".to_string(), DIM_TEXT_COLOR);
+    let (categories, loose) = preset_rows_shown(bounds, library);
+
+    list_row_text(frame, list, 0, "Save as...".to_string(), TEXT_COLOR);
+    if library.is_empty() {
+        list_row_text(frame, list, 1, "No presets yet".to_string(), DIM_TEXT_COLOR);
     }
-    for (index, name) in names.iter().take(shown).enumerate() {
-        let current = graph.preset_name.as_deref() == Some(name.as_str());
+    for (index, category) in library.categories.iter().take(categories).enumerate() {
+        if menu.open == Some(index) {
+            let row = Rectangle {
+                x: list.x + 4.0,
+                y: list.y + (index + 1) as f32 * MENU_ITEM_HEIGHT,
+                width: list.width - 8.0,
+                height: MENU_ITEM_HEIGHT,
+            };
+            frame.fill(
+                &rounded_rect(row, DROPDOWN_CORNER_RADIUS),
+                LIST_ROW_HOVER_COLOR,
+            );
+        }
+        // A category holding the current preset says so, so it is easy to find again.
+        let holds_current = graph.preset_category == category.name;
+        let content = if holds_current && graph.preset_name.is_some() {
+            format!("{}  *", category.name)
+        } else {
+            category.name.clone()
+        };
+        list_row_text(frame, list, index + 1, content, TEXT_COLOR);
+        draw_submenu_arrow(frame, list, index + 1);
+    }
+    for (index, name) in library.loose.iter().take(loose).enumerate() {
+        let current =
+            graph.preset_name.as_deref() == Some(name.as_str()) && graph.preset_category.is_empty();
         let content = if current {
             format!("{name}  (current)")
         } else {
             name.clone()
         };
-        row_text(frame, index + 1, content, TEXT_COLOR);
+        list_row_text(frame, list, 1 + categories + index, content, TEXT_COLOR);
     }
-    if names.len() > shown {
-        // Only the first names fit above the keys.
-        let more = names.len() - shown;
+    let hidden = (library.categories.len() - categories) + (library.loose.len() - loose);
+    if hidden > 0 {
+        // Only the first rows fit above the keys.
+        frame.fill_text(Text {
+            content: format!("{hidden} more not shown"),
+            position: Point::new(list.x + 12.0, list.y + list.height + 10.0),
+            color: DIM_TEXT_COLOR,
+            size: 11.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    }
+
+    if let Some(open) = menu.open {
+        draw_submenu(frame, bounds, graph, open);
+    }
+}
+
+/// The submenu of the category at position `open`: its presets, with the current one marked.
+fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize) {
+    let Some(menu) = &graph.preset_list else {
+        return;
+    };
+    let Some(category) = menu.library.categories.get(open) else {
+        return;
+    };
+    let sub = submenu_bounds(bounds, &menu.library, open);
+    frame.fill(&rounded_rect(sub, MENU_CORNER_RADIUS), MENU_COLOR);
+    let shown = submenu_rows_shown(bounds, &menu.library, open);
+    for (index, name) in category.presets.iter().take(shown).enumerate() {
+        let current = graph.preset_name.as_deref() == Some(name.as_str())
+            && graph.preset_category == category.name;
+        let content = if current {
+            format!("{name}  (current)")
+        } else {
+            name.clone()
+        };
+        list_row_text(frame, sub, index, content, TEXT_COLOR);
+    }
+    if category.presets.len() > shown {
+        let more = category.presets.len() - shown;
         frame.fill_text(Text {
             content: format!("{more} more not shown"),
-            position: Point::new(list.x + 12.0, list.y + list.height + 10.0),
+            position: Point::new(sub.x + 12.0, sub.y + sub.height + 10.0),
             color: DIM_TEXT_COLOR,
             size: 11.0,
             vertical_alignment: alignment::Vertical::Center,
@@ -941,36 +1029,62 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
     }
 }
 
-/// The box where a preset's name is typed: a title, the text with a caret, and the keys that
-/// finish it.
-pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, text: &str) {
+/// The box where a preset is named and sorted: a title, a field for the name and one for the
+/// category, and the keys that work in it. The field being typed in is lighter and has the caret.
+pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, entry: &NameEntry) {
     let area = name_box_bounds(bounds);
     frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
-    let label = |frame: &mut Frame, content: &str, y: f32, size: f32, color: Color| {
+    let label = |frame: &mut Frame, content: &str, x: f32, y: f32, size: f32, color: Color| {
         frame.fill_text(Text {
             content: content.to_string(),
-            position: Point::new(area.x + 14.0, area.y + y),
+            position: Point::new(area.x + x, area.y + y),
             color,
             size,
             vertical_alignment: alignment::Vertical::Center,
             ..Text::default()
         });
     };
-    label(frame, "Save preset as", 16.0, 12.0, DIM_TEXT_COLOR);
+    label(frame, "Save preset", 14.0, 16.0, 12.0, DIM_TEXT_COLOR);
 
-    let field = Rectangle {
-        x: area.x + 12.0,
-        y: area.y + 30.0,
-        width: area.width - 24.0,
-        height: 30.0,
-    };
-    frame.fill(&rounded_rect(field, DROPDOWN_CORNER_RADIUS), DROPDOWN_COLOR);
-    // The caret is a bar after the text.
-    label(frame, &format!("{text}|"), 45.0, 14.0, TEXT_COLOR);
+    let fields = [
+        ("Name", &entry.name, EntryField::Name, "", 28.0),
+        (
+            "Category",
+            &entry.category,
+            EntryField::Category,
+            "optional, such as Bass or Pad",
+            64.0,
+        ),
+    ];
+    for (title, text, field, placeholder, top) in fields {
+        let active = entry.field == field;
+        let rect = Rectangle {
+            x: area.x + 12.0,
+            y: area.y + top,
+            width: area.width - 24.0,
+            height: 30.0,
+        };
+        let color = if active {
+            DROPDOWN_HOVER_COLOR
+        } else {
+            DROPDOWN_COLOR
+        };
+        frame.fill(&rounded_rect(rect, DROPDOWN_CORNER_RADIUS), color);
+        label(frame, title, 22.0, top + 15.0, 11.0, DIM_TEXT_COLOR);
+        // The caret is a bar after the text. A field with nothing in it shows its hint.
+        let (shown, shade) = match (text.is_empty(), active) {
+            (true, false) => (placeholder.to_string(), DIM_TEXT_COLOR),
+            (true, true) => ("|".to_string(), TEXT_COLOR),
+            (false, true) => (format!("{text}|"), TEXT_COLOR),
+            (false, false) => (text.clone(), TEXT_COLOR),
+        };
+        label(frame, &shown, 86.0, top + 15.0, 13.0, shade);
+    }
     label(
         frame,
-        "Enter to save, Esc to cancel",
-        76.0,
+        "Tab switches field, Enter saves, Esc cancels",
+        14.0,
+        116.0,
         11.0,
         DIM_TEXT_COLOR,
     );

@@ -9,7 +9,7 @@ use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDT
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
-use crate::presets::{self, Preset};
+use crate::presets::{self, Library, Preset};
 use nih_plug_iced::keyboard::KeyCode;
 use nih_plug_iced::{Point, Vector};
 use std::path::PathBuf;
@@ -65,6 +65,47 @@ pub(super) enum MacroEdit {
     End(usize),
 }
 
+/// The open preset list: what is saved, and the category whose submenu is open, if one is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PresetMenu {
+    pub(super) library: Library,
+    /// The position in `library.categories` of the open submenu.
+    pub(super) open: Option<usize>,
+}
+
+/// Which field of the save box takes the typing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EntryField {
+    Name,
+    Category,
+}
+
+/// The save box: a name, a category, and the field being typed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NameEntry {
+    pub(super) name: String,
+    pub(super) category: String,
+    pub(super) field: EntryField,
+}
+
+impl NameEntry {
+    /// The text of the field being typed in.
+    pub(super) fn active_mut(&mut self) -> &mut String {
+        match self.field {
+            EntryField::Name => &mut self.name,
+            EntryField::Category => &mut self.category,
+        }
+    }
+
+    /// Moves the typing to the other field.
+    pub(super) fn switch_field(&mut self) {
+        self.field = match self.field {
+            EntryField::Name => EntryField::Category,
+            EntryField::Category => EntryField::Name,
+        };
+    }
+}
+
 /// Graph state that persists between frames.
 pub struct Graph {
     pub(super) nodes: Vec<FlodeNode>,
@@ -96,13 +137,15 @@ pub struct Graph {
     pub(super) preset_dir: Option<PathBuf>,
     /// The preset this graph was last saved as or loaded from.
     pub(super) preset_name: Option<String>,
-    /// The open preset list: the saved names, read when it opened.
-    pub(super) preset_list: Option<Vec<String>>,
-    /// The name being typed, while the save box is open.
-    pub(super) name_entry: Option<String>,
-    /// A name the user confirmed. The editor saves the preset under it, since the macro values
-    /// are the host's.
-    pub(super) pending_save: Option<String>,
+    /// The category of that preset. Empty if it has none.
+    pub(super) preset_category: String,
+    /// The open preset list, read when it opened.
+    pub(super) preset_list: Option<PresetMenu>,
+    /// The name and category being typed, while the save box is open.
+    pub(super) name_entry: Option<NameEntry>,
+    /// A name and category the user confirmed. The editor saves the preset under them, since the
+    /// macro values are the host's.
+    pub(super) pending_save: Option<(String, String)>,
     /// A line shown under the pill for a few seconds, such as "Saved Lead".
     pub(super) status: Option<(String, Instant)>,
 }
@@ -214,6 +257,7 @@ impl Graph {
             macro_edits: Vec::new(),
             preset_dir: presets::directory(),
             preset_name: None,
+            preset_category: String::new(),
             preset_list: None,
             name_entry: None,
             pending_save: None,
@@ -226,40 +270,51 @@ impl Graph {
         self.status = Some((text.into(), Instant::now()));
     }
 
-    /// Opens the preset list, reading the saved names now.
+    /// Opens the preset list, reading what is saved now.
     pub(super) fn open_preset_list(&mut self) {
-        let names = self
+        let library = self
             .preset_dir
             .as_deref()
-            .map(presets::list_in)
+            .map(presets::library_in)
             .unwrap_or_default();
-        self.preset_list = Some(names);
+        self.preset_list = Some(PresetMenu {
+            library,
+            open: None,
+        });
     }
 
-    /// Opens the save box. It starts with the current preset's name, so saving again replaces it.
+    /// Opens the save box. It starts with the current preset's name and category, so saving again
+    /// replaces it.
     pub(super) fn start_name_entry(&mut self) {
         self.preset_list = None;
-        self.name_entry = Some(self.preset_name.clone().unwrap_or_default());
+        self.name_entry = Some(NameEntry {
+            name: self.preset_name.clone().unwrap_or_default(),
+            category: self.preset_category.clone(),
+            field: EntryField::Name,
+        });
     }
 
-    /// Takes the typed name. A name that is not usable keeps the box open and says why.
+    /// Takes the typed name and category. One that is not usable keeps the box open and says why.
     pub(super) fn confirm_name_entry(&mut self) {
-        let Some(typed) = self.name_entry.as_deref() else {
+        let Some(entry) = &self.name_entry else {
             return;
         };
-        match presets::clean_name(typed) {
-            Some(name) => {
-                self.name_entry = None;
-                self.pending_save = Some(name);
-            }
-            None => self.say("Type a name first"),
-        }
+        let Some(name) = presets::clean_name(&entry.name) else {
+            self.say("Type a name first");
+            return;
+        };
+        let Some(category) = presets::clean_category(&entry.category) else {
+            self.say("That category is not usable");
+            return;
+        };
+        self.name_entry = None;
+        self.pending_save = Some((name, category));
     }
 
     /// Saves the preset a confirmed name asked for, with the macro knobs' current values. Does
     /// nothing if no name is waiting.
     pub(super) fn save_pending_preset(&mut self, macros: [f32; MACRO_COUNT]) {
-        let Some(name) = self.pending_save.take() else {
+        let Some((name, category)) = self.pending_save.take() else {
             return;
         };
         let Some(dir) = self.preset_dir.clone() else {
@@ -268,24 +323,26 @@ impl Graph {
         };
         let preset = Preset {
             name: name.clone(),
+            category: category.clone(),
             graph: self.to_saved(),
             macros,
         };
         match presets::save_in(&dir, &preset) {
             Ok(()) => {
                 self.preset_name = Some(name.clone());
+                self.preset_category = category;
                 self.say(format!("Saved {name}"));
             }
             Err(error) => self.say(format!("Could not save: {error}")),
         }
     }
 
-    /// Replaces the graph with the saved preset `name`, and sends its macro values to the host.
-    /// Returns true if the graph changed. A preset that can't be read leaves the graph alone and
-    /// says so.
-    pub(super) fn load_preset(&mut self, name: &str) -> bool {
+    /// Replaces the graph with the saved preset `name` in `category` (empty for none), and sends
+    /// its macro values to the host. Returns true if the graph changed. A preset that can't be
+    /// read leaves the graph alone and says so.
+    pub(super) fn load_preset(&mut self, category: &str, name: &str) -> bool {
         let loaded = match self.preset_dir.as_deref() {
-            Some(dir) => presets::load_in(dir, name),
+            Some(dir) => presets::load_in(dir, category, name),
             None => Err(std::io::Error::other("no preset folder")),
         };
         let preset = match loaded {
@@ -305,6 +362,7 @@ impl Graph {
         self.piano = piano;
         self.preset_dir = dir;
         self.preset_name = Some(preset.name.clone());
+        self.preset_category = preset.category.clone();
         for (index, &value) in preset.macros.iter().enumerate() {
             self.macro_edits.push(MacroEdit::Begin(index));
             self.macro_edits.push(MacroEdit::Set(index, value));
@@ -509,6 +567,7 @@ impl Graph {
         }
         let mut graph = Self::with(nodes, connections);
         graph.preset_name = saved.preset_name.clone();
+        graph.preset_category = saved.preset_category.clone();
         graph.refresh_slots();
         graph
     }
@@ -517,6 +576,7 @@ impl Graph {
         SavedGraph {
             version: SAVE_VERSION,
             preset_name: self.preset_name.clone(),
+            preset_category: self.preset_category.clone(),
             nodes: self.nodes.iter().map(SavedNode::new).collect(),
             connections: Vec::new(),
             links: self.connections.clone(),

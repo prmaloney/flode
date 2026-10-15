@@ -21,6 +21,9 @@ pub struct SavedGraph {
     /// The preset this graph was last saved as or loaded from, if any. Shown on the pill.
     #[serde(default)]
     pub(super) preset_name: Option<String>,
+    /// The category of that preset. Empty if it has none.
+    #[serde(default)]
+    pub(super) preset_category: String,
     pub(super) nodes: Vec<SavedNode>,
     /// Audio connections as (output node index, input node index). Graphs saved before ports
     /// existed use this. New saves leave it empty.

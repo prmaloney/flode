@@ -96,16 +96,30 @@ impl<'a> NodeEditor<'a> {
             return (event::Status::Captured, Some(Message::GraphChanged));
         }
 
-        // An open preset list takes the press. Its row saves or loads. Any other press closes it.
+        // An open preset list takes the press. Its row saves, loads, or opens a category's
+        // submenu. Any other press closes it.
         let had_presets = self.graph.preset_list.is_some();
-        if let Some(names) = self.graph.preset_list.take() {
-            match preset_row_at(bounds, names.len(), screen) {
+        if let Some(mut menu) = self.graph.preset_list.take() {
+            let library = &menu.library;
+            match preset_row_at(bounds, &menu, screen) {
                 Some(PresetRow::SaveAs) => {
                     self.graph.start_name_entry();
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
-                Some(PresetRow::Load(index)) => {
-                    self.graph.load_preset(&names[index]);
+                // A press on a category opens its submenu, or closes it if it is open.
+                Some(PresetRow::Category(index)) => {
+                    menu.open = (menu.open != Some(index)).then_some(index);
+                    self.graph.preset_list = Some(menu);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                Some(PresetRow::Loose(index)) => {
+                    self.graph.load_preset("", &library.loose[index]);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                Some(PresetRow::Sub(category, index)) => {
+                    let category = &library.categories[category];
+                    self.graph
+                        .load_preset(&category.name, &category.presets[index]);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 None => {}
@@ -332,13 +346,30 @@ impl<'a> NodeEditor<'a> {
                 return true;
             }
         }
-        if let Some(names) = &self.graph.preset_list {
-            if preset_row_at(bounds, names.len(), screen).is_some() {
+        if let Some(menu) = &self.graph.preset_list {
+            if preset_row_at(bounds, menu, screen).is_some() {
                 return true;
             }
         }
         // The save box takes every press, so a press on the keys does not play one.
         self.graph.name_entry.is_some()
+    }
+
+    /// Opens the submenu of the category under the cursor, and closes it when the cursor moves onto
+    /// another row of the list. Over the submenu itself, or off the list, it stays as it is, so
+    /// the cursor can cross the gap to reach it. Returns true if the submenu changed.
+    pub(super) fn hover_preset_menu(&mut self, bounds: Rectangle, screen: Point) -> bool {
+        let Some(menu) = self.graph.preset_list.as_mut() else {
+            return false;
+        };
+        let open = match preset_row_at(bounds, menu, screen) {
+            Some(PresetRow::Category(index)) => Some(index),
+            Some(PresetRow::SaveAs | PresetRow::Loose(_)) => None,
+            Some(PresetRow::Sub(..)) | None => menu.open,
+        };
+        let changed = open != menu.open;
+        menu.open = open;
+        changed
     }
 
     /// Handles a key event while the save box is open. The box takes every key, so the piano and
@@ -349,14 +380,13 @@ impl<'a> NodeEditor<'a> {
         event: &keyboard::Event,
     ) -> (event::Status, Option<Message>) {
         match event {
+            // Typing goes to the field with the caret.
             keyboard::Event::CharacterReceived(c) => {
-                let room = self
-                    .graph
-                    .name_entry
-                    .as_ref()
-                    .is_some_and(|text| text.chars().count() < crate::presets::MAX_NAME_LEN);
-                if room && crate::presets::valid_char(*c) {
-                    if let Some(text) = self.graph.name_entry.as_mut() {
+                if let Some(entry) = self.graph.name_entry.as_mut() {
+                    let text = entry.active_mut();
+                    if text.chars().count() < crate::presets::MAX_NAME_LEN
+                        && crate::presets::valid_char(*c)
+                    {
                         text.push(*c);
                     }
                 }
@@ -365,8 +395,14 @@ impl<'a> NodeEditor<'a> {
             keyboard::Event::KeyPressed { key_code, .. } => {
                 match key_code {
                     keyboard::KeyCode::Backspace => {
-                        if let Some(text) = self.graph.name_entry.as_mut() {
-                            text.pop();
+                        if let Some(entry) = self.graph.name_entry.as_mut() {
+                            entry.active_mut().pop();
+                        }
+                    }
+                    // Tab, and the arrow keys, move between the name and the category.
+                    keyboard::KeyCode::Tab | keyboard::KeyCode::Up | keyboard::KeyCode::Down => {
+                        if let Some(entry) = self.graph.name_entry.as_mut() {
+                            entry.switch_field();
                         }
                     }
                     keyboard::KeyCode::Escape => self.graph.name_entry = None,
@@ -600,8 +636,9 @@ impl<'a> Program<Message> for NodeEditor<'a> {
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point),
             mouse::Event::CursorMoved { .. } => {
+                let submenu_changed = self.hover_preset_menu(bounds, screen);
                 let hover = self.graph.hover_at(point);
-                let changed = hover != self.graph.hover;
+                let changed = hover != self.graph.hover || submenu_changed;
                 self.graph.hover = hover;
                 match self.drag(point, screen) {
                     (event::Status::Ignored, None) if changed => {

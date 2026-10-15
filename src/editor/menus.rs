@@ -2,8 +2,10 @@
 //! chrome that floats above the nodes.
 
 use crate::nodes::{Bypass, Category, FlodeNode, NodeKind};
+use crate::presets::Library;
 use nih_plug_iced::{Point, Rectangle};
 
+use super::graph::PresetMenu;
 use super::style::*;
 
 /// The add buttons on the pill, from left to right.
@@ -25,13 +27,17 @@ pub(super) const PILL_ITEMS: [PillItem; 5] = [
     PillItem::Presets,
 ];
 
-/// A row of the preset list.
+/// A row of the preset list or of a category's submenu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PresetRow {
     /// Opens the box that names and saves the current graph.
     SaveAs,
-    /// Loads the saved preset at this position in the list.
-    Load(usize),
+    /// A category, which opens its submenu. The position is in `library.categories`.
+    Category(usize),
+    /// A preset with no category. The position is in `library.loose`.
+    Loose(usize),
+    /// A preset in an open submenu: the category's position, then the preset's in that category.
+    Sub(usize, usize),
 }
 
 /// The widest a preset name is drawn on the pill, in characters.
@@ -47,24 +53,33 @@ pub(super) fn shorten(name: &str) -> String {
     }
 }
 
-/// How many saved names the list shows. It stops short of the key strip, and always has room for
-/// a few.
-pub(super) fn preset_names_shown(bounds: Rectangle, names: usize) -> usize {
+/// How many rows a preset list or submenu can have. It stops short of the key strip, and always
+/// has room for a few.
+fn preset_room(bounds: Rectangle) -> usize {
     let top = pill_bounds(bounds).y + PILL_HEIGHT + LIST_GAP;
     let room = (bounds.height - super::piano::STRIP_HEIGHT - top) / MENU_ITEM_HEIGHT;
-    // One row of the room is the save entry.
-    names.min((room.floor() as usize).saturating_sub(1).max(3))
+    (room.floor() as usize).max(4)
 }
 
-/// The list under the Presets button: the save entry, then the saved names. With none saved it
-/// has a row that says so.
-pub(super) fn preset_list_bounds(bounds: Rectangle, names: usize) -> Rectangle {
+/// How many categories and how many loose presets the main list shows. The save entry takes the
+/// first row, then the categories, then as many loose presets as fit.
+pub(super) fn preset_rows_shown(bounds: Rectangle, library: &Library) -> (usize, usize) {
+    let room = preset_room(bounds) - 1;
+    let categories = library.categories.len().min(room);
+    let loose = library.loose.len().min(room - categories);
+    (categories, loose)
+}
+
+/// The list under the Presets button: the save entry, the categories, then the presets that have
+/// no category. With none saved it has a row that says so.
+pub(super) fn preset_list_bounds(bounds: Rectangle, library: &Library) -> Rectangle {
     let index = PILL_ITEMS
         .iter()
         .position(|item| *item == PillItem::Presets)
         .unwrap_or(0);
     let segment = pill_segment(bounds, index);
-    let rows = 1 + preset_names_shown(bounds, names).max(1);
+    let (categories, loose) = preset_rows_shown(bounds, library);
+    let rows = 1 + (categories + loose).max(1);
     let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
     Rectangle {
         // The list lines up with the pill's right end, so it stays inside the window.
@@ -75,16 +90,63 @@ pub(super) fn preset_list_bounds(bounds: Rectangle, names: usize) -> Rectangle {
     }
 }
 
-/// The row of the preset list under `point`. The note row for an empty list is not a row.
-pub(super) fn preset_row_at(bounds: Rectangle, names: usize, point: Point) -> Option<PresetRow> {
-    let list = preset_list_bounds(bounds, names);
+/// How many presets a category's submenu shows.
+pub(super) fn submenu_rows_shown(bounds: Rectangle, library: &Library, category: usize) -> usize {
+    library
+        .categories
+        .get(category)
+        .map_or(0, |c| c.presets.len().min(preset_room(bounds)))
+}
+
+/// The submenu of a category. It opens beside the list, level with the category's row. It goes to
+/// the right of the list if there is room and to the left if not, and it is moved up if it would
+/// run into the key strip.
+pub(super) fn submenu_bounds(bounds: Rectangle, library: &Library, category: usize) -> Rectangle {
+    let list = preset_list_bounds(bounds, library);
+    let rows = submenu_rows_shown(bounds, library, category).max(1);
+    let height = rows as f32 * MENU_ITEM_HEIGHT;
+    let width = PRESET_LIST_MIN_WIDTH;
+    let right = list.x + list.width + LIST_GAP;
+    let x = if right + width <= bounds.width {
+        right
+    } else {
+        list.x - width - LIST_GAP
+    };
+    let level = list.y + (1 + category) as f32 * MENU_ITEM_HEIGHT;
+    let lowest = bounds.height - super::piano::STRIP_HEIGHT - height;
+    Rectangle {
+        x,
+        y: level.min(lowest).max(list.y),
+        width,
+        height,
+    }
+}
+
+/// The row of the preset list, or of the open submenu, under `point`. The note row for an empty
+/// list is not a row.
+pub(super) fn preset_row_at(
+    bounds: Rectangle,
+    menu: &PresetMenu,
+    point: Point,
+) -> Option<PresetRow> {
+    let library = &menu.library;
+    if let Some(open) = menu.open {
+        let sub = submenu_bounds(bounds, library, open);
+        if sub.contains(point) {
+            let row = ((point.y - sub.y) / MENU_ITEM_HEIGHT) as usize;
+            return (row < submenu_rows_shown(bounds, library, open))
+                .then_some(PresetRow::Sub(open, row));
+        }
+    }
+    let list = preset_list_bounds(bounds, library);
     if !list.contains(point) {
         return None;
     }
-    let row = ((point.y - list.y) / MENU_ITEM_HEIGHT) as usize;
-    match row {
+    let (categories, loose) = preset_rows_shown(bounds, library);
+    match ((point.y - list.y) / MENU_ITEM_HEIGHT) as usize {
         0 => Some(PresetRow::SaveAs),
-        row if row <= preset_names_shown(bounds, names) => Some(PresetRow::Load(row - 1)),
+        row if row <= categories => Some(PresetRow::Category(row - 1)),
+        row if row <= categories + loose => Some(PresetRow::Loose(row - 1 - categories)),
         _ => None,
     }
 }

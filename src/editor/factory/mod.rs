@@ -25,15 +25,20 @@ use crate::nodes::{FlodeNode, NodeKind, Port};
 use crate::presets::Preset;
 use nih_plug_iced::Point;
 
-/// Every factory preset, basses first, then leads, then pads.
+/// Every factory preset, basses first, then leads, then pads. Each is filed under its kind, which
+/// is the folder it is written into.
 pub(super) fn all() -> Vec<Preset> {
+    let filed = |category: &str, mut preset: Preset| {
+        preset.category = category.to_string();
+        preset
+    };
     vec![
-        sub_bass::build(),
-        reese::build(),
-        pulse_lead::build(),
-        bell_lead::build(),
-        warm_pad::build(),
-        dusk_pad::build(),
+        filed("Bass", sub_bass::build()),
+        filed("Bass", reese::build()),
+        filed("Lead", pulse_lead::build()),
+        filed("Lead", bell_lead::build()),
+        filed("Pad", warm_pad::build()),
+        filed("Pad", dusk_pad::build()),
     ]
 }
 
@@ -226,6 +231,7 @@ impl Builder {
         self.graph.preset_name = Some(name.to_string());
         Preset {
             name: name.to_string(),
+            category: String::new(),
             graph: self.graph.to_saved(),
             macros: self.macros,
         }
@@ -286,6 +292,11 @@ mod tests {
                 Some(preset.name.as_str())
             );
             assert!(presets[..index].iter().all(|p| p.name != preset.name));
+        }
+        // Two of each kind, filed in the folder that names it.
+        for kind in ["Bass", "Lead", "Pad"] {
+            let count = presets.iter().filter(|p| p.category == kind).count();
+            assert_eq!(count, 2, "{kind}");
         }
     }
 
@@ -377,15 +388,19 @@ mod tests {
         }
     }
 
-    /// Writes the factory presets into the preset folder. It replaces presets of the same names
-    /// and leaves any others alone.
+    /// Writes the factory presets into the preset folder, each in its category's folder. It
+    /// replaces presets of the same names and leaves any others alone.
     #[test]
     #[ignore = "writes into the user's preset folder"]
     fn write_factory_presets() {
         let dir = crate::presets::directory().expect("a home folder");
         for preset in all() {
+            // These were first written with no category, straight into the folder. The copy
+            // there would show up twice, so it goes.
+            let stale = dir.join(format!("{}.{}", preset.name, crate::presets::EXTENSION));
+            let _ = std::fs::remove_file(stale);
             crate::presets::save_in(&dir, &preset).unwrap();
-            println!("wrote {}", preset.name);
+            println!("wrote {}/{}", preset.category, preset.name);
         }
     }
 }
