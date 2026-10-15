@@ -7,14 +7,18 @@ use super::control::{
     ControlLevels, KnobValue, MapStage, Param, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
 };
 use super::stage::{
-    FilterParams, LaneGraph, MixParams, OscillatorParams, StageParams, StageSpec, MAX_INPUTS,
-    MAX_STAGES,
+    ChorusParams, CompressorParams, DelayParams, DistortionParams, FilterParams, FlangerParams,
+    LaneGraph, MixParams, OscillatorParams, PhaserParams, ReverbParams, StageParams, StageSpec,
+    MAX_INPUTS, MAX_STAGES,
 };
 use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
-use crate::nodes::{filter, lfo, map, mix, oscillator, FlodeNode, NodeKind, Port};
+use crate::nodes::{
+    compressor, delay, distortion, filter, lfo, map, mix, oscillator, phaser, FlodeNode, NodeKind,
+    Port,
+};
 use arrayvec::ArrayVec;
 
 /// The nodes and wires of a graph, borrowed for a query.
@@ -255,8 +259,12 @@ impl<'a> Wiring<'a> {
     /// wired in is silent.
     pub fn lane_graphs(&self) -> [LaneGraph; MAX_SLOTS] {
         let output = self.first_output();
+        // Each effect takes the next free instance of its kind, counted across every slot.
+        let mut pools = [0u8; EFFECT_KINDS];
         std::array::from_fn(|slot| match output {
-            Some(output) if slot < self.nodes[output].used => self.lane_graph(output, slot),
+            Some(output) if slot < self.nodes[output].used => {
+                self.lane_graph(output, slot, &mut pools)
+            }
             _ => LaneGraph::silent(self.slot_gain(output, slot)),
         })
     }
@@ -275,12 +283,12 @@ impl<'a> Wiring<'a> {
     /// stage fed by two inputs from one node is placed once. An input with no wire, a wire to a
     /// node that makes no audio, or a loop makes silence on that input. A slot that needs more
     /// than `MAX_STAGES` stages is silent.
-    fn lane_graph(&self, output: usize, slot: usize) -> LaneGraph {
+    fn lane_graph(&self, output: usize, slot: usize, pools: &mut [u8; EFFECT_KINDS]) -> LaneGraph {
         let mut lane = LaneGraph::silent(self.slot_gain(Some(output), slot));
         let Some(link) = self.input_link(output, Port::Slot(slot)) else {
             return lane;
         };
-        let mut builder = LaneBuilder::default();
+        let mut builder = LaneBuilder::new(pools);
         if builder.place(self, link.from).is_some() && !builder.overflowed {
             lane.stages = builder.stages;
         }
@@ -318,6 +326,60 @@ impl<'a> Wiring<'a> {
                 mode: mix::mix_mode(n),
                 amount: knob(KnobId::Mix),
             })),
+            NodeKind::Distortion => Some(StageParams::Distortion(DistortionParams {
+                kind: distortion::kind(n),
+                drive: knob(KnobId::Drive),
+                tone: knob(KnobId::Tone),
+                level: knob(KnobId::OscGain),
+                mix: knob(KnobId::Mix),
+            })),
+            NodeKind::Compressor => Some(StageParams::Compressor(CompressorParams {
+                threshold: knob(KnobId::Threshold),
+                ratio: knob(KnobId::Ratio),
+                attack: knob(KnobId::CompAttack),
+                release: knob(KnobId::CompRelease),
+                makeup: knob(KnobId::Makeup),
+                mix: knob(KnobId::Mix),
+                multiband: compressor::multiband(n),
+                depth: knob(KnobId::Depth),
+            })),
+            NodeKind::Reverb => Some(StageParams::Reverb(ReverbParams {
+                decay: knob(KnobId::ReverbDecay),
+                size: knob(KnobId::Size),
+                damp: knob(KnobId::Damp),
+                mix: knob(KnobId::Mix),
+            })),
+            NodeKind::Delay => Some(StageParams::Delay(DelayParams {
+                time: knob(KnobId::DelayTime),
+                sync: knob(KnobId::LfoSync),
+                feedback: knob(KnobId::Feedback),
+                damp: knob(KnobId::Damp),
+                mix: knob(KnobId::Mix),
+                ping_pong: delay::ping_pong(n),
+            })),
+            NodeKind::Chorus => Some(StageParams::Chorus(ChorusParams {
+                rate: knob(KnobId::LfoRate),
+                depth: knob(KnobId::Depth),
+                spread: knob(KnobId::Spread),
+                mix: knob(KnobId::Mix),
+            })),
+            NodeKind::Phaser => Some(StageParams::Phaser(PhaserParams {
+                rate: knob(KnobId::LfoRate),
+                depth: knob(KnobId::Depth),
+                feedback: knob(KnobId::Feedback),
+                center: knob(KnobId::Center),
+                stages: phaser::stages(n),
+                spread: knob(KnobId::Spread),
+                mix: knob(KnobId::Mix),
+            })),
+            NodeKind::Flanger => Some(StageParams::Flanger(FlangerParams {
+                rate: knob(KnobId::LfoRate),
+                depth: knob(KnobId::Depth),
+                feedback: knob(KnobId::Feedback),
+                delay: knob(KnobId::FlangerDelay),
+                spread: knob(KnobId::Spread),
+                mix: knob(KnobId::Mix),
+            })),
             NodeKind::Map
             | NodeKind::Output
             | NodeKind::Lfo
@@ -327,9 +389,27 @@ impl<'a> Wiring<'a> {
     }
 }
 
+/// The kinds of effect, for counting how many of each a patch uses.
+pub const EFFECT_KINDS: usize = 7;
+
+/// Which counter an effect uses, or None for a stage that is not an effect.
+fn effect_kind(params: &StageParams) -> Option<usize> {
+    match params {
+        StageParams::Distortion(_) => Some(0),
+        StageParams::Compressor(_) => Some(1),
+        StageParams::Reverb(_) => Some(2),
+        StageParams::Delay(_) => Some(3),
+        StageParams::Chorus(_) => Some(4),
+        StageParams::Phaser(_) => Some(5),
+        StageParams::Flanger(_) => Some(6),
+        _ => None,
+    }
+}
+
 /// The arena of one slot while it is built.
-#[derive(Default)]
-struct LaneBuilder {
+struct LaneBuilder<'p> {
+    /// How many of each effect kind earlier slots and this one have placed, for the next instance.
+    pools: &'p mut [u8; EFFECT_KINDS],
     stages: ArrayVec<StageSpec, MAX_STAGES>,
     /// The arena position of each node already placed, so a node feeding two inputs runs once.
     placed: Vec<(usize, u8)>,
@@ -339,7 +419,17 @@ struct LaneBuilder {
     overflowed: bool,
 }
 
-impl LaneBuilder {
+impl<'p> LaneBuilder<'p> {
+    fn new(pools: &'p mut [u8; EFFECT_KINDS]) -> Self {
+        Self {
+            pools,
+            stages: ArrayVec::new(),
+            placed: Vec::new(),
+            path: Vec::new(),
+            overflowed: false,
+        }
+    }
+
     /// Places a node's stage after the stages that feed it, and returns its arena position. None
     /// means the node makes no audio, is part of a loop, or would not fit.
     fn place(&mut self, wiring: &Wiring, node: usize) -> Option<u8> {
@@ -364,8 +454,35 @@ impl LaneBuilder {
         }
         self.path.pop();
 
+        // Effects run on the summed voices, so a per-voice stage can't read one. A wire like that
+        // can't be made in the editor, and an old or hand edited save that has one reads silence.
+        if !params.is_effect() {
+            for source in inputs.iter_mut() {
+                if source.is_some_and(|at| self.stages[at as usize].params.is_effect()) {
+                    *source = None;
+                }
+            }
+        }
+
+        let mut pool = 0;
+        if let Some(kind) = effect_kind(&params) {
+            pool = self.pools[kind];
+            self.pools[kind] = pool.saturating_add(1);
+            // A per-voice stage that feeds an effect is added across the voices to feed it.
+            for source in inputs.iter().flatten() {
+                let stage = &mut self.stages[*source as usize];
+                stage.tap = !stage.params.is_effect();
+            }
+        }
+
         let position = self.stages.len() as u8;
-        if self.stages.try_push(StageSpec { params, inputs }).is_err() {
+        let spec = StageSpec {
+            params,
+            inputs,
+            tap: false,
+            pool,
+        };
+        if self.stages.try_push(spec).is_err() {
             self.overflowed = true;
             return None;
         }
@@ -658,5 +775,143 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+    use nih_plug_iced::Point;
+
+    fn node(kind: NodeKind) -> FlodeNode {
+        FlodeNode::new(kind, Point::new(0.0, 0.0))
+    }
+
+    fn audio(from: usize, to: usize, input: Port) -> Connection {
+        Connection {
+            from,
+            out: Port::Audio,
+            to,
+            input,
+        }
+    }
+
+    fn lanes(
+        nodes: &mut [FlodeNode],
+        links: &[Connection],
+        output: usize,
+    ) -> [LaneGraph; MAX_SLOTS] {
+        nodes[output].used = MAX_SLOTS;
+        Wiring::new(nodes, links).lane_graphs()
+    }
+
+    /// Every effect node makes an effect stage with one input, and no other node does.
+    #[test]
+    fn effect_nodes_make_effect_stages() {
+        for kind in NodeKind::ALL {
+            let nodes = vec![node(kind)];
+            let params = Wiring::new(&nodes, &[]).stage_params(0);
+            assert_eq!(
+                params.is_some_and(|p| p.is_effect()),
+                kind.is_effect(),
+                "{kind:?}"
+            );
+            if kind.is_effect() {
+                assert_eq!(params.unwrap().input_count(), 1, "{kind:?}");
+                let ports = nodes[0].input_ports();
+                assert_eq!(ports.iter().filter(|p| p.is_audio()).count(), 1, "{kind:?}");
+            }
+        }
+    }
+
+    /// An oscillator through a reverb is two stages. The oscillator is tapped, so the engine sums
+    /// its voices for the reverb, and the reverb is the root.
+    #[test]
+    fn an_effect_taps_the_stage_that_feeds_it() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Output),
+        ];
+        let links = [audio(0, 1, Port::Audio), audio(1, 2, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 2)[0];
+        assert_eq!(lane.stages.len(), 2);
+        assert!(lane.stages[0].tap);
+        assert!(!lane.stages[1].tap);
+        assert_eq!(lane.stages[1].inputs[0], Some(0));
+        assert!(lane.stages[1].params.is_effect());
+    }
+
+    /// A chain of effects taps only the voice stage at its head.
+    #[test]
+    fn a_chain_of_effects_taps_only_the_voice_stage() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Distortion),
+            node(NodeKind::Delay),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        let taps: Vec<bool> = lane.stages.iter().map(|s| s.tap).collect();
+        assert_eq!(taps, [true, false, false]);
+    }
+
+    /// A stage that is not an effect keeps its tap flag clear.
+    #[test]
+    fn a_plain_chain_has_no_taps() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Filter),
+            node(NodeKind::Output),
+        ];
+        let links = [audio(0, 1, Port::Audio), audio(1, 2, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 2)[0];
+        assert!(lane.stages.iter().all(|s| !s.tap));
+    }
+
+    /// Each effect of a kind takes the next instance, across slots.
+    #[test]
+    fn effects_of_one_kind_take_different_instances() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 4, Port::Slot(0)),
+            audio(2, 3, Port::Audio),
+            audio(3, 4, Port::Slot(1)),
+        ];
+        let lanes = lanes(&mut nodes, &links, 4);
+        assert_eq!(lanes[0].stages[1].pool, 0);
+        assert_eq!(lanes[1].stages[1].pool, 1);
+    }
+
+    /// A per-voice stage can't read an effect. A save that wires one that way reads silence there.
+    #[test]
+    fn a_voice_stage_reading_an_effect_gets_silence() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Filter),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        let filter = lane.stages.last().unwrap();
+        assert!(matches!(filter.params, StageParams::Filter(_)));
+        assert_eq!(filter.inputs[0], None);
     }
 }

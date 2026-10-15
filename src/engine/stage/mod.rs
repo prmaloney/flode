@@ -125,6 +125,8 @@ impl StageState {
             StageParams::Oscillator(p) => Self::Oscillator(Oscillator::start(p, ctx)),
             StageParams::Filter(p) => Self::Filter(Filter::start(p, ctx)),
             StageParams::Mix(p) => Self::Mix(Mix::start(p, ctx)),
+            // An effect runs once on the summed voices, so a voice keeps nothing for it.
+            _ => Self::Empty,
         }
     }
 
@@ -156,19 +158,30 @@ pub fn start_arena(graph: &LaneGraph, ctx: &mut StartContext) -> [StageState; MA
     states
 }
 
-/// Runs a slot's stages for one voice and one sample, and returns what the last stage makes. The
-/// arena is in signal order, so each stage finds its inputs already computed.
+/// Runs a slot's per-voice stages for one voice and one sample, and returns what the last stage
+/// makes. The arena is in signal order, so each stage finds its inputs already computed.
+///
+/// Effects are skipped, since they run once on the summed voices. A stage that an effect reads
+/// adds its output to `taps`, which holds the sum over the voices so far. When the last stage is
+/// an effect, the voice itself makes silence, and its sound reaches the output through the taps.
 pub fn evaluate(
     graph: &LaneGraph,
     states: &mut [StageState; MAX_STAGES],
     tick: &mut Tick,
+    taps: &mut [Frame; MAX_STAGES],
 ) -> Frame {
     let mut outputs = [Frame::SILENT; MAX_STAGES];
     for (index, spec) in graph.stages.iter().enumerate() {
+        if spec.params.is_effect() {
+            continue;
+        }
         let inputs = spec
             .inputs
             .map(|source| source.map_or(Frame::SILENT, |i| outputs[i as usize]));
         outputs[index] = states[index].process(&spec.params, &inputs, tick);
+        if spec.tap {
+            taps[index] += outputs[index];
+        }
     }
     graph
         .stages
@@ -281,7 +294,12 @@ mod tests {
         let mut states = start_arena(lane, &mut rig.start_context());
         let mut peak = 0.0f32;
         for n in 0..samples {
-            let out = evaluate(lane, &mut states, &mut rig.tick());
+            let out = evaluate(
+                lane,
+                &mut states,
+                &mut rig.tick(),
+                &mut [Frame::SILENT; MAX_STAGES],
+            );
             if n >= samples / 2 {
                 peak = peak.max(out.peak());
             }
@@ -345,7 +363,15 @@ mod tests {
         let mut rig = Rig::new();
         let mut states = start_arena(&lane, &mut rig.start_context());
         let lowest = (0..2000)
-            .map(|_| evaluate(&lane, &mut states, &mut rig.tick()).l)
+            .map(|_| {
+                evaluate(
+                    &lane,
+                    &mut states,
+                    &mut rig.tick(),
+                    &mut [Frame::SILENT; MAX_STAGES],
+                )
+                .l
+            })
             .fold(f32::MAX, f32::min);
         assert!(lowest >= 0.0, "{lowest}");
     }

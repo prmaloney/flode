@@ -53,8 +53,39 @@ pub enum KnobId {
     Mix,
     /// An oscillator's place in the stereo field, from -1 (left) to 1 (right).
     Pan,
-    /// How far an oscillator's unison copies spread across the stereo field, from 0 to 1.
+    /// How far an oscillator's unison copies spread across the stereo field, from 0 to 1. Effects
+    /// that move the left and right apart share it.
     Spread,
+    /// How hard a distortion pushes its input, from 0 to 1.
+    Drive,
+    /// A tilt from dark (0) to bright (1), for a distortion's output.
+    Tone,
+    /// A compressor's threshold in dB.
+    Threshold,
+    /// A compressor's ratio, from 1 to 20.
+    Ratio,
+    /// A compressor's attack in milliseconds.
+    CompAttack,
+    /// A compressor's release in milliseconds.
+    CompRelease,
+    /// A compressor's makeup gain in dB.
+    Makeup,
+    /// How far a modulation effect sweeps, or how hard the multiband compressor works, from 0 to 1.
+    Depth,
+    /// A reverb's decay time in seconds.
+    ReverbDecay,
+    /// A reverb's room size, from 0 to 1.
+    Size,
+    /// How much high end a reverb or delay tail loses, from 0 to 1.
+    Damp,
+    /// A delay's time in milliseconds.
+    DelayTime,
+    /// How much of an effect's output goes back into its input, from 0 to 0.95.
+    Feedback,
+    /// A phaser's centre frequency in Hz.
+    Center,
+    /// A flanger's base delay in milliseconds.
+    FlangerDelay,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -68,7 +99,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 44;
 
     pub const ALL: [KnobId; KnobId::COUNT] = [
         KnobId::Gain,
@@ -100,6 +131,21 @@ impl KnobId {
         KnobId::Mix,
         KnobId::Pan,
         KnobId::Spread,
+        KnobId::Drive,
+        KnobId::Tone,
+        KnobId::Threshold,
+        KnobId::Ratio,
+        KnobId::CompAttack,
+        KnobId::CompRelease,
+        KnobId::Makeup,
+        KnobId::Depth,
+        KnobId::ReverbDecay,
+        KnobId::Size,
+        KnobId::Damp,
+        KnobId::DelayTime,
+        KnobId::Feedback,
+        KnobId::Center,
+        KnobId::FlangerDelay,
     ];
 
     /// The name shown beside the knob.
@@ -134,6 +180,21 @@ impl KnobId {
             KnobId::Mix => "Mix",
             KnobId::Pan => "Pan",
             KnobId::Spread => "Spread",
+            KnobId::Drive => "Drive",
+            KnobId::Tone => "Tone",
+            KnobId::Threshold => "Thresh",
+            KnobId::Ratio => "Ratio",
+            KnobId::CompAttack => "Attack",
+            KnobId::CompRelease => "Release",
+            KnobId::Makeup => "Makeup",
+            KnobId::Depth => "Depth",
+            KnobId::ReverbDecay => "Decay",
+            KnobId::Size => "Size",
+            KnobId::Damp => "Damp",
+            KnobId::DelayTime => "Time",
+            KnobId::Feedback => "Feedback",
+            KnobId::Center => "Freq",
+            KnobId::FlangerDelay => "Delay",
         }
     }
 
@@ -187,10 +248,63 @@ impl KnobId {
                 min: -2.0,
                 max: 2.0,
             },
-            KnobId::Mix | KnobId::Spread => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::Mix
+            | KnobId::Spread
+            | KnobId::Drive
+            | KnobId::Tone
+            | KnobId::Depth
+            | KnobId::Size
+            | KnobId::Damp => FloatRange::Linear { min: 0.0, max: 1.0 },
             KnobId::Pan => FloatRange::Linear {
                 min: -1.0,
                 max: 1.0,
+            },
+            KnobId::Threshold => FloatRange::Linear {
+                min: -60.0,
+                max: 0.0,
+            },
+            KnobId::Ratio => FloatRange::Skewed {
+                min: 1.0,
+                max: 20.0,
+                factor: FloatRange::skew_factor(-1.0),
+            },
+            KnobId::CompAttack => FloatRange::Skewed {
+                min: 0.1,
+                max: 100.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+            KnobId::CompRelease => FloatRange::Skewed {
+                min: 10.0,
+                max: 1000.0,
+                factor: FloatRange::skew_factor(-1.5),
+            },
+            KnobId::Makeup => FloatRange::Linear {
+                min: 0.0,
+                max: 24.0,
+            },
+            KnobId::ReverbDecay => FloatRange::Skewed {
+                min: 0.1,
+                max: 20.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+            KnobId::DelayTime => FloatRange::Skewed {
+                min: 1.0,
+                max: 2000.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+            KnobId::Feedback => FloatRange::Linear {
+                min: 0.0,
+                max: 0.95,
+            },
+            KnobId::Center => FloatRange::Skewed {
+                min: 100.0,
+                max: 8000.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+            KnobId::FlangerDelay => FloatRange::Skewed {
+                min: 0.1,
+                max: 10.0,
+                factor: FloatRange::skew_factor(-1.5),
             },
             // Zero is free running. Each step past it is one of the note divisions.
             KnobId::LfoSync => FloatRange::Linear {
@@ -229,6 +343,21 @@ impl KnobId {
             KnobId::Mix => 0.5,
             KnobId::Spread => 0.75,
             KnobId::Pan => 0.0,
+            KnobId::Drive => 0.3,
+            KnobId::Tone => 0.5,
+            KnobId::Threshold => -18.0,
+            KnobId::Ratio => 4.0,
+            KnobId::CompAttack => 10.0,
+            KnobId::CompRelease => 100.0,
+            KnobId::Makeup => 0.0,
+            KnobId::Depth => 0.5,
+            KnobId::ReverbDecay => 2.0,
+            KnobId::Size => 0.5,
+            KnobId::Damp => 0.5,
+            KnobId::DelayTime => 350.0,
+            KnobId::Feedback => 0.4,
+            KnobId::Center => 1000.0,
+            KnobId::FlangerDelay => 2.0,
         }
     }
 
@@ -288,7 +417,21 @@ impl KnobId {
             KnobId::Coarse => format!("{:+} st", plain.round() as i32),
             KnobId::Fine => format!("{plain:+.0} ct"),
             KnobId::Octave => format!("{:+} oct", plain.round() as i32),
-            KnobId::Mix | KnobId::Spread => format!("{:.0}%", plain * 100.0),
+            KnobId::Mix
+            | KnobId::Spread
+            | KnobId::Drive
+            | KnobId::Tone
+            | KnobId::Depth
+            | KnobId::Size
+            | KnobId::Damp
+            | KnobId::Feedback => format!("{:.0}%", plain * 100.0),
+            KnobId::Threshold | KnobId::Makeup => format!("{plain:.1} dB"),
+            KnobId::Ratio => format!("{plain:.1}:1"),
+            KnobId::CompAttack => format!("{plain:.1} ms"),
+            KnobId::CompRelease | KnobId::DelayTime => format!("{plain:.0} ms"),
+            KnobId::FlangerDelay => format!("{plain:.2} ms"),
+            KnobId::ReverbDecay => format!("{plain:.2} s"),
+            KnobId::Center => format!("{plain:.0} Hz"),
             KnobId::Pan => match (plain * 100.0).round() as i32 {
                 0 => "C".to_string(),
                 side if side < 0 => format!("L {}", -side),

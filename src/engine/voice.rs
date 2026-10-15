@@ -86,12 +86,13 @@ impl Voice {
     }
 
     /// One sample of the voice: its slot's stages, run in signal order. `delays` are the voice's
-    /// own delay lines.
+    /// own delay lines. `taps` collects what the effects in the slot read from the voices.
     pub fn render(
         &mut self,
         graph: &LaneGraph,
         env: &mut RenderEnv,
         delays: &mut [DelayLine],
+        taps: &mut [Frame; MAX_STAGES],
     ) -> Frame {
         // A voice's own envelopes drive its knobs, so each note moves on its own.
         let levels = ControlLevels {
@@ -111,6 +112,6 @@ impl Voice {
             rng: env.rng,
             delays,
         };
-        evaluate(graph, &mut self.stages, &mut tick)
+        evaluate(graph, &mut self.stages, &mut tick, taps)
     }
 }

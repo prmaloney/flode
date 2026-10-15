@@ -3,6 +3,7 @@
 //! the stages that feed it by position. The engine runs the arena once per voice.
 
 use super::control::Param;
+use crate::dsp::effects::distortion::DistortionKind;
 use crate::dsp::mix::MixMode;
 use crate::dsp::noise::NoiseType;
 use crate::dsp::svf::FilterType;
@@ -94,13 +95,96 @@ impl Default for MixParams {
     }
 }
 
+/// A distortion stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistortionParams {
+    pub kind: DistortionKind,
+    pub drive: Param,
+    pub tone: Param,
+    pub level: Param,
+    pub mix: Param,
+}
+
+/// A compressor stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressorParams {
+    pub threshold: Param,
+    pub ratio: Param,
+    pub attack: Param,
+    pub release: Param,
+    pub makeup: Param,
+    pub mix: Param,
+    pub multiband: bool,
+    pub depth: Param,
+}
+
+/// A reverb stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReverbParams {
+    pub decay: Param,
+    pub size: Param,
+    pub damp: Param,
+    pub mix: Param,
+}
+
+/// A delay stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DelayParams {
+    pub time: Param,
+    /// The Sync knob. Zero uses the time. A step past it is a note division at the host's tempo.
+    pub sync: Param,
+    pub feedback: Param,
+    pub damp: Param,
+    pub mix: Param,
+    pub ping_pong: bool,
+}
+
+/// A chorus stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChorusParams {
+    pub rate: Param,
+    pub depth: Param,
+    pub spread: Param,
+    pub mix: Param,
+}
+
+/// A phaser stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaserParams {
+    pub rate: Param,
+    pub depth: Param,
+    pub feedback: Param,
+    pub center: Param,
+    pub stages: usize,
+    pub spread: Param,
+    pub mix: Param,
+}
+
+/// A flanger stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlangerParams {
+    pub rate: Param,
+    pub depth: Param,
+    pub feedback: Param,
+    pub delay: Param,
+    pub spread: Param,
+    pub mix: Param,
+}
+
 /// What kind of stage this is, with its settings. Adding an audio node means adding a variant
-/// here and its implementation in `engine::stage`.
+/// here and its implementation in `engine::stage`, or in `engine::effects` for an effect.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StageParams {
     Oscillator(OscillatorParams),
     Filter(FilterParams),
     Mix(MixParams),
+    Distortion(DistortionParams),
+    Compressor(CompressorParams),
+    Reverb(ReverbParams),
+    Delay(DelayParams),
+    Chorus(ChorusParams),
+    Phaser(PhaserParams),
+    Flanger(FlangerParams),
 }
 
 impl StageParams {
@@ -111,7 +195,17 @@ impl StageParams {
             StageParams::Oscillator(_) => 0,
             StageParams::Filter(_) => 1,
             StageParams::Mix(_) => 2,
+            _ => 1,
         }
+    }
+
+    /// True for the effects. They run once on a slot's summed voices, where every other stage
+    /// runs once per voice.
+    pub fn is_effect(&self) -> bool {
+        !matches!(
+            self,
+            StageParams::Oscillator(_) | StageParams::Filter(_) | StageParams::Mix(_)
+        )
     }
 }
 
@@ -122,6 +216,12 @@ pub struct StageSpec {
     /// The arena position of the stage on each audio input, or `None` for an input with no wire.
     /// Every position is lower than this stage's own, since the arena is in signal order.
     pub inputs: [Option<u8>; MAX_INPUTS],
+    /// True for a per-voice stage that an effect reads. The engine adds its output across the
+    /// voices to feed the effect.
+    pub tap: bool,
+    /// Which instance of its kind an effect uses. The engine keeps a few of each kind, and an
+    /// effect past the last one passes its input through. Unused by the other stages.
+    pub pool: u8,
 }
 
 #[cfg(test)]
@@ -131,6 +231,8 @@ impl StageSpec {
         Self {
             params,
             inputs: [None; MAX_INPUTS],
+            tap: false,
+            pool: 0,
         }
     }
 

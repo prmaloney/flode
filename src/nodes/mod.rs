@@ -7,9 +7,14 @@
 //! beside it, and an output pin on the right edge. Under the rows a node can have one extra
 //! control, which is a dropdown or a switch.
 
+pub mod chorus;
+pub mod compressor;
 pub mod connection;
+pub mod delay;
+pub mod distortion;
 pub mod envelope;
 pub mod filter;
+pub mod flanger;
 pub mod input;
 pub mod knobs;
 pub mod lfo;
@@ -17,6 +22,8 @@ pub mod map;
 pub mod mix;
 pub mod oscillator;
 pub mod output;
+pub mod phaser;
+pub mod reverb;
 
 use crate::editor::knob;
 use nih_plug_iced::{Point, Rectangle};
@@ -60,6 +67,13 @@ pub enum NodeKind {
     Map,
     Mix,
     Output,
+    Distortion,
+    Compressor,
+    Reverb,
+    Delay,
+    Chorus,
+    Phaser,
+    Flanger,
 }
 
 /// The groups the add menu sorts the node kinds into.
@@ -69,7 +83,7 @@ pub enum Category {
     Driver,
     /// Nodes that route or shape signals without a sound of their own.
     Util,
-    /// Nodes that change the sound of a signal. Filter so far.
+    /// Nodes that change the sound of a signal.
     Effects,
 }
 
@@ -92,7 +106,16 @@ impl Category {
                 NodeKind::Input,
                 NodeKind::Mix,
             ],
-            Category::Effects => &[NodeKind::Filter],
+            Category::Effects => &[
+                NodeKind::Filter,
+                NodeKind::Distortion,
+                NodeKind::Compressor,
+                NodeKind::Reverb,
+                NodeKind::Delay,
+                NodeKind::Chorus,
+                NodeKind::Phaser,
+                NodeKind::Flanger,
+            ],
         }
     }
 }
@@ -100,7 +123,7 @@ impl Category {
 impl NodeKind {
     /// Every kind. The tests walk them.
     #[cfg(test)]
-    pub const ALL: [NodeKind; 8] = [
+    pub const ALL: [NodeKind; 15] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
@@ -109,7 +132,36 @@ impl NodeKind {
         NodeKind::Map,
         NodeKind::Mix,
         NodeKind::Output,
+        NodeKind::Distortion,
+        NodeKind::Compressor,
+        NodeKind::Reverb,
+        NodeKind::Delay,
+        NodeKind::Chorus,
+        NodeKind::Phaser,
+        NodeKind::Flanger,
     ];
+
+    /// True for the effects that run on a slot's summed voices: distortion, compressor, reverb,
+    /// delay, chorus, phaser, and flanger. Their output can feed another of them or an output
+    /// slot, and nothing else, since the voices are already added together there.
+    pub fn is_effect(self) -> bool {
+        matches!(
+            self,
+            NodeKind::Distortion
+                | NodeKind::Compressor
+                | NodeKind::Reverb
+                | NodeKind::Delay
+                | NodeKind::Chorus
+                | NodeKind::Phaser
+                | NodeKind::Flanger
+        )
+    }
+
+    /// True if an audio wire may run from a node of kind `from` to one of kind `to`. A wire out
+    /// of an effect can only go to another effect or an output slot.
+    pub fn may_feed(from: NodeKind, to: NodeKind) -> bool {
+        !from.is_effect() || to.is_effect() || to == NodeKind::Output
+    }
 
     /// What sets this kind apart from the others.
     pub fn behavior(self) -> &'static dyn NodeBehavior {
@@ -122,6 +174,13 @@ impl NodeKind {
             NodeKind::Map => &map::Map,
             NodeKind::Mix => &mix::Mix,
             NodeKind::Output => &output::Output,
+            NodeKind::Distortion => &distortion::Distortion,
+            NodeKind::Compressor => &compressor::Compressor,
+            NodeKind::Reverb => &reverb::Reverb,
+            NodeKind::Delay => &delay::Delay,
+            NodeKind::Chorus => &chorus::Chorus,
+            NodeKind::Phaser => &phaser::Phaser,
+            NodeKind::Flanger => &flanger::Flanger,
         }
     }
 
@@ -274,6 +333,11 @@ pub trait NodeBehavior: Sync {
         &[]
     }
 
+    /// Knobs this kind starts at a value other than the knob's own default, in plain units.
+    fn defaults(&self) -> &'static [(KnobId, f32)] {
+        &[]
+    }
+
     /// The name of each dropdown, indexed the same way as `dropdowns`.
     fn dropdown_names(&self) -> &'static [&'static str] {
         &[]
@@ -318,7 +382,7 @@ pub struct FlodeNode {
 
 impl FlodeNode {
     pub fn new(kind: NodeKind, position: Point) -> Self {
-        Self {
+        let mut node = Self {
             kind,
             position,
             collapsed: false,
@@ -327,8 +391,14 @@ impl FlodeNode {
             switches: Vec::new(),
             slots: 1,
             used: 0,
-            knob_states: Default::default(),
+            knob_states: std::array::from_fn(|_| Default::default()),
+        };
+        // A kind can start a knob somewhere other than the knob's own default, such as a
+        // distortion that starts fully wet.
+        for &(id, plain) in kind.behavior().defaults() {
+            node.values[id as usize] = id.to_normalized(plain);
         }
+        node
     }
 
     pub fn title(&self) -> &'static str {

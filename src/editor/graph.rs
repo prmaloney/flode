@@ -333,7 +333,12 @@ impl Graph {
         let bounds = dragged.bounds();
         self.connections.iter().position(|c| {
             let fits = if audio_node {
-                c.out == Port::Audio && c.input.is_audio()
+                // The two wires the splice would make have to be allowed: an effect's output
+                // only goes to another effect or an output slot.
+                c.out == Port::Audio
+                    && c.input.is_audio()
+                    && NodeKind::may_feed(self.nodes[c.from].kind, dragged.kind)
+                    && NodeKind::may_feed(dragged.kind, self.nodes[c.to].kind)
             } else {
                 c.out.is_control_out() && matches!(c.input, Port::Knob(_))
             };

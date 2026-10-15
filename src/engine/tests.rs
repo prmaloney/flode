@@ -369,3 +369,23 @@ fn a_note_retriggers_the_lfo_through_the_engine() {
     assert!(before > 0.1, "{before}");
     assert!(after < 0.01, "{after}");
 }
+
+/// An effect at the end of a chain still lets the voices through. The oscillator is tapped, its
+/// voices are summed for the effect, and the effect's output is what the slot plays.
+#[test]
+fn an_effect_at_the_end_of_a_chain_plays_the_voices() {
+    use crate::patch::stage::ChorusParams;
+    let mut source = osc(OscillatorParams::default());
+    source.tap = true;
+    let dry_chorus = StageSpec::new(StageParams::Chorus(ChorusParams {
+        rate: Param::default_of(KnobId::LfoRate),
+        depth: Param::default_of(KnobId::Depth),
+        spread: Param::default_of(KnobId::Spread),
+        mix: Param::fixed(KnobId::Mix, 0.0),
+    }))
+    .with_input(0, 0);
+    let mut engine = engine_on(&patch_with(0, &[source, dry_chorus]));
+    engine.note_on(60, 1.0);
+    let out = render(&mut engine, 4410);
+    assert!(peak(&out) > 0.05, "{}", peak(&out));
+}

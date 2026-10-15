@@ -2,6 +2,7 @@
 //! test can play notes into it and read samples out. The plugin feeds it events, and it runs the
 //! stages of the current patch for every sounding voice.
 
+mod effects;
 mod lane;
 mod lfo;
 #[cfg(test)]
@@ -20,7 +21,9 @@ use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use crate::nodes::output::MAX_SLOTS;
 use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES};
+use crate::patch::stage::MAX_STAGES;
 use crate::patch::Patch;
+use effects::Effects;
 use lane::Lane;
 use lfo::Lfos;
 use nih_plug::util;
@@ -48,6 +51,8 @@ pub struct Engine {
     /// The patch for the current block.
     patch: Patch,
     lanes: [Lane; MAX_SLOTS],
+    /// The effects of every slot, which run on the slot's summed voices.
+    effects: Effects,
     lfos: Lfos,
     transport: Transport,
     /// The MIDI sources' latest values, from 0.0 to 1.0.
@@ -86,6 +91,7 @@ impl Engine {
             sample_rate: 44100.0,
             patch: Patch::silent(),
             lanes: std::array::from_fn(|_| Lane::new()),
+            effects: Effects::new(44100.0),
             lfos: Lfos::new(),
             transport: Transport::default(),
             midi_levels: MidiSource::ALL.map(|source| source.default_level()),
@@ -111,6 +117,10 @@ impl Engine {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if sample_rate != self.sample_rate {
+            // The effects size their memory by the rate, so they are built again.
+            self.effects = Effects::new(sample_rate);
+        }
         self.sample_rate = sample_rate;
         self.smooth = 1.0 - (-1.0 / (SMOOTH_SECONDS * sample_rate)).exp();
     }
@@ -119,6 +129,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.held.clear();
         self.lanes.iter_mut().for_each(Lane::clear);
+        self.effects.reset();
     }
 
     /// Every control source's level right now. Knobs read their route from these.
@@ -323,6 +334,7 @@ impl Engine {
                 rng: &mut self.rng,
             };
             let mut lane_out = Frame::SILENT;
+            lane.taps = [Frame::SILENT; MAX_STAGES];
             for (index, slot) in lane.voices.iter_mut().enumerate() {
                 let Some(voice) = slot else { continue };
                 for index in 0..MAX_ENVELOPES {
@@ -334,11 +346,21 @@ impl Engine {
                 voice.glide(self.glide_coef);
                 let delays =
                     &mut lane.delays[index * MAX_DELAY_LINES..(index + 1) * MAX_DELAY_LINES];
-                lane_out += voice.render(graph, &mut env, delays);
+                lane_out += voice.render(graph, &mut env, delays, &mut lane.taps);
                 voice.advance(&self.env_configs);
                 if voice.finished() {
                     *slot = None;
                 }
+            }
+            // The voices are scaled before the effects, so an effect sees the level the output
+            // would have without it. The slot's gain comes after, like a fader.
+            lane_out = lane_out * VOICE_MIX;
+            lane.taps.iter_mut().for_each(|tap| *tap = *tap * VOICE_MIX);
+            if let Some(effected) =
+                self.effects
+                    .run(graph, &lane.taps, &levels, self.transport.tempo)
+            {
+                lane_out = effected;
             }
             let gain = lane.ease_gain(db_to_linear(graph.gain.plain(&levels)), self.smooth);
             out += lane_out * gain;
@@ -355,7 +377,7 @@ impl Engine {
         );
 
         if self.patch.is_audible() {
-            out * (VOICE_MIX * self.master_gain)
+            out * self.master_gain
         } else {
             Frame::SILENT
         }

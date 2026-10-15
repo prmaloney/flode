@@ -3,6 +3,8 @@
 use super::stage::MAX_DELAY_LINES;
 use super::voice::Voice;
 use crate::dsp::delay::DelayLine;
+use crate::dsp::frame::Frame;
+use crate::patch::stage::MAX_STAGES;
 
 /// The most notes that can sound at once in one output slot.
 pub const NUM_VOICES: usize = 16;
@@ -14,6 +16,8 @@ pub struct Lane {
     /// The delay lines of every voice, `MAX_DELAY_LINES` for each in voice order. They are built
     /// once here, because a delay line allocates and the audio thread can't.
     pub(super) delays: Box<[DelayLine]>,
+    /// What the voices of each stage that feeds an effect add up to this sample.
+    pub(super) taps: [Frame; MAX_STAGES],
     /// The slot's gain, easing toward the knob so a move does not click.
     gain: f32,
     /// False until the gain has a first value. It then starts at the knob instead of easing in
@@ -28,6 +32,7 @@ impl Lane {
             delays: (0..NUM_VOICES * MAX_DELAY_LINES)
                 .map(|_| DelayLine::new())
                 .collect(),
+            taps: [Frame::SILENT; MAX_STAGES],
             gain: 0.0,
             settled: false,
         }
