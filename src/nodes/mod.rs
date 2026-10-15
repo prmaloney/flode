@@ -17,7 +17,7 @@ pub mod mix;
 pub mod oscillator;
 pub mod output;
 
-use crate::knob;
+use crate::editor::knob;
 use nih_plug_iced::{Point, Rectangle};
 use serde::{Deserialize, Serialize};
 

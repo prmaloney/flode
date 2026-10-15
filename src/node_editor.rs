@@ -11,7 +11,8 @@
 //! The audio chain runs from an oscillator through any filter and envelope nodes to an output slot.
 
 use crate::dsp::wavetable::Waveform;
-use crate::knob::{self, Press};
+use crate::editor::knob::{self, Press};
+use crate::editor::piano::{self, Piano, PianoEvent};
 use crate::nodes::filter::{self, FilterType};
 use crate::nodes::knobs::KnobId;
 use crate::nodes::lfo;
@@ -26,7 +27,6 @@ use crate::nodes::{
 use crate::patch::control::{
     ControlLevels, KnobValue, MapStage, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
 };
-use crate::piano::{self, Piano, PianoEvent};
 use crate::routing::{Branch, EnvelopeSettings, Globals, LaneChain, LfoSettings, MixChain};
 use nih_plug_iced::widget::canvas::{
     event::{self, Event},

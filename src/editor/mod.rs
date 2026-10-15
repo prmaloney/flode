@@ -1,10 +1,13 @@
+pub mod knob;
+pub mod piano;
+
 use nih_plug::prelude::{Editor, GuiContext};
 use nih_plug_iced::*;
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
+use crate::editor::piano::PianoEvent;
 use crate::node_editor::{self, NodeEditor};
-use crate::piano::PianoEvent;
 use crate::routing::AudioRouting;
 use crate::FlodeParams;
 

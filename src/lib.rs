@@ -12,11 +12,9 @@ use std::sync::{Arc, Mutex};
 
 mod dsp;
 mod editor;
-mod knob;
 mod node_editor;
 mod nodes;
 mod patch;
-mod piano;
 mod routing;
 
 use dsp::envelope::{Adsr, AdsrConfig, FADE_SECONDS};
@@ -24,6 +22,7 @@ use dsp::noise::{NoiseState, NoiseType};
 use dsp::rng::Rng;
 use dsp::warp::{warp_phase, warp_value, WarpMode};
 use dsp::wavetable::{WaveTables, Waveform};
+use editor::piano::PianoEvent;
 use nodes::filter::FilterType;
 use nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use nodes::knobs::{KnobId, GAIN_MIN_DB, MAX_UNISON};
@@ -31,7 +30,6 @@ use nodes::lfo;
 use nodes::oscillator::transpose_ratio;
 use nodes::output::{slot_knob, MAX_SLOTS};
 use patch::control::{ControlLevels, KnobValue, ENV_SLOTS, MAX_ENVELOPES, MAX_LFOS};
-use piano::PianoEvent;
 use routing::{EnvelopeSettings, LaneChain, LfoSettings};
 
 /// Set by the standalone binary before it starts. Only standalone routes the computer keyboard to
