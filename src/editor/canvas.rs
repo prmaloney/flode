@@ -437,6 +437,7 @@ impl<'a> NodeEditor<'a> {
             }
             keyboard::Event::KeyReleased { .. } => {
                 let note = self.graph.piano.handle(event.clone());
+                let note = note.filter(|_| self.graph.computer_keys);
                 (event::Status::Captured, note.map(Message::Note))
             }
             _ => (event::Status::Ignored, None),
@@ -586,7 +587,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 } else {
                     event::Status::Ignored
                 };
+                // The octave keys still shift the strip in a plugin, but its notes belong to the
+                // host there, so a key plays none.
                 let note = self.graph.piano.handle(key_event);
+                let note = note.filter(|_| self.graph.computer_keys);
                 return (status, note.map(Message::Note));
             }
         };
@@ -598,6 +602,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         if let Some(position) = position {
             self.graph.last_screen = position;
         }
+        self.graph.cursor_in = position.is_some();
         let released = matches!(
             mouse_event,
             mouse::Event::ButtonReleased(mouse::Button::Left)

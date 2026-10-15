@@ -157,8 +157,11 @@ pub struct Graph {
     /// The key on the strip the mouse holds down, and so the note it is playing.
     pub(super) mouse_note: Option<u8>,
     /// True when the computer keyboard plays notes, which is in the standalone app. The strip
-    /// marks the keys it plays.
+    /// marks the keys it plays. In a plugin it is false, and only clicks on the strip play.
     pub(super) computer_keys: bool,
+    /// True while the cursor is inside the editor. Hover highlights use it, so one does not stay
+    /// lit after the cursor leaves.
+    pub(super) cursor_in: bool,
     /// What the cursor is over, if it is over a dropdown or one of its open rows.
     pub(super) hover: Option<Hover>,
     /// The category whose list is open under the pill.
@@ -285,7 +288,8 @@ impl Graph {
             link_target: None,
             hover: None,
             mouse_note: None,
-            computer_keys: false,
+            computer_keys: true,
+            cursor_in: false,
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),

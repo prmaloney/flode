@@ -873,6 +873,44 @@ mod layering_tests {
         ));
     }
 
+    /// In a plugin the computer keyboard plays nothing, but a click on the strip still does, and
+    /// the octave keys still shift the strip.
+    #[test]
+    fn in_a_plugin_only_clicks_play() {
+        use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        };
+        let mut graph = minimal_graph();
+        graph.computer_keys = false;
+        let key = |graph: &mut Graph, key_code| {
+            let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+            editor
+                .update(
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key_code,
+                        modifiers: Modifiers::default(),
+                    }),
+                    bounds,
+                    Cursor::Unavailable,
+                )
+                .1
+        };
+        assert!(key(&mut graph, KeyCode::A).is_none());
+        key(&mut graph, KeyCode::X);
+        assert_eq!(graph.piano.octave(), 1);
+
+        let strip = piano::strip_bounds(bounds);
+        let message = press_at(
+            &mut graph,
+            Point::new(piano::CONTROLS_WIDTH + 4.0, strip.y + strip.height - 4.0),
+        );
+        assert!(matches!(message, Some(Message::Note(_))), "{message:?}");
+    }
+
     /// The octave column has no keys. A press on it, away from the buttons, plays nothing and does
     /// not start dragging the graph.
     #[test]

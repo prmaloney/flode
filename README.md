@@ -67,10 +67,12 @@ the sustain hold. A noise LFO has no dot.
 - `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
   in the right-click menu.
 - Scroll to pan and pinch to zoom.
-- The computer keyboard and the strip at the bottom play notes in the standalone app. In the
-  plugin the strip shows the notes the host sends. It covers three octaves, and the blue bar over
-  the keys marks the ones the computer keyboard plays. The octave buttons at the strip's left, and
-  the Z and X keys, move the strip and the keyboard up or down by an octave, up to three.
+- Click the strip at the bottom to play notes, in the plugin and in the standalone app. The strip
+  also shows the notes the host sends. The computer keyboard plays notes in the standalone app
+  only, since a host takes the keys in a plugin window. The strip covers three octaves. In the
+  standalone app a blue bar over the keys marks the ones the computer keyboard plays. The octave
+  buttons at the strip's left, and the Z and X keys, move the strip up or down by an octave, up to
+  three.
 
 **Presets.** The Presets button saves and loads whole patches, sorted into categories. See
 [Presets](#presets) below.

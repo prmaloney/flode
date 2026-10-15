@@ -148,13 +148,13 @@ impl Plugin for Flode {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        let note_tx = STANDALONE
-            .load(Ordering::Relaxed)
-            .then(|| self.note_tx.clone());
+        // A click on the key strip plays a note in the plugin too. The computer keyboard plays
+        // only in the standalone app, since a host takes the keys in a plugin window.
         editor::create(
             self.params.clone(),
             self.params.editor_state.clone(),
-            note_tx,
+            Some(self.note_tx.clone()),
+            STANDALONE.load(Ordering::Relaxed),
             self.link.clone(),
         )
     }

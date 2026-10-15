@@ -6,7 +6,7 @@
 //! `FLODE_PRESET` is `Category/Name`, or just `Name` for a preset with no category. The editor
 //! starts with that preset loaded.
 //!
-//! `FLODE_NOTE` is a MIDI note number to hold down from the start, in the standalone app. It
+//! `FLODE_NOTE` is a MIDI note number to hold down from the start. It
 //! gives the envelope and LFO viewers a live signal to show.
 //!
 //! `FLODE_UI` opens part of the interface. `presets` opens the preset list, `presets:Bass` opens
@@ -15,7 +15,7 @@
 use super::graph::Graph;
 
 /// The MIDI note `FLODE_NOTE` asks to hold from the start, if it holds a number from 0 to 127.
-/// Only the standalone app plays it.
+/// The editor sends it on start, in the plugin and in the standalone app.
 pub(super) fn note() -> Option<u8> {
     note_from(std::env::var("FLODE_NOTE").ok().as_deref())
 }

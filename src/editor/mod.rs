@@ -41,15 +41,18 @@ pub(crate) fn default_state() -> Arc<IcedState> {
     IcedState::from_size(1024, 712)
 }
 
-/// `note_tx` is `Some` only in standalone mode. Without it, computer keyboard notes are dropped.
-/// `link` hands the audio thread the patch and shows the editor what the audio thread reports.
+/// `note_tx` carries the notes a click on the key strip plays. It is `None` in a test with no audio
+/// side. `computer_keys` is true in the standalone app, where the computer keyboard plays notes
+/// too. In a plugin the host owns the keyboard, so the strip is the only way to play from the
+/// editor. `link` hands the audio thread the patch and shows the editor what it reports.
 pub(crate) fn create(
     params: Arc<FlodeParams>,
     editor_state: Arc<IcedState>,
     note_tx: Option<Arc<Mutex<Producer<PianoEvent>>>>,
+    computer_keys: bool,
     link: Arc<PatchLink>,
 ) -> Option<Box<dyn Editor>> {
-    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, link))
+    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, computer_keys, link))
 }
 
 struct FlodeEditor {
@@ -130,11 +133,12 @@ impl IcedEditor for FlodeEditor {
     type InitializationFlags = (
         Arc<FlodeParams>,
         Option<Arc<Mutex<Producer<PianoEvent>>>>,
+        bool,
         Arc<PatchLink>,
     );
 
     fn new(
-        (params, note_tx, link): Self::InitializationFlags,
+        (params, note_tx, computer_keys, link): Self::InitializationFlags,
         context: Arc<dyn GuiContext>,
     ) -> (Self, Command<Self::Message>) {
         let mut graph = match params.graph.lock() {
@@ -142,7 +146,7 @@ impl IcedEditor for FlodeEditor {
             Err(_) => graph::Graph::default(),
         };
         demo::apply(&mut graph);
-        graph.computer_keys = note_tx.is_some();
+        graph.computer_keys = computer_keys;
         link.publish(graph.patch());
         // The demo hook can hold a note down from the start, so a picture shows live signals.
         if let (Some(tx), Some(note)) = (&note_tx, demo::note()) {
