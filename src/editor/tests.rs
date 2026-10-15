@@ -1456,10 +1456,10 @@ mod section_tests {
     #[test]
     fn a_node_with_no_sections_keeps_its_old_layout() {
         for kind in [
-            NodeKind::Filter,
             NodeKind::Mix,
-            NodeKind::Lfo,
             NodeKind::Reverb,
+            NodeKind::Delay,
+            NodeKind::Chorus,
         ] {
             let node = node(kind);
             for (index, place) in node.row_places().iter().enumerate() {

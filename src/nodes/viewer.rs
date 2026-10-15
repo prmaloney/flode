@@ -40,6 +40,7 @@ impl Live {
     }
 
     /// The node's own values, as when nothing drives any knob.
+    #[cfg(test)]
     pub fn of(node: &FlodeNode) -> Self {
         Self::new(node, |_| None)
     }
@@ -124,7 +125,7 @@ mod tests {
     /// A kind with no viewer row has no viewer, and no trace.
     #[test]
     fn a_node_without_a_viewer_has_none() {
-        let node = FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0));
+        let node = FlodeNode::new(NodeKind::Mix, Point::new(0.0, 0.0));
         assert!(!node.has_viewer());
         assert!(node.trace(&Live::of(&node)).is_none());
     }
