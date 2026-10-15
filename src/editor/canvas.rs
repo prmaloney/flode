@@ -20,14 +20,22 @@ pub struct NodeEditor<'a> {
     pub(super) levels: ControlLevels,
     /// The notes the synth is playing, shown as dots on the key strip.
     pub(super) active_notes: [u64; 2],
+    /// The held left and right output levels, shown on the meter.
+    pub(super) output: [f32; 2],
 }
 
 impl<'a> NodeEditor<'a> {
-    pub fn new(graph: &'a mut Graph, levels: ControlLevels, active_notes: [u64; 2]) -> Self {
+    pub fn new(
+        graph: &'a mut Graph,
+        levels: ControlLevels,
+        active_notes: [u64; 2],
+        output: [f32; 2],
+    ) -> Self {
         Self {
             graph,
             levels,
             active_notes,
+            output,
         }
     }
 
@@ -403,6 +411,12 @@ impl<'a> Program<Message> for NodeEditor<'a> {
     }
 
     fn draw(&self, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
-        draw_editor(&*self.graph, self.levels, self.active_notes, bounds)
+        draw_editor(
+            &*self.graph,
+            self.levels,
+            self.active_notes,
+            self.output,
+            bounds,
+        )
     }
 }

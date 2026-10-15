@@ -67,6 +67,8 @@ pub struct Engine {
     /// The master gain, easing toward its knob. It applies after the slots are mixed.
     master_gain: f32,
     master_settled: bool,
+    /// The loudest left and right output sample since the meter last read it.
+    output_peak: [f32; 2],
     /// The share of the gap a smoothed value closes each sample.
     smooth: f32,
     /// True while the output is mono, so one voice sounds at a time.
@@ -101,6 +103,7 @@ impl Engine {
             age_counter: 0,
             master_gain: 0.0,
             master_settled: false,
+            output_peak: [0.0; 2],
             smooth: 0.0,
             mono: false,
             glide_always: false,
@@ -376,10 +379,19 @@ impl Engine {
             &mut self.rng,
         );
 
-        if self.patch.is_audible() {
+        let result = if self.patch.is_audible() {
             out * self.master_gain
         } else {
             Frame::SILENT
-        }
+        };
+        self.output_peak[0] = self.output_peak[0].max(result.l.abs());
+        self.output_peak[1] = self.output_peak[1].max(result.r.abs());
+        result
+    }
+
+    /// The loudest left and right sample since the last call, as linear amplitude. The meter
+    /// reads it once per block.
+    pub fn take_output_peak(&mut self) -> [f32; 2] {
+        std::mem::take(&mut self.output_peak)
     }
 }

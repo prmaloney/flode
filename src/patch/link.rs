@@ -18,6 +18,9 @@ pub struct Meters {
     pub levels: ControlLevels,
     /// The notes with a voice sounding, as two 64-bit words, shown on the key strip.
     pub active_notes: [u64; 2],
+    /// The loudest left and right output sample of the last block, as linear amplitude, shown on
+    /// the output meter.
+    pub output: [f32; 2],
 }
 
 /// The editor's ends of the two channels.

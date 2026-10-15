@@ -19,6 +19,7 @@ pub(super) fn draw_editor(
     graph: &Graph,
     levels: ControlLevels,
     active_notes: [u64; 2],
+    output: [f32; 2],
     bounds: Rectangle,
 ) -> Vec<Geometry> {
     let mut frame = Frame::new(bounds.size());
@@ -97,6 +98,7 @@ pub(super) fn draw_editor(
 
     // The pill stays fixed on screen. It is drawn after the nodes, so it covers them.
     draw_pill(&mut frame, bounds);
+    super::meter::draw(&mut frame, bounds, output);
 
     let strip = piano::strip_bounds(bounds);
     piano::draw_strip(&mut frame, strip, active_notes, graph.mouse_note);

@@ -208,11 +208,6 @@ impl Graph {
         self.wiring().is_driven(node, id)
     }
 
-    /// True if any knob in the graph is driven by a control wire.
-    pub fn any_driven(&self) -> bool {
-        self.wiring().any_driven()
-    }
-
     /// The control route that drives a knob, if one does.
     pub fn control_route(&self, node: usize, id: KnobId) -> Option<Route> {
         self.wiring().control_route(node, id)

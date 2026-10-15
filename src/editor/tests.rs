@@ -54,7 +54,6 @@ mod tests {
         assert!((at(0.0) - 0.6).abs() < 1e-6);
         assert!((at(1.0) - 0.8).abs() < 1e-6);
         assert!(graph.is_driven(1, KnobId::Gain));
-        assert!(graph.any_driven());
     }
 
     /// A map with nothing upstream does not drive its knob.

@@ -389,3 +389,29 @@ fn an_effect_at_the_end_of_a_chain_plays_the_voices() {
     let out = render(&mut engine, 4410);
     assert!(peak(&out) > 0.05, "{}", peak(&out));
 }
+
+/// The output peak is the loudest sample on each side since it was last read, and reading it
+/// starts a new window.
+#[test]
+fn the_output_peak_reports_and_resets() {
+    let panned = osc(OscillatorParams {
+        pan: Param::fixed(KnobId::Pan, -1.0),
+        ..OscillatorParams::default()
+    });
+    let mut engine = engine_on(&patch_with(0, &[panned]));
+    assert_eq!(engine.take_output_peak(), [0.0, 0.0]);
+
+    engine.note_on(60, 1.0);
+    let out = render_stereo(&mut engine, 4410);
+    let [left, right] = engine.take_output_peak();
+    let expected = out.iter().map(|f| f.l.abs()).fold(0.0f32, f32::max);
+    assert_eq!(left, expected);
+    assert!(left > 0.05 && right < 1e-5, "{left} {right}");
+
+    // The window starts over, and silence after the note reads as zero.
+    engine.note_off(60);
+    render_stereo(&mut engine, 44100);
+    engine.take_output_peak();
+    render_stereo(&mut engine, 100);
+    assert_eq!(engine.take_output_peak(), [0.0, 0.0]);
+}

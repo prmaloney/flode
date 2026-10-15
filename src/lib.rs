@@ -192,6 +192,7 @@ impl Plugin for Flode {
         self.audio.meters.write(Meters {
             levels: self.engine.levels(),
             active_notes: self.engine.active_notes(),
+            output: self.engine.take_output_peak(),
         });
 
         ProcessStatus::KeepAlive

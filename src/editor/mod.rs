@@ -14,6 +14,7 @@ mod draw;
 pub mod graph;
 pub mod knob;
 mod menus;
+mod meter;
 pub mod piano;
 pub mod saved;
 mod style;
@@ -25,6 +26,7 @@ use nih_plug::prelude::{Editor, GuiContext};
 use nih_plug_iced::*;
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::editor::piano::PianoEvent;
 use crate::patch::link::PatchLink;
@@ -53,6 +55,10 @@ struct FlodeEditor {
     link: Arc<PatchLink>,
 
     graph: graph::Graph,
+    /// The held output levels, which fall back between frames.
+    meter: meter::Ballistics,
+    /// When the meter last updated, to time its fall.
+    meter_updated: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +93,8 @@ impl IcedEditor for FlodeEditor {
             note_tx,
             link,
             graph,
+            meter: meter::Ballistics::default(),
+            meter_updated: None,
         };
         (editor, Command::none())
     }
@@ -128,19 +136,25 @@ impl IcedEditor for FlodeEditor {
         &self,
         window_subs: &mut WindowSubs<Self::Message>,
     ) -> Subscription<Self::Message> {
-        // Redraw every frame while a control drives a knob, so its indicator moves.
-        if self.graph.any_driven() {
-            window_subs.on_frame = Some(Message::Tick);
-        }
+        // Redraw every frame, so the output meter moves and a driven knob's indicator follows its
+        // control.
+        window_subs.on_frame = Some(Message::Tick);
         Subscription::none()
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
         let meters = self.link.meters();
+        let now = Instant::now();
+        let seconds = self
+            .meter_updated
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        self.meter_updated = Some(now);
+        let output = self.meter.update(meters.output, seconds);
         let editor: Canvas<canvas::Message, NodeEditor<'_>> = Canvas::new(NodeEditor::new(
             &mut self.graph,
             meters.levels,
             meters.active_notes,
+            output,
         ))
         .width(Length::Fill)
         .height(Length::Fill);

@@ -56,16 +56,6 @@ impl<'a> Wiring<'a> {
         self.control_route(node, id).is_some()
     }
 
-    /// True if any knob in the graph is driven by a control wire.
-    pub fn any_driven(&self) -> bool {
-        self.nodes.iter().enumerate().any(|(index, node)| {
-            node.rows()
-                .iter()
-                .filter_map(|row| row.knob)
-                .any(|id| self.is_driven(index, id))
-        })
-    }
-
     /// The control path to a knob: a source, and the maps its level passes through on the way.
     /// The path is only valid if it ends at an envelope, an LFO, or a MIDI source. Returns None
     /// for a knob without one.
