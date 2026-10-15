@@ -14,6 +14,7 @@ mod pulse_lead;
 mod reese;
 mod sub_bass;
 mod warm_pad;
+mod wobble_riot;
 
 use super::graph::Graph;
 use crate::dsp::wavetable::Waveform;
@@ -35,6 +36,7 @@ pub(super) fn all() -> Vec<Preset> {
     vec![
         filed("Bass", sub_bass::build()),
         filed("Bass", reese::build()),
+        filed("Bass", wobble_riot::build()),
         filed("Lead", pulse_lead::build()),
         filed("Lead", bell_lead::build()),
         filed("Pad", warm_pad::build()),
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn the_presets_have_distinct_clean_names() {
         let presets = all();
-        assert_eq!(presets.len(), 6);
+        assert_eq!(presets.len(), 7);
         for (index, preset) in presets.iter().enumerate() {
             assert_eq!(
                 crate::presets::clean_name(&preset.name).as_deref(),
@@ -293,10 +295,10 @@ mod tests {
             );
             assert!(presets[..index].iter().all(|p| p.name != preset.name));
         }
-        // Two of each kind, filed in the folder that names it.
-        for kind in ["Bass", "Lead", "Pad"] {
+        // Three basses, two leads, two pads, each filed in the folder that names it.
+        for (kind, expected) in [("Bass", 3), ("Lead", 2), ("Pad", 2)] {
             let count = presets.iter().filter(|p| p.category == kind).count();
-            assert_eq!(count, 2, "{kind}");
+            assert_eq!(count, expected, "{kind}");
         }
     }
 
