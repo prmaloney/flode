@@ -38,6 +38,11 @@ impl NodeBehavior for Oscillator {
         rows.push(Row::driven_knob(KnobId::PhaseRandom));
         rows.push(Row::control(Control::Dropdown(1)));
         rows.push(Row::driven_knob(KnobId::WarpAmount));
+        // Under the FM warp, another oscillator's output wired here modulates this one's phase.
+        // It sits below the amount so the warp dropdown stays put when the mode changes.
+        if warp_mode(node) == WarpMode::Fm {
+            rows.push(Row::input(Port::AudioIn(0)).labelled("FM"));
+        }
         rows.push(Row::driven_knob(KnobId::OscGain));
         rows
     }
@@ -76,6 +81,41 @@ pub fn warp_mode(node: &FlodeNode) -> WarpMode {
 }
 
 /// The warp dropdown's rows.
-pub const WARP_LABELS: [&str; 8] = [
-    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize",
+pub const WARP_LABELS: [&str; 9] = [
+    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize", "FM",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::NodeKind;
+    use nih_plug_iced::Point;
+
+    fn oscillator() -> FlodeNode {
+        FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0))
+    }
+
+    /// The warp dropdown lists one row for every warp mode, in the same order.
+    #[test]
+    fn the_warp_labels_match_the_modes() {
+        assert_eq!(WARP_LABELS.len(), WarpMode::ALL.len());
+        assert_eq!(WARP_LABELS[WarpMode::Fm as usize], "FM");
+    }
+
+    /// The FM pin shows only under the FM warp, below the warp amount, and says what it is.
+    #[test]
+    fn the_fm_input_shows_only_under_the_fm_warp() {
+        let mut node = oscillator();
+        assert!(!node.input_ports().contains(&Port::AudioIn(0)));
+
+        node.choose(1, WarpMode::Fm as usize);
+        assert_eq!(warp_mode(&node), WarpMode::Fm);
+        let rows = node.rows();
+        let fm = rows
+            .iter()
+            .position(|row| row.input == Some(Port::AudioIn(0)))
+            .expect("an FM input row");
+        assert_eq!(rows[fm].label, Some("FM"));
+        assert_eq!(rows[fm - 1].knob, Some(KnobId::WarpAmount));
+    }
+}

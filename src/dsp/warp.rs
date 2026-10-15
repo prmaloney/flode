@@ -22,10 +22,13 @@ pub enum WarpMode {
     Mirror = 6,
     /// Rounds the amplitude to a few steps.
     Quantize = 7,
+    /// Pushes the phase around with an audio signal from another oscillator, as phase modulation.
+    /// The warp amount sets how far. The oscillator reads the signal from its FM input.
+    Fm = 8,
 }
 
 impl WarpMode {
-    pub const ALL: [WarpMode; 8] = [
+    pub const ALL: [WarpMode; 9] = [
         WarpMode::None,
         WarpMode::Bend,
         WarpMode::Sync,
@@ -34,15 +37,28 @@ impl WarpMode {
         WarpMode::Flip,
         WarpMode::Mirror,
         WarpMode::Quantize,
+        WarpMode::Fm,
     ];
 }
 
+/// How far a full-scale modulator moves the phase at the top of the warp amount, in cycles. One
+/// cycle is a modulation index of about 6.3. Tuned by ear.
+const FM_MAX_CYCLES: f32 = 2.0;
+
+/// How far the modulator pushes the phase, in cycles, per unit of modulator signal. The curve is
+/// squared so the low end of the knob has fine control, where the sound changes fastest.
+pub fn fm_depth(amount: f32) -> f32 {
+    let a = amount.clamp(0.0, 1.0);
+    a * a * FM_MAX_CYCLES
+}
+
 /// Moves a phase, from 0.0 to 1.0, through a warp. `amount` runs from 0.0, which leaves the phase
-/// alone, to 1.0, the full warp. Quantize doesn't move the phase.
+/// alone, to 1.0, the full warp. Quantize and FM don't move the phase here. FM needs a signal,
+/// which the oscillator adds itself.
 pub fn warp_phase(mode: WarpMode, phase: f32, amount: f32) -> f32 {
     let a = amount.clamp(0.0, 1.0);
     let warped = match mode {
-        WarpMode::None | WarpMode::Quantize => return phase,
+        WarpMode::None | WarpMode::Quantize | WarpMode::Fm => return phase,
         // A power curve on the phase, which crowds it toward one end.
         WarpMode::Bend => phase.powf(2.0f32.powf(-(a * 2.0 - 1.0) * 2.0)),
         // The cycle restarts at a higher rate, so later cycles repeat sooner.
@@ -86,6 +102,22 @@ pub fn warp_value(mode: WarpMode, value: f32, amount: f32) -> f32 {
 #[cfg(test)]
 mod warp_tests {
     use super::*;
+
+    /// FM depth grows with the amount, starts at nothing, and tops out at its maximum.
+    #[test]
+    fn fm_depth_rises_from_zero_to_its_maximum() {
+        assert_eq!(fm_depth(0.0), 0.0);
+        assert_eq!(fm_depth(1.0), FM_MAX_CYCLES);
+        assert!(fm_depth(0.25) < fm_depth(0.5) && fm_depth(0.5) < fm_depth(1.0));
+        // The knob clamps, so a driven amount can't push past the maximum.
+        assert_eq!(fm_depth(3.0), FM_MAX_CYCLES);
+    }
+
+    /// FM moves the phase through the oscillator's own signal, not through the warp.
+    #[test]
+    fn fm_leaves_the_phase_to_the_oscillator() {
+        assert_eq!(warp_phase(WarpMode::Fm, 0.3, 1.0), 0.3);
+    }
 
     /// With no amount, every warp leaves the phase alone.
     #[test]

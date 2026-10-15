@@ -187,6 +187,9 @@ pub struct Row {
     pub output: Option<Port>,
     /// A control on this row, in place of pins and a knob: a dropdown, a switch, or a curve.
     pub control: Option<Control>,
+    /// The text beside the input pin when the row has no knob to name it. It replaces the port's
+    /// own label, so a node can name its audio input "FM" instead of "A".
+    pub label: Option<&'static str>,
 }
 
 /// A control that takes a whole row, in the order the node lists its rows.
@@ -206,42 +209,41 @@ impl Row {
         Self {
             input: Some(Port::Knob(id)),
             knob: Some(id),
-            output: None,
-            control: None,
+            ..Self::default()
         }
     }
 
     /// A knob with no pin, which a control wire can't drive.
     pub fn plain_knob(id: KnobId) -> Self {
         Self {
-            input: None,
             knob: Some(id),
-            output: None,
-            control: None,
+            ..Self::default()
         }
     }
 
     pub fn input(port: Port) -> Self {
         Self {
             input: Some(port),
-            knob: None,
-            output: None,
-            control: None,
+            ..Self::default()
         }
     }
 
     /// A row that holds a control and nothing else.
     pub fn control(control: Control) -> Self {
         Self {
-            input: None,
-            knob: None,
-            output: None,
             control: Some(control),
+            ..Self::default()
         }
     }
 
     pub fn with_output(mut self, port: Port) -> Self {
         self.output = Some(port);
+        self
+    }
+
+    /// Names the input pin, in place of the port's own label.
+    pub fn labelled(mut self, label: &'static str) -> Self {
+        self.label = Some(label);
         self
     }
 }

@@ -1,11 +1,12 @@
 //! The oscillator stage: a waveform or noise, with unison, detune, warp, transpose, and the
-//! amplitude envelope. It has no audio inputs.
+//! amplitude envelope. It is a source with no audio inputs, except under the FM warp, where it
+//! reads one signal and uses it to push its own phase around.
 
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::gain::db_to_linear;
 use crate::dsp::noise::NoiseState;
 use crate::dsp::pitch::transpose_ratio;
-use crate::dsp::warp::{warp_phase, warp_value};
+use crate::dsp::warp::{fm_depth, warp_phase, warp_value, WarpMode};
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::MAX_UNISON;
 use crate::patch::control::MAX_ENVELOPES;
@@ -25,6 +26,9 @@ pub struct OscillatorState {
     count: usize,
     /// Unison copies add up, so the sum is scaled down. Noise is one stream and needs no scale.
     norm: f32,
+    /// How far the FM signal pushed the phase on the last sample, in cycles. The change from one
+    /// sample to the next is how fast the modulation is moving the phase.
+    last_modulation: f32,
 }
 
 #[cfg(test)]
@@ -74,13 +78,14 @@ impl AudioStage for Oscillator {
             detune_ratios,
             count,
             norm,
+            last_modulation: 0.0,
         }
     }
 
     fn process(
         p: &OscillatorParams,
         state: &mut OscillatorState,
-        _inputs: &[f32; MAX_INPUTS],
+        inputs: &[f32; MAX_INPUTS],
         tick: &mut Tick,
     ) -> f32 {
         let levels = tick.levels;
@@ -93,14 +98,32 @@ impl AudioStage for Oscillator {
                 p.fine.plain(levels),
             );
             let warp_amount = p.warp_amount.plain(levels);
+
+            // Under the FM warp, the signal on the input pushes the read phase around. The phase
+            // accumulators keep their own pitch, so this is phase modulation, and the other
+            // oscillator's tuning sets the ratio between the two. The modulator's own envelope and
+            // level scale the depth, since the input is its finished output.
+            let modulation = if p.warp == WarpMode::Fm {
+                inputs[0] * fm_depth(warp_amount)
+            } else {
+                0.0
+            };
+            // The modulation also makes the pitch swing, which the band-limited tables assume is
+            // steady. Adding the swing to the step picks a smoother table while it is large.
+            let swing = (modulation - state.last_modulation).abs();
+            state.last_modulation = modulation;
+
             let mut sum = 0.0;
             for i in 0..state.count {
                 // The phase step, in cycles per sample. The waveform band-limits its edges by it.
                 let step = tick.pitch_step * state.detune_ratios[i] * transpose;
-                let phase = warp_phase(p.warp, state.phases[i], warp_amount);
+                let mut phase = warp_phase(p.warp, state.phases[i], warp_amount);
+                if p.warp == WarpMode::Fm {
+                    phase = (phase + modulation).rem_euclid(1.0);
+                }
                 sum += warp_value(
                     p.warp,
-                    tick.tables.sample(p.waveform, phase, step),
+                    tick.tables.sample(p.waveform, phase, step + swing),
                     warp_amount,
                 );
                 state.phases[i] += step;
@@ -245,5 +268,112 @@ mod tests {
         }
         assert_eq!(b.phases()[0], before);
         assert_ne!(a.phases()[0], before);
+    }
+
+    const RATE: f32 = 44100.0;
+
+    /// A carrier under the FM warp, fed a 440 Hz sine as its modulator. The carrier plays 440 Hz
+    /// too, so the sidebands land on the harmonics. `amount` is the warp amount.
+    fn fm_render(warp: WarpMode, amount: f32, modulator_level: f32, samples: usize) -> Vec<f32> {
+        let mut rig = Rig::new();
+        let params = OscillatorParams {
+            warp,
+            warp_amount: Param::fixed(KnobId::WarpAmount, amount),
+            ..OscillatorParams::default()
+        };
+        let mut state = Oscillator::start(&params, &mut rig.start_context());
+        (0..samples)
+            .map(|n| {
+                let modulator =
+                    modulator_level * (std::f32::consts::TAU * 440.0 * n as f32 / RATE).sin();
+                Oscillator::process(&params, &mut state, &[modulator, 0.0], &mut rig.tick())
+            })
+            .collect()
+    }
+
+    /// The power of `signal` at `freq`, from the Goertzel recurrence.
+    fn power_at(signal: &[f32], freq: f32) -> f32 {
+        let coef = 2.0 * (std::f32::consts::TAU * freq / RATE).cos();
+        let (mut s1, mut s2) = (0.0f32, 0.0f32);
+        for &x in signal {
+            let s0 = x + coef * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        s1 * s1 + s2 * s2 - coef * s1 * s2
+    }
+
+    /// The modulator adds sidebands, and the warp amount sets how strong. With none, a pure sine
+    /// has nothing at the second harmonic.
+    #[test]
+    fn fm_depth_controls_the_sidebands() {
+        let plain = fm_render(WarpMode::Fm, 0.0, 1.0, 8820);
+        let some = fm_render(WarpMode::Fm, 0.5, 1.0, 8820);
+        let more = fm_render(WarpMode::Fm, 0.9, 1.0, 8820);
+
+        let ratio =
+            |signal: &[f32]| power_at(&signal[1000..], 880.0) / power_at(&signal[1000..], 440.0);
+        assert!(ratio(&plain) < 1e-4, "{}", ratio(&plain));
+        assert!(ratio(&some) > 0.05, "{}", ratio(&some));
+        // More depth spreads energy up the spectrum, so the third harmonic grows too.
+        let third =
+            |signal: &[f32]| power_at(&signal[1000..], 1320.0) / power_at(&signal[1000..], 440.0);
+        assert!(third(&more) > third(&plain) * 10.0 + 0.01);
+    }
+
+    /// At zero depth, or with nothing wired to the input, the FM warp is a plain oscillator.
+    #[test]
+    fn fm_with_no_depth_or_no_signal_is_a_plain_oscillator() {
+        let plain = fm_render(WarpMode::None, 0.7, 0.0, 2000);
+        let no_depth = fm_render(WarpMode::Fm, 0.0, 1.0, 2000);
+        let no_signal = fm_render(WarpMode::Fm, 0.7, 0.0, 2000);
+        for n in 0..2000 {
+            assert!((plain[n] - no_depth[n]).abs() < 1e-6, "sample {n}");
+            assert!((plain[n] - no_signal[n]).abs() < 1e-6, "sample {n}");
+        }
+    }
+
+    /// The modulator's level scales the depth, so a quiet modulator makes a milder sound.
+    #[test]
+    fn a_quieter_modulator_makes_less_fm() {
+        let loud = fm_render(WarpMode::Fm, 0.5, 1.0, 8820);
+        let quiet = fm_render(WarpMode::Fm, 0.5, 0.2, 8820);
+        let side = |signal: &[f32]| power_at(&signal[1000..], 880.0);
+        assert!(side(&quiet) < side(&loud) * 0.5);
+    }
+
+    /// Only the FM warp reads an input.
+    #[test]
+    fn only_the_fm_warp_reads_an_input() {
+        use crate::patch::stage::StageParams;
+        let at = |warp| {
+            StageParams::Oscillator(OscillatorParams {
+                warp,
+                ..OscillatorParams::default()
+            })
+            .input_count()
+        };
+        assert_eq!(at(WarpMode::None), 0);
+        assert_eq!(at(WarpMode::Sync), 0);
+        assert_eq!(at(WarpMode::Fm), 1);
+    }
+
+    /// A saw under heavy FM stays in range. The table choice follows the swing, so it never reads
+    /// past its tables.
+    #[test]
+    fn heavy_fm_on_a_saw_stays_finite_and_bounded() {
+        let mut rig = Rig::new();
+        let params = OscillatorParams {
+            waveform: Waveform::Saw,
+            warp: WarpMode::Fm,
+            warp_amount: Param::fixed(KnobId::WarpAmount, 1.0),
+            ..OscillatorParams::default()
+        };
+        let mut state = Oscillator::start(&params, &mut rig.start_context());
+        for n in 0..20000 {
+            let modulator = (std::f32::consts::TAU * 3000.0 * n as f32 / RATE).sin();
+            let out = Oscillator::process(&params, &mut state, &[modulator, 0.0], &mut rig.tick());
+            assert!(out.is_finite() && out.abs() < 1.5, "sample {n}: {out}");
+        }
     }
 }

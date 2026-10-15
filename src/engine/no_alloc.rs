@@ -3,6 +3,7 @@
 //! debug builds. This test plays a busy patch under it.
 
 use super::*;
+use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
 use crate::patch::control::Param;
@@ -32,6 +33,17 @@ fn busy_patch() -> Patch {
             .with_input(0, 2)
             .with_input(1, 1),
         StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 3),
+    ]);
+    // A second slot plays an FM pair: a sine modulator feeding a saw carrier.
+    let carrier = OscillatorParams {
+        waveform: Waveform::Saw,
+        warp: WarpMode::Fm,
+        warp_amount: Param::fixed(KnobId::WarpAmount, 0.8),
+        ..OscillatorParams::default()
+    };
+    patch.lanes[1].stages.extend([
+        StageSpec::new(StageParams::Oscillator(OscillatorParams::default())),
+        StageSpec::new(StageParams::Oscillator(carrier)).with_input(0, 0),
     ]);
     patch.envelopes[0] = Some(EnvelopeSettings::new());
     patch.lfos[0] = Some(LfoSettings::new());

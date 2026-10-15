@@ -3,6 +3,7 @@
 use super::stage::StageState;
 use super::*;
 use crate::dsp::envelope::EnvPhase;
+use crate::dsp::warp::WarpMode;
 use crate::nodes::knobs::KnobId;
 use crate::patch::control::{KnobValue, MapStage, Param, Route, Source, MAX_MAPS};
 use crate::patch::stage::{FilterParams, OscillatorParams, StageParams, StageSpec};
@@ -282,4 +283,35 @@ fn a_driven_cutoff_follows_each_voices_own_envelope() {
         .collect();
     assert_eq!(cutoffs.len(), 2);
     assert!(cutoffs[0] > cutoffs[1] * 2.0, "{cutoffs:?}");
+}
+
+/// An FM pair plays through the engine: the modulator runs first in each voice, the carrier
+/// reads it, and the result differs from the same carrier with no modulator.
+#[test]
+fn an_fm_pair_sounds_different_from_the_plain_carrier() {
+    let carrier = |warp| OscillatorParams {
+        warp,
+        warp_amount: Param::fixed(KnobId::WarpAmount, 0.6),
+        ..OscillatorParams::default()
+    };
+    let modulator = osc(OscillatorParams {
+        octave: Param::fixed(KnobId::Octave, 1.0),
+        ..OscillatorParams::default()
+    });
+    let fm = StageSpec::new(StageParams::Oscillator(carrier(WarpMode::Fm))).with_input(0, 0);
+
+    let mut with_fm = engine_on(&patch_with(0, &[modulator, fm]));
+    let mut plain = engine_on(&patch_with(0, &[osc(carrier(WarpMode::None))]));
+    with_fm.note_on(60, 1.0);
+    plain.note_on(60, 1.0);
+
+    let fm_out = render(&mut with_fm, 4410);
+    let plain_out = render(&mut plain, 4410);
+    assert!(peak(&fm_out) > 0.05);
+    let difference: f32 = fm_out
+        .iter()
+        .zip(&plain_out)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(difference > 1.0, "{difference}");
 }

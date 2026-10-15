@@ -101,7 +101,8 @@ impl StageParams {
     /// How many audio inputs the stage reads. The compiler wires that many.
     pub fn input_count(&self) -> usize {
         match self {
-            StageParams::Oscillator(_) => 0,
+            // An oscillator is a source, except under the FM warp, which reads a modulator.
+            StageParams::Oscillator(p) => usize::from(p.warp == WarpMode::Fm),
             StageParams::Filter(_) => 1,
             StageParams::Mix(_) => 2,
         }

@@ -287,7 +287,7 @@ pub(super) fn draw_node(
             draw_pin_dot(frame, point, port);
             // A pin with no knob to name it draws its own label, such as "Shape" or "A".
             if row.knob.is_none() {
-                if let Some(label) = port.input_label() {
+                if let Some(label) = row.label.or(port.input_label()) {
                     draw_text(
                         frame,
                         covered,
