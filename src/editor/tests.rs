@@ -1827,6 +1827,7 @@ mod preset_ui_tests {
     use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
     use nih_plug_iced::mouse;
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+    use nih_plug_iced::Vector;
     use std::path::PathBuf;
 
     fn bounds() -> Rectangle {
@@ -2025,7 +2026,7 @@ mod preset_ui_tests {
             editor.graph.preset_list.as_ref().map(|m| m.library.clone()),
             Some(library.clone())
         );
-        click(&mut editor, list_row(&library, 1));
+        click(&mut editor, list_row(&library, 2));
         assert_eq!(editor.graph.preset_list.as_ref().unwrap().open, Some(0));
         let message = click(&mut editor, sub_row(&library, 0, 0));
         assert!(matches!(message, Some(Message::GraphChanged)));
@@ -2222,20 +2223,22 @@ mod preset_ui_tests {
         };
         let at = |row: usize| preset_row_at(bounds(), &menu, list_row(&library, row));
         assert_eq!(at(0), Some(PresetRow::SaveAs));
-        assert_eq!(at(1), Some(PresetRow::Category(0)));
-        assert_eq!(at(2), Some(PresetRow::Category(1)));
-        assert_eq!(at(3), Some(PresetRow::Loose(0)));
-        assert_eq!(at(4), Some(PresetRow::Loose(1)));
-        assert_eq!(at(5), None);
+        assert_eq!(at(1), Some(PresetRow::Init));
+        assert_eq!(at(2), Some(PresetRow::Category(0)));
+        assert_eq!(at(3), Some(PresetRow::Category(1)));
+        assert_eq!(at(4), Some(PresetRow::Loose(0)));
+        assert_eq!(at(5), Some(PresetRow::Loose(1)));
+        assert_eq!(at(6), None);
 
+        // With none saved, the two actions are still there, and the row under them is a note.
         let empty = PresetMenu {
             library: Library::default(),
             open: None,
         };
-        assert_eq!(
-            preset_row_at(bounds(), &empty, list_row(&empty.library, 1)),
-            None
-        );
+        let at_empty = |row: usize| preset_row_at(bounds(), &empty, list_row(&empty.library, row));
+        assert_eq!(at_empty(0), Some(PresetRow::SaveAs));
+        assert_eq!(at_empty(1), Some(PresetRow::Init));
+        assert_eq!(at_empty(2), None);
         assert_eq!(shorten("Short"), "Short");
         assert_eq!(shorten("A very long preset name").chars().count(), 10);
     }
@@ -2263,9 +2266,9 @@ mod preset_ui_tests {
             assert!(sub.y + sub.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
             assert!(sub.x >= 0.0 && sub.x + sub.width <= bounds().width);
         }
-        // The Bass submenu starts level with the Bass row.
+        // The Bass submenu starts level with the Bass row, under the two action rows.
         let sub = submenu_bounds(bounds(), &library, 0);
-        assert_eq!(sub.y, list.y + MENU_ITEM_HEIGHT);
+        assert_eq!(sub.y, list.y + 2.0 * MENU_ITEM_HEIGHT);
         // With no submenu open, a point where it would be is not a row.
         let closed = PresetMenu {
             library: library.clone(),
@@ -2322,7 +2325,7 @@ mod preset_ui_tests {
         };
         let open = |editor: &NodeEditor| editor.graph.preset_list.as_ref().unwrap().open;
 
-        move_to(&mut editor, list_row(&library, 1));
+        move_to(&mut editor, list_row(&library, 2));
         assert_eq!(open(&editor), Some(0));
         // Off the list and onto the submenu, it stays.
         move_to(&mut editor, sub_row(&library, 0, 0));
@@ -2330,15 +2333,63 @@ mod preset_ui_tests {
         move_to(&mut editor, Point::new(5.0, 400.0));
         assert_eq!(open(&editor), Some(0));
         // Onto the loose preset's row, it closes.
-        move_to(&mut editor, list_row(&library, 2));
+        move_to(&mut editor, list_row(&library, 3));
         assert_eq!(open(&editor), None);
 
         // A click on a category row opens it, and a second click closes it.
-        click(&mut editor, list_row(&library, 1));
+        click(&mut editor, list_row(&library, 2));
         assert_eq!(open(&editor), Some(0));
-        click(&mut editor, list_row(&library, 1));
+        click(&mut editor, list_row(&library, 2));
         assert_eq!(open(&editor), None);
         assert!(editor.graph.preset_list.is_some());
+    }
+
+    /// The Init row puts the starting graph back, drops what was on the canvas, forgets the current
+    /// preset, sets the macros back, and keeps the view and the preset folder.
+    #[test]
+    fn init_goes_back_to_the_default_patch() {
+        let dir = TempDir::new("init");
+        let mut seed = graph_in(&dir);
+        save_through_the_ui(&mut seed, "Keeper", "Bass", [0.2; 4]);
+
+        // A canvas that has wandered off: a preset loaded, a node added, the view moved.
+        let mut graph = graph_in(&dir);
+        graph.load_preset("Bass", "Keeper");
+        graph.add_node(NodeKind::Reverb, Point::new(500.0, 400.0));
+        graph.add_node(NodeKind::Delay, Point::new(700.0, 400.0));
+        graph.view.offset = Vector::new(40.0, 25.0);
+        graph.macro_edits.clear();
+        let library = library_of(&dir);
+
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        let message = click(&mut editor, list_row(&library, 1));
+        assert!(matches!(message, Some(Message::GraphChanged)));
+
+        let default = Graph::default();
+        assert!(editor.graph.preset_list.is_none());
+        assert_eq!(editor.graph.nodes.len(), default.nodes.len());
+        assert!(editor.graph.patch() == default.patch());
+        assert_eq!(editor.graph.preset_name, None);
+        assert_eq!(editor.graph.preset_category, "");
+        assert_eq!(editor.graph.view.offset, Vector::new(40.0, 25.0));
+        assert_eq!(editor.graph.preset_dir.as_deref(), Some(dir.0.as_path()));
+        // The host is told to put every macro back to its starting value.
+        let sets: Vec<_> = editor
+            .graph
+            .macro_edits
+            .iter()
+            .filter_map(|edit| match edit {
+                MacroEdit::Set(i, v) => Some((*i, *v)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sets, [(0, 0.0), (1, 0.0), (2, 0.0), (3, 0.0)]);
+        // The next save starts from a blank name.
+        editor.graph.start_name_entry();
+        assert_eq!(editor.graph.name_entry.as_ref().unwrap().name, "");
+        // And the preset on disk is untouched.
+        assert!(crate::presets::load_in(&dir.0, "Bass", "Keeper").is_ok());
     }
 
     /// A loose preset loads from the main list.
@@ -2353,7 +2404,7 @@ mod preset_ui_tests {
         let mut graph = graph_in(&dir);
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         click(&mut editor, presets_button());
-        click(&mut editor, list_row(&library, 1));
+        click(&mut editor, list_row(&library, 2));
         assert!(editor.graph.nodes.iter().any(|n| n.kind == NodeKind::Delay));
         assert_eq!(editor.graph.preset_name.as_deref(), Some("Plain"));
         assert_eq!(editor.graph.preset_category, "");

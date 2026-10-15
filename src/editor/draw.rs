@@ -941,14 +941,22 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
     let (categories, loose) = preset_rows_shown(bounds, library);
 
     list_row_text(frame, list, 0, "Save as...".to_string(), TEXT_COLOR);
+    list_row_text(frame, list, 1, "Init".to_string(), TEXT_COLOR);
     if library.is_empty() {
-        list_row_text(frame, list, 1, "No presets yet".to_string(), DIM_TEXT_COLOR);
+        list_row_text(
+            frame,
+            list,
+            PRESET_ACTION_ROWS,
+            "No presets yet".to_string(),
+            DIM_TEXT_COLOR,
+        );
     }
     for (index, category) in library.categories.iter().take(categories).enumerate() {
+        let row_number = PRESET_ACTION_ROWS + index;
         if menu.open == Some(index) {
             let row = Rectangle {
                 x: list.x + 4.0,
-                y: list.y + (index + 1) as f32 * MENU_ITEM_HEIGHT,
+                y: list.y + row_number as f32 * MENU_ITEM_HEIGHT,
                 width: list.width - 8.0,
                 height: MENU_ITEM_HEIGHT,
             };
@@ -964,8 +972,8 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
         } else {
             category.name.clone()
         };
-        list_row_text(frame, list, index + 1, content, TEXT_COLOR);
-        draw_submenu_arrow(frame, list, index + 1);
+        list_row_text(frame, list, row_number, content, TEXT_COLOR);
+        draw_submenu_arrow(frame, list, row_number);
     }
     for (index, name) in library.loose.iter().take(loose).enumerate() {
         let current =
@@ -975,7 +983,8 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
         } else {
             name.clone()
         };
-        list_row_text(frame, list, 1 + categories + index, content, TEXT_COLOR);
+        let row_number = PRESET_ACTION_ROWS + categories + index;
+        list_row_text(frame, list, row_number, content, TEXT_COLOR);
     }
     let hidden = (library.categories.len() - categories) + (library.loose.len() - loose);
     if hidden > 0 {

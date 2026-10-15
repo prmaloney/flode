@@ -401,24 +401,38 @@ impl Graph {
                 return false;
             }
         };
-        // Only the nodes and wires change. The view, the piano's held keys, and where presets
-        // live stay as they were.
+        self.replace_with(Graph::from_saved(&preset.graph), preset.macros);
+        self.preset_name = Some(preset.name.clone());
+        self.preset_category = preset.category.clone();
+        self.say(format!("Loaded {}", preset.name));
+        true
+    }
+
+    /// Goes back to the graph a new instance starts with, and sets the macro knobs back to their
+    /// starting values. Whatever was on the canvas is dropped, saved or not, and no preset is
+    /// current afterward.
+    pub(super) fn init_default(&mut self) {
+        let macros = KnobId::MACROS.map(KnobId::default_normalized);
+        self.replace_with(Graph::default(), macros);
+        self.say("Back to the default patch");
+    }
+
+    /// Swaps in `fresh` for the nodes and wires, and sends `macros` to the host. The view, the
+    /// piano's held keys, and where presets live stay as they were, and so do the menus' state,
+    /// which is closed.
+    fn replace_with(&mut self, fresh: Graph, macros: [f32; MACRO_COUNT]) {
         let view = self.view;
         let piano = std::mem::take(&mut self.piano);
         let dir = self.preset_dir.clone();
-        *self = Graph::from_saved(&preset.graph);
+        *self = fresh;
         self.view = view;
         self.piano = piano;
         self.preset_dir = dir;
-        self.preset_name = Some(preset.name.clone());
-        self.preset_category = preset.category.clone();
-        for (index, &value) in preset.macros.iter().enumerate() {
+        for (index, &value) in macros.iter().enumerate() {
             self.macro_edits.push(MacroEdit::Begin(index));
             self.macro_edits.push(MacroEdit::Set(index, value));
             self.macro_edits.push(MacroEdit::End(index));
         }
-        self.say(format!("Loaded {}", preset.name));
-        true
     }
 
     /// Which macro a knob on a node is, or None for any other knob.

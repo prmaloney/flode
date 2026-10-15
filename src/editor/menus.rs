@@ -32,6 +32,8 @@ pub(super) const PILL_ITEMS: [PillItem; 5] = [
 pub(super) enum PresetRow {
     /// Opens the box that names and saves the current graph.
     SaveAs,
+    /// Goes back to the graph a new instance starts with.
+    Init,
     /// A category, which opens its submenu. The position is in `library.categories`.
     Category(usize),
     /// A preset with no category. The position is in `library.loose`.
@@ -61,17 +63,20 @@ fn preset_room(bounds: Rectangle) -> usize {
     (room.floor() as usize).max(4)
 }
 
-/// How many categories and how many loose presets the main list shows. The save entry takes the
-/// first row, then the categories, then as many loose presets as fit.
+/// The rows at the top of the preset list that are not presets: "Save as..." and "Init".
+pub(super) const PRESET_ACTION_ROWS: usize = 2;
+
+/// How many categories and how many loose presets the main list shows. The two action rows come
+/// first, then the categories, then as many loose presets as fit.
 pub(super) fn preset_rows_shown(bounds: Rectangle, library: &Library) -> (usize, usize) {
-    let room = preset_room(bounds) - 1;
+    let room = preset_room(bounds) - PRESET_ACTION_ROWS;
     let categories = library.categories.len().min(room);
     let loose = library.loose.len().min(room - categories);
     (categories, loose)
 }
 
-/// The list under the Presets button: the save entry, the categories, then the presets that have
-/// no category. With none saved it has a row that says so.
+/// The list under the Presets button: the save and init entries, the categories, then the presets
+/// that have no category. With none saved it has a row that says so.
 pub(super) fn preset_list_bounds(bounds: Rectangle, library: &Library) -> Rectangle {
     let index = PILL_ITEMS
         .iter()
@@ -79,7 +84,7 @@ pub(super) fn preset_list_bounds(bounds: Rectangle, library: &Library) -> Rectan
         .unwrap_or(0);
     let segment = pill_segment(bounds, index);
     let (categories, loose) = preset_rows_shown(bounds, library);
-    let rows = 1 + (categories + loose).max(1);
+    let rows = PRESET_ACTION_ROWS + (categories + loose).max(1);
     let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
     Rectangle {
         // The list lines up with the pill's right end, so it stays inside the window.
@@ -112,7 +117,7 @@ pub(super) fn submenu_bounds(bounds: Rectangle, library: &Library, category: usi
     } else {
         list.x - width - LIST_GAP
     };
-    let level = list.y + (1 + category) as f32 * MENU_ITEM_HEIGHT;
+    let level = list.y + (PRESET_ACTION_ROWS + category) as f32 * MENU_ITEM_HEIGHT;
     let lowest = bounds.height - super::piano::STRIP_HEIGHT - height;
     Rectangle {
         x,
@@ -145,8 +150,13 @@ pub(super) fn preset_row_at(
     let (categories, loose) = preset_rows_shown(bounds, library);
     match ((point.y - list.y) / MENU_ITEM_HEIGHT) as usize {
         0 => Some(PresetRow::SaveAs),
-        row if row <= categories => Some(PresetRow::Category(row - 1)),
-        row if row <= categories + loose => Some(PresetRow::Loose(row - 1 - categories)),
+        1 => Some(PresetRow::Init),
+        row if row < PRESET_ACTION_ROWS + categories => {
+            Some(PresetRow::Category(row - PRESET_ACTION_ROWS))
+        }
+        row if row < PRESET_ACTION_ROWS + categories + loose => {
+            Some(PresetRow::Loose(row - PRESET_ACTION_ROWS - categories))
+        }
         _ => None,
     }
 }

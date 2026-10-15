@@ -110,6 +110,11 @@ impl<'a> NodeEditor<'a> {
                     self.graph.start_name_entry();
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
+                // Init drops what is on the canvas for the starting graph, saved or not.
+                Some(PresetRow::Init) => {
+                    self.graph.init_default();
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
                 // A press on a category opens its submenu, or closes it if it is open.
                 Some(PresetRow::Category(index)) => {
                     menu.open = (menu.open != Some(index)).then_some(index);
@@ -368,7 +373,7 @@ impl<'a> NodeEditor<'a> {
         };
         let open = match preset_row_at(bounds, menu, screen) {
             Some(PresetRow::Category(index)) => Some(index),
-            Some(PresetRow::SaveAs | PresetRow::Loose(_)) => None,
+            Some(PresetRow::SaveAs | PresetRow::Init | PresetRow::Loose(_)) => None,
             Some(PresetRow::Sub(..)) | None => menu.open,
         };
         let changed = open != menu.open;

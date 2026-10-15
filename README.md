@@ -114,8 +114,9 @@ Presets are files in `~/Library/Application Support/Flode/Presets`, one per name
 graph and the four macro values. A category is a folder inside that one, so `Bass/Reese.flode` is
 the Reese preset in the Bass category.
 
-The Presets button opens a list with "Save as...", then the categories, then any presets with none.
-A category opens a submenu of its presets when you hover it or click it. "Save as..." opens a box
+The Presets button opens a list with "Save as..." and "Init", then the categories, then any presets
+with none. "Init" goes back to the starting patch and resets the macros, and it does not ask about
+unsaved changes. A category opens a submenu of its presets when you hover it or click it. "Save as..." opens a box
 with a name and a category. The existing categories show as chips you can click, or step through
 with the up and down keys, so a typo does not make a new folder. A category that does not exist
 yet is tagged "new". Saving under a name that already exists replaces that preset.
