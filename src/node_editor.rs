@@ -23,11 +23,11 @@ use crate::nodes::{
     pin_y, Category, FlodeNode, NodeKind, Port, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
     ROW_KNOB_DIAMETER, TITLE_INSET,
 };
-use crate::piano::{self, Piano, PianoEvent};
-use crate::routing::{
-    Branch, ControlLevels, EnvelopeSettings, Globals, KnobValue, LaneChain, LfoSettings, MapStage,
-    MixChain, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
+use crate::patch::control::{
+    ControlLevels, KnobValue, MapStage, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
 };
+use crate::piano::{self, Piano, PianoEvent};
+use crate::routing::{Branch, EnvelopeSettings, Globals, LaneChain, LfoSettings, MixChain};
 use nih_plug_iced::widget::canvas::{
     event::{self, Event},
     Cursor, Frame, Geometry, LineCap, Path, Program, Stroke, Text,

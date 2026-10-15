@@ -3,7 +3,7 @@
 //! hold at the nearest end. The curve on the node shows the mapping and where the live signal is.
 
 use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
-use crate::routing::MapStage;
+use crate::patch::control::MapStage;
 
 pub struct Map;
 
