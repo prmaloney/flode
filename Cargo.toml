@@ -1,0 +1,37 @@
+[package]
+name = "flode"
+version = "0.1.0"
+edition = "2021"
+authors = ["Patrick Maloney"]
+description = "A MIDI-driven sine wave synth (VST3 / CLAP)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# nih-plug is not on crates.io, so pull it from git.
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs", "standalone"] }
+serde = { version = "1.0", features = ["derive"] }
+rtrb = "0.2.2"
+nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["opengl_canvas"] }
+
+[workspace]
+members = ["xtask"]
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+# Local copies of baseview and iced_baseview. baseview has a nil-window check in
+# become_first_responder, which newer macOS hits before the view has a window. iced_baseview
+# drops an unused method that needs a newer baseview API. See vendor/.
+[patch."https://github.com/RustAudio/baseview.git"]
+baseview = { path = "vendor/baseview" }
+
+[patch."https://github.com/robbert-vdh/iced_baseview.git"]
+iced_baseview = { path = "vendor/iced_baseview" }
