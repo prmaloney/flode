@@ -14,6 +14,7 @@ nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["a
 serde = { version = "1.0", features = ["derive"] }
 rtrb = "0.2.2"
 nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["opengl_canvas"] }
+arrayvec = "0.7.8"
 
 [workspace]
 members = ["xtask"]

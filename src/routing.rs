@@ -3,14 +3,14 @@
 //! thread never locks or allocates. The audio thread also publishes the live control levels, so
 //! the editor can show them.
 
+use crate::dsp::mix::MixMode;
 use crate::dsp::noise::NoiseType;
+use crate::dsp::svf::FilterType;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::editor::graph::Graph;
-use crate::nodes::filter::FilterType;
 use crate::nodes::input::MIDI_SOURCE_COUNT;
 use crate::nodes::knobs::KnobId;
-use crate::nodes::mix::MixMode;
 use crate::nodes::output::MAX_SLOTS;
 use crate::patch::control::{
     ControlLevels, KnobValue, MapStage, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,

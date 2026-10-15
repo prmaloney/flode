@@ -527,7 +527,7 @@ mod mix_tests {
 
         let lane = graph.lane_chains()[0];
         let mix = lane.mix.unwrap();
-        assert_eq!(mix.mode, crate::nodes::mix::MixMode::RingMod);
+        assert_eq!(mix.mode, crate::dsp::mix::MixMode::RingMod);
         assert_eq!(mix.mix.plain(KnobId::Mix, &ControlLevels::default()), 0.75);
     }
 

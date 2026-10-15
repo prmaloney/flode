@@ -1,7 +1,7 @@
 //! The graph as the project saves it, and the migrations that keep old saves loading.
 
+use crate::dsp::svf::FilterType;
 use crate::dsp::wavetable::Waveform;
-use crate::nodes::filter::FilterType;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::{FlodeNode, NodeKind, Port};
 use nih_plug_iced::Point;
