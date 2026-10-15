@@ -35,15 +35,6 @@ impl WarpMode {
         WarpMode::Mirror,
         WarpMode::Quantize,
     ];
-
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Unknown values fall back to no warp.
-    pub fn from_u8(value: u8) -> Self {
-        Self::ALL.get(value as usize).copied().unwrap_or_default()
-    }
 }
 
 /// Moves a phase, from 0.0 to 1.0, through a warp. `amount` runs from 0.0, which leaves the phase

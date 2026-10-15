@@ -17,10 +17,17 @@ pub struct FilterState {
     resonance: f32,
 }
 
+#[cfg(test)]
+impl FilterState {
+    /// The cutoff the filter has eased to, in Hz.
+    pub fn cutoff_hz(&self) -> f32 {
+        self.cutoff_log2.exp2()
+    }
+}
+
 impl AudioStage for Filter {
     type Params = FilterParams;
     type State = FilterState;
-    const INPUTS: usize = 1;
 
     /// Starts at the knob values, not easing in from zero.
     fn start(p: &FilterParams, ctx: &mut StartContext) -> FilterState {

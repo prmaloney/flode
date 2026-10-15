@@ -7,7 +7,6 @@ pub mod mix;
 pub mod noise;
 pub mod pitch;
 pub mod rng;
-#[allow(dead_code)] // Used once the engine runs the stage arena.
 pub mod svf;
 pub mod warp;
 pub mod wavetable;

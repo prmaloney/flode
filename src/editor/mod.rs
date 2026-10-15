@@ -27,7 +27,7 @@ use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
 use crate::editor::piano::PianoEvent;
-use crate::routing::AudioRouting;
+use crate::patch::link::PatchLink;
 use crate::FlodeParams;
 use canvas::NodeEditor;
 
@@ -36,21 +36,21 @@ pub(crate) fn default_state() -> Arc<IcedState> {
 }
 
 /// `note_tx` is `Some` only in standalone mode. Without it, computer keyboard notes are dropped.
-/// `routing` tells the audio thread the audio chains and every node's knob values.
+/// `link` hands the audio thread the patch and shows the editor what the audio thread reports.
 pub(crate) fn create(
     params: Arc<FlodeParams>,
     editor_state: Arc<IcedState>,
     note_tx: Option<Arc<Mutex<Producer<PianoEvent>>>>,
-    routing: Arc<AudioRouting>,
+    link: Arc<PatchLink>,
 ) -> Option<Box<dyn Editor>> {
-    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, routing))
+    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, link))
 }
 
 struct FlodeEditor {
     params: Arc<FlodeParams>,
     context: Arc<dyn GuiContext>,
     note_tx: Option<Arc<Mutex<Producer<PianoEvent>>>>,
-    routing: Arc<AudioRouting>,
+    link: Arc<PatchLink>,
 
     graph: graph::Graph,
 }
@@ -69,23 +69,23 @@ impl IcedEditor for FlodeEditor {
     type InitializationFlags = (
         Arc<FlodeParams>,
         Option<Arc<Mutex<Producer<PianoEvent>>>>,
-        Arc<AudioRouting>,
+        Arc<PatchLink>,
     );
 
     fn new(
-        (params, note_tx, routing): Self::InitializationFlags,
+        (params, note_tx, link): Self::InitializationFlags,
         context: Arc<dyn GuiContext>,
     ) -> (Self, Command<Self::Message>) {
         let graph = match params.graph.lock() {
             Ok(saved) => graph::Graph::from_saved(&saved),
             Err(_) => graph::Graph::default(),
         };
-        routing.publish(&graph);
+        link.publish(graph.patch());
         let editor = FlodeEditor {
             params,
             context,
             note_tx,
-            routing,
+            link,
             graph,
         };
         (editor, Command::none())
@@ -115,7 +115,7 @@ impl IcedEditor for FlodeEditor {
             // A change to the graph, a node, or a knob. The audio thread gets the new state, and
             // the project saves it.
             Message::Graph(canvas::Message::GraphChanged) => {
-                self.routing.publish(&self.graph);
+                self.link.publish(self.graph.patch());
                 if let Ok(mut saved) = self.params.graph.lock() {
                     *saved = self.graph.to_saved();
                 }
@@ -129,17 +129,18 @@ impl IcedEditor for FlodeEditor {
         window_subs: &mut WindowSubs<Self::Message>,
     ) -> Subscription<Self::Message> {
         // Redraw every frame while a control drives a knob, so its indicator moves.
-        if self.routing.any_driven() {
+        if self.graph.any_driven() {
             window_subs.on_frame = Some(Message::Tick);
         }
         Subscription::none()
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
+        let meters = self.link.meters();
         let editor: Canvas<canvas::Message, NodeEditor<'_>> = Canvas::new(NodeEditor::new(
             &mut self.graph,
-            self.routing.levels(),
-            self.routing.active_notes(),
+            meters.levels,
+            meters.active_notes,
         ))
         .width(Length::Fill)
         .height(Length::Fill);

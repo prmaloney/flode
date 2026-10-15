@@ -15,6 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 rtrb = "0.2.2"
 nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["opengl_canvas"] }
 arrayvec = "0.7.8"
+triple_buffer = "9.0.0"
 
 [workspace]
 members = ["xtask"]
@@ -36,3 +37,6 @@ baseview = { path = "vendor/baseview" }
 
 [patch."https://github.com/robbert-vdh/iced_baseview.git"]
 iced_baseview = { path = "vendor/iced_baseview" }
+
+[dev-dependencies]
+assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }

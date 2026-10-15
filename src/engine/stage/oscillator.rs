@@ -27,6 +27,7 @@ pub struct OscillatorState {
     norm: f32,
 }
 
+#[cfg(test)]
 impl OscillatorState {
     pub fn detune_ratios(&self) -> &[f32] {
         &self.detune_ratios[..self.count]
@@ -40,7 +41,6 @@ impl OscillatorState {
 impl AudioStage for Oscillator {
     type Params = OscillatorParams;
     type State = OscillatorState;
-    const INPUTS: usize = 0;
 
     /// Spreads the sub-oscillators from the lowest detune to the highest. Starting the phases
     /// apart keeps them from cancelling. The unison count, detune, and phase spread are read once

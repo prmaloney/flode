@@ -24,8 +24,6 @@ pub use oscillator::{Oscillator, OscillatorState};
 pub trait AudioStage {
     type Params;
     type State;
-    /// How many audio inputs the stage reads. A source has none.
-    const INPUTS: usize;
 
     /// Builds a voice's state for this stage when a note starts.
     fn start(params: &Self::Params, ctx: &mut StartContext) -> Self::State;
@@ -318,8 +316,8 @@ mod tests {
         let osc = StageParams::Oscillator(OscillatorParams::default());
         let filter = StageParams::Filter(FilterParams::default());
         let mix = StageParams::Mix(MixParams::default());
-        assert_eq!(Oscillator::INPUTS, osc.input_count());
-        assert_eq!(Filter::INPUTS, filter.input_count());
-        assert_eq!(Mix::INPUTS, mix.input_count());
+        assert_eq!(osc.input_count(), 0);
+        assert_eq!(filter.input_count(), 1);
+        assert_eq!(mix.input_count(), 2);
     }
 }

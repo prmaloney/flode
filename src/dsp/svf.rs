@@ -26,16 +26,6 @@ impl FilterType {
     pub fn index(self) -> usize {
         self as usize
     }
-
-    /// Stored as a u8 so the editor can publish the type to the audio thread atomically.
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Unknown values fall back to the low pass.
-    pub fn from_u8(value: u8) -> Self {
-        Self::ALL.get(value as usize).copied().unwrap_or_default()
-    }
 }
 
 /// The filter's memory: the two integrators.

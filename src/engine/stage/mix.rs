@@ -9,7 +9,6 @@ impl AudioStage for Mix {
     type Params = MixParams;
     /// A mix remembers nothing between samples.
     type State = ();
-    const INPUTS: usize = 2;
 
     fn start(_: &MixParams, _: &mut StartContext) {}
 

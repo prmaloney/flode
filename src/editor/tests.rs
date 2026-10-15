@@ -6,9 +6,18 @@ use crate::nodes::knobs::KnobId;
 use crate::nodes::oscillator;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port};
 use crate::patch::control::{ControlLevels, MapStage, Source, MAX_ENVELOPES};
+use crate::patch::stage::{LaneGraph, StageParams};
 use nih_plug_iced::{Point, Rectangle};
 
 use super::{curve::*, draw::*, graph::*, menus::*, saved::*};
+
+/// The oscillator settings of the stage at `index` in a slot.
+fn osc_params(lane: &LaneGraph, index: usize) -> crate::patch::stage::OscillatorParams {
+    match lane.stages[index].params {
+        StageParams::Oscillator(params) => params,
+        _ => panic!("stage {index} is not an oscillator"),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -82,8 +91,8 @@ mod slot_tests {
         let output = &graph.nodes[1];
         assert_eq!(output.used, 1);
         assert_eq!(output.slots, 2);
-        assert!(graph.lane_chains()[0].active);
-        assert!(!graph.lane_chains()[1].active);
+        assert!(graph.patch().lanes[0].is_active());
+        assert!(!graph.patch().lanes[1].is_active());
     }
 
     /// Wiring the empty pin adds a slot and a new empty pin below it.
@@ -95,7 +104,7 @@ mod slot_tests {
         let output = &graph.nodes[1];
         assert_eq!(output.used, 2);
         assert_eq!(output.slots, 3);
-        assert!(graph.lane_chains()[1].active);
+        assert!(graph.patch().lanes[1].is_active());
         assert!(graph.nodes[1]
             .rows()
             .iter()
@@ -110,13 +119,10 @@ mod slot_tests {
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
 
         graph.nodes[0].set_value(KnobId::Detune, KnobId::Detune.to_normalized(60.0));
-        let chains = graph.lane_chains();
-        let first_detune = chains[0]
-            .knob(KnobId::Detune)
-            .plain(KnobId::Detune, &ControlLevels::default());
-        let second_detune = chains[1]
-            .knob(KnobId::Detune)
-            .plain(KnobId::Detune, &ControlLevels::default());
+        let lanes = graph.patch().lanes;
+        let levels = ControlLevels::default();
+        let first_detune = osc_params(&lanes[0], 0).detune.plain(&levels);
+        let second_detune = osc_params(&lanes[1], 0).detune.plain(&levels);
         assert!((first_detune - 60.0).abs() < 0.01);
         assert!((second_detune - KnobId::Detune.default_plain()).abs() < 0.01);
     }
@@ -147,7 +153,7 @@ mod slot_tests {
         let graph = Graph::from_saved(&saved);
         assert_eq!(graph.connections.len(), 1);
         assert_eq!(graph.connections[0].input, Port::Slot(0));
-        assert!(graph.lane_chains()[0].active);
+        assert!(graph.patch().lanes[0].is_active());
     }
 
     /// Saved knob values and the dropdown come back, and old fields still load.
@@ -202,7 +208,10 @@ mod slot_tests {
         assert_eq!(graph.connections[0].to, filter);
         assert_eq!(graph.connections[1].from, filter);
         assert_eq!(graph.connections[1].input, Port::Slot(0));
-        assert!(graph.lane_chains()[0].filter.is_some());
+        assert!(graph.patch().lanes[0]
+            .stages
+            .iter()
+            .any(|stage| matches!(stage.params, StageParams::Filter(_))));
     }
 }
 
@@ -227,10 +236,11 @@ mod lfo_and_category_tests {
         };
         assert!((at(0.25) - 0.25).abs() < 1e-6);
 
-        let settings = graph.lfo_settings();
-        assert!(settings[0].active);
-        assert!(!settings[1].active);
-        assert!((settings[0].rate.value - KnobId::LfoRate.default_normalized()).abs() < 1e-6);
+        let settings = graph.patch().lfos;
+        let rate = settings[0].expect("the first lfo runs").rate;
+        assert!(settings[1].is_none());
+        let default = KnobId::LfoRate.default_plain();
+        assert!((rate.plain(&ControlLevels::default()) - default).abs() < 1e-3);
     }
 
     /// The first LFO is the one the audio thread runs. Later LFOs make no signal.
@@ -246,7 +256,7 @@ mod lfo_and_category_tests {
         // The third LFO is past the two the audio thread runs.
         assert_eq!(graph.wiring().lfo_index(lfos[2]), None);
         assert_eq!(graph.wiring().lfo_index(lfos[1]), Some(1));
-        assert!(graph.lfo_settings().iter().all(|s| s.active));
+        assert!(graph.patch().lfos.iter().all(Option::is_some));
     }
 
     /// The pill's buttons open the Driver, Util, and Effects lists, and each list holds its kinds.
@@ -331,19 +341,6 @@ mod input_node_tests {
     }
 
     /// Every source survives a trip through the saved byte, so routes keep their meaning.
-    #[test]
-    fn every_source_round_trips() {
-        for source in [
-            Source::Envelope(0),
-            Source::Lfo(0),
-            Source::Lfo(1),
-            Source::Midi(MidiSource::Note),
-            Source::Midi(MidiSource::Aftertouch),
-        ] {
-            assert_eq!(Source::from_u8(source.to_u8()), source);
-        }
-    }
-
     /// A map dropped on a wire that drives a knob splices into it. The knob keeps its route, now
     /// through the map.
     #[test]
@@ -450,8 +447,9 @@ mod envelope_migration_tests {
             .iter()
             .any(|c| c.from == 0 && c.out == Port::Audio && c.to == 2 && c.input == Port::Slot(0)));
         // The envelope drives the oscillator's amplitude.
-        assert_eq!(graph.lane_chains()[0].envelope, Some(0));
-        assert!(graph.lane_chains()[0].active);
+        let lane = graph.patch().lanes[0].clone();
+        assert!(lane.is_active());
+        assert_eq!(osc_params(&lane, 0).envelope, Some(0));
     }
 }
 
@@ -459,8 +457,7 @@ mod envelope_migration_tests {
 mod mix_tests {
     use super::*;
 
-    /// A mix node between two oscillators and the output. One branch has a wire, the other
-    /// doesn't, to check each resolves on its own.
+    /// A mix node between two oscillators and the output.
     fn chain() -> (Graph, usize, usize, usize) {
         let mut graph = Graph::default();
         graph.connections.clear();
@@ -475,67 +472,63 @@ mod mix_tests {
     }
 
     #[test]
-    fn a_mix_node_combines_its_two_branches() {
+    fn a_mix_node_combines_its_two_oscillators() {
         let (graph, _, _, _) = chain();
-        let lane = graph.lane_chains()[0];
-        let mix = lane.mix.expect("mix chain");
-        assert!(mix.a.active);
-        assert!(mix.b.active);
-        assert!(lane.active);
+        let lane = graph.patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 3);
+        assert!(matches!(lane.stages[2].params, StageParams::Mix(_)));
+        assert_eq!(lane.stages[2].inputs, [Some(0), Some(1)]);
     }
 
-    /// An unwired input contributes silence instead of breaking the chain.
+    /// Each oscillator keeps its own waveform and knobs.
     #[test]
-    fn an_unwired_branch_is_silent() {
-        let mut graph = Graph::default();
-        graph.connections.clear();
-        let a = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 0.0));
-        let mix = graph.add_node(NodeKind::Mix, Point::new(0.0, 0.0));
-        graph.connect(a, Port::Audio, mix, Port::AudioIn(0));
-        graph.connect(mix, Port::Audio, 1, Port::Slot(0));
-        graph.refresh_slots();
-
-        let lane = graph.lane_chains()[0];
-        let mix = lane.mix.expect("mix chain");
-        assert!(mix.a.active);
-        assert!(!mix.b.active);
-    }
-
-    /// Each branch keeps its own oscillator's waveform and knobs.
-    #[test]
-    fn branches_keep_their_own_oscillator_settings() {
+    fn each_oscillator_keeps_its_own_settings() {
         let (mut graph, a, b, _) = chain();
         graph.nodes[a].choices = vec![Waveform::Square.index()];
         graph.nodes[b].choices = vec![Waveform::Triangle.index()];
         graph.nodes[a].set_value(KnobId::Detune, KnobId::Detune.to_normalized(40.0));
 
-        let lane = graph.lane_chains()[0];
-        let mix = lane.mix.unwrap();
-        assert_eq!(mix.a.waveform, Waveform::Square);
-        assert_eq!(mix.b.waveform, Waveform::Triangle);
-        assert_eq!(
-            mix.a.knobs[KnobId::Detune as usize].plain(KnobId::Detune, &ControlLevels::default()),
-            40.0
-        );
+        let lane = graph.patch().lanes[0].clone();
+        let (first, second) = (osc_params(&lane, 0), osc_params(&lane, 1));
+        assert_eq!(first.waveform, Waveform::Square);
+        assert_eq!(second.waveform, Waveform::Triangle);
+        assert_eq!(first.detune.plain(&ControlLevels::default()), 40.0);
     }
 
-    /// The mix node's own dropdown and knob reach the lane.
+    /// The mix node's own dropdown and knob reach the patch.
     #[test]
-    fn the_mix_type_and_amount_reach_the_lane() {
+    fn the_mix_type_and_amount_reach_the_patch() {
         let (mut graph, _, _, mix_node) = chain();
         graph.nodes[mix_node].choices = vec![2];
         graph.nodes[mix_node].set_value(KnobId::Mix, KnobId::Mix.to_normalized(0.75));
 
-        let lane = graph.lane_chains()[0];
-        let mix = lane.mix.unwrap();
+        let lane = graph.patch().lanes[0].clone();
+        let StageParams::Mix(mix) = lane.stages[2].params else {
+            panic!("not a mix");
+        };
         assert_eq!(mix.mode, crate::dsp::mix::MixMode::RingMod);
-        assert_eq!(mix.mix.plain(KnobId::Mix, &ControlLevels::default()), 0.75);
+        assert_eq!(mix.amount.plain(&ControlLevels::default()), 0.75);
     }
 
-    /// A chain without a mix node behaves as before.
+    /// A filter wired between an oscillator and the mix is part of that branch.
     #[test]
-    fn a_plain_oscillator_chain_has_no_mix() {
-        let lane = Graph::default().lane_chains()[0];
-        assert!(lane.mix.is_none());
+    fn a_filter_before_the_mix_reaches_the_patch() {
+        let (mut graph, a, _, mix) = chain();
+        let filter = graph.add_node(NodeKind::Filter, Point::new(0.0, 0.0));
+        graph.connect(a, Port::Audio, filter, Port::Audio);
+        graph.connect(filter, Port::Audio, mix, Port::AudioIn(0));
+
+        let lane = graph.patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 4);
+        let root = lane.stages.last().unwrap();
+        let first_input = &lane.stages[root.inputs[0].unwrap() as usize];
+        assert!(matches!(first_input.params, StageParams::Filter(_)));
+    }
+
+    /// A chain without a mix node is a single oscillator.
+    #[test]
+    fn a_plain_oscillator_chain_is_one_stage() {
+        let lane = Graph::default().patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 1);
     }
 }

@@ -117,6 +117,7 @@ pub struct StageSpec {
     pub inputs: [Option<u8>; MAX_INPUTS],
 }
 
+#[cfg(test)]
 impl StageSpec {
     /// A stage with nothing wired to its inputs.
     pub fn new(params: StageParams) -> Self {
@@ -156,6 +157,7 @@ impl LaneGraph {
     }
 
     /// The stage that feeds the slot, which is the last in the arena.
+    #[cfg(test)]
     pub fn root(&self) -> Option<&StageSpec> {
         self.stages.last()
     }

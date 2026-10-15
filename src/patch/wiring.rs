@@ -10,11 +10,11 @@ use super::stage::{
     FilterParams, LaneGraph, MixParams, OscillatorParams, StageParams, StageSpec, MAX_INPUTS,
     MAX_STAGES,
 };
+use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{filter, lfo, map, mix, oscillator, FlodeNode, NodeKind, Port};
-use crate::routing::{EnvelopeSettings, Globals, LfoSettings};
 use arrayvec::ArrayVec;
 
 /// The nodes and wires of a graph, borrowed for a query.
@@ -42,7 +42,6 @@ impl<'a> Wiring<'a> {
         }
     }
 
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
     /// A knob as a stage reads it.
     pub fn param(&self, node: usize, id: KnobId) -> Param {
         Param::new(id, self.knob_value(node, id))
@@ -177,21 +176,20 @@ impl<'a> Wiring<'a> {
 
     /// The envelopes the audio thread runs, in graph order. Each one's knob values are read per
     /// block, so an envelope can have its times driven too.
-    pub fn envelope_settings(&self) -> [EnvelopeSettings; MAX_ENVELOPES] {
-        let mut out = [EnvelopeSettings::OFF; MAX_ENVELOPES];
+    pub fn envelope_settings(&self) -> [Option<EnvelopeSettings>; MAX_ENVELOPES] {
+        let mut out = [None; MAX_ENVELOPES];
         let envelopes = self
             .nodes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.kind == NodeKind::Envelope);
         for (slot, (index, _)) in envelopes.take(MAX_ENVELOPES).enumerate() {
-            out[slot] = EnvelopeSettings {
-                active: true,
-                attack: self.knob_value(index, KnobId::Attack),
-                decay: self.knob_value(index, KnobId::Decay),
-                sustain: self.knob_value(index, KnobId::Sustain),
-                release: self.knob_value(index, KnobId::Release),
-            };
+            out[slot] = Some(EnvelopeSettings {
+                attack: self.param(index, KnobId::Attack),
+                decay: self.param(index, KnobId::Decay),
+                sustain: self.param(index, KnobId::Sustain),
+                release: self.param(index, KnobId::Release),
+            });
         }
         out
     }
@@ -207,20 +205,19 @@ impl<'a> Wiring<'a> {
     }
 
     /// The LFOs the audio thread runs, in graph order.
-    pub fn lfo_settings(&self) -> [LfoSettings; MAX_LFOS] {
-        let mut out = [LfoSettings::OFF; MAX_LFOS];
+    pub fn lfo_settings(&self) -> [Option<LfoSettings>; MAX_LFOS] {
+        let mut out = [None; MAX_LFOS];
         let lfos = self
             .nodes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.kind == NodeKind::Lfo);
         for (slot, (index, node)) in lfos.take(MAX_LFOS).enumerate() {
-            out[slot] = LfoSettings {
-                active: true,
+            out[slot] = Some(LfoSettings {
                 waveform: lfo::waveform(node),
-                rate: self.knob_value(index, KnobId::LfoRate),
-                sync: self.knob_value(index, KnobId::LfoSync),
-            };
+                rate: self.param(index, KnobId::LfoRate),
+                sync: self.param(index, KnobId::LfoSync),
+            });
         }
         out
     }
@@ -236,14 +233,23 @@ impl<'a> Wiring<'a> {
             Some(output) => Globals {
                 mono: self.nodes[output].switch(0),
                 glide_always: self.nodes[output].switch(1),
-                gain: self.knob_value(output, KnobId::Gain),
-                glide: self.knob_value(output, KnobId::Glide),
+                gain: self.param(output, KnobId::Gain),
+                glide: self.param(output, KnobId::Glide),
             },
-            None => Globals::SILENT,
+            None => Globals::default(),
         }
     }
 
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
+    /// Compiles the whole graph for the audio thread.
+    pub fn patch(&self) -> Patch {
+        Patch {
+            lanes: self.lane_graphs(),
+            envelopes: self.envelope_settings(),
+            lfos: self.lfo_settings(),
+            globals: self.globals(),
+        }
+    }
+
     /// The audio stages behind each output slot of the first output node. A slot with nothing
     /// wired in is silent.
     pub fn lane_graphs(&self) -> [LaneGraph; MAX_SLOTS] {
@@ -254,7 +260,6 @@ impl<'a> Wiring<'a> {
         })
     }
 
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
     /// The gain knob of a slot, as a param.
     fn slot_gain(&self, output: Option<usize>, slot: usize) -> Param {
         let id = slot_knob(slot);
@@ -264,7 +269,6 @@ impl<'a> Wiring<'a> {
         }
     }
 
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
     /// Compiles what is wired into one slot of `output` to an arena of stages in signal order.
     /// Each audio node becomes a stage, and each audio input finds its stage by position. A
     /// stage fed by two inputs from one node is placed once. An input with no wire, a wire to a
@@ -282,7 +286,6 @@ impl<'a> Wiring<'a> {
         lane
     }
 
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
     /// The stage a node makes, or None for a node that makes no audio. Every audio node is
     /// listed here once.
     fn stage_params(&self, node: usize) -> Option<StageParams> {
@@ -322,7 +325,6 @@ impl<'a> Wiring<'a> {
 }
 
 /// The arena of one slot while it is built.
-#[allow(dead_code)] // Used once the engine runs the stage arena.
 #[derive(Default)]
 struct LaneBuilder {
     stages: ArrayVec<StageSpec, MAX_STAGES>,
@@ -334,7 +336,6 @@ struct LaneBuilder {
     overflowed: bool,
 }
 
-#[allow(dead_code)]
 impl LaneBuilder {
     /// Places a node's stage after the stages that feed it, and returns its arena position. None
     /// means the node makes no audio, is part of a loop, or would not fit.

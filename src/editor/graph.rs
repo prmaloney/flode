@@ -2,16 +2,12 @@
 
 use crate::editor::piano::Piano;
 use crate::nodes::connection::Connection;
-use crate::nodes::filter;
 use crate::nodes::knobs::KnobId;
-use crate::nodes::mix;
-use crate::nodes::oscillator;
-use crate::nodes::output::{slot_knob, MAX_SLOTS};
+use crate::nodes::output::MAX_SLOTS;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port, NODE_WIDTH};
-use crate::patch::control::{ControlLevels, KnobValue, Route, MAX_ENVELOPES, MAX_LFOS};
-use crate::patch::stage::LaneGraph;
+use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
-use crate::routing::{Branch, EnvelopeSettings, Globals, LaneChain, LfoSettings, MixChain};
+use crate::patch::Patch;
 use nih_plug_iced::{Point, Vector};
 
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
@@ -206,40 +202,9 @@ impl Graph {
         self.wiring().map_input_level(node, levels)
     }
 
-    /// The envelopes the audio thread runs, in graph order.
-    pub fn envelope_settings(&self) -> [EnvelopeSettings; MAX_ENVELOPES] {
-        self.wiring().envelope_settings()
-    }
-
-    /// The LFOs the audio thread runs, in graph order.
-    pub fn lfo_settings(&self) -> [LfoSettings; MAX_LFOS] {
-        self.wiring().lfo_settings()
-    }
-
-    /// The settings of the output node that apply to every slot.
-    pub fn globals(&self) -> Globals {
-        self.wiring().globals()
-    }
-
-    /// The audio stages behind each output slot.
-    #[allow(dead_code)] // Used once the engine runs the stage arena.
-    pub fn lane_graphs(&self) -> [LaneGraph; MAX_SLOTS] {
-        self.wiring().lane_graphs()
-    }
-
-    // The three below belong to the old single-chain path, which the engine's switch to stages
-    // removes.
-
-    pub(super) fn knob_value(&self, node: usize, id: KnobId) -> KnobValue {
-        self.wiring().knob_value(node, id)
-    }
-
-    pub(super) fn amp_envelope(&self, oscillator: usize) -> Option<usize> {
-        self.wiring().amp_envelope(oscillator)
-    }
-
-    pub(super) fn first_output(&self) -> Option<usize> {
-        self.wiring().first_output()
+    /// Compiles the graph into the patch the audio thread plays.
+    pub fn patch(&self) -> Patch {
+        self.wiring().patch()
     }
 
     /// Rebuilds the graph from saved state. Empty state gives the default graph, and connections
@@ -291,115 +256,6 @@ impl Graph {
             connections: Vec::new(),
             links: self.connections.clone(),
         }
-    }
-
-    /// The chain behind each output slot of the first output node. A slot with no chain is silent.
-    pub fn lane_chains(&self) -> [LaneChain; MAX_SLOTS] {
-        let output = self.first_output();
-        std::array::from_fn(|slot| {
-            let Some(output) = output else {
-                return LaneChain::SILENT;
-            };
-            if slot >= self.nodes[output].used {
-                return LaneChain::SILENT;
-            }
-            self.lane_chain(output, slot).unwrap_or(LaneChain::SILENT)
-        })
-    }
-
-    /// Copies the knobs of one node into a knob table, such as a lane's or a mix branch's.
-    pub(super) fn copy_knobs(&self, knobs: &mut [KnobValue; KnobId::COUNT], node: usize) {
-        for id in self.nodes[node].rows().iter().filter_map(|row| row.knob) {
-            knobs[id as usize] = self.knob_value(node, id);
-        }
-    }
-
-    /// An oscillator's settings and knobs, as one of a mix node's two branches.
-    pub(super) fn oscillator_branch(&self, oscillator: usize) -> Branch {
-        let mut knobs = [KnobValue::ZERO; KnobId::COUNT];
-        self.copy_knobs(&mut knobs, oscillator);
-        let node = &self.nodes[oscillator];
-        Branch {
-            active: true,
-            waveform: self::oscillator::waveform(node),
-            noise: self::oscillator::noise_type(node),
-            warp: self::oscillator::warp_mode(node),
-            envelope: self.amp_envelope(oscillator),
-            knobs,
-        }
-    }
-
-    /// One of a mix node's two branches. Only a bare oscillator can feed one, so an input wired
-    /// to anything else, or left unwired, contributes silence.
-    pub(super) fn mix_branch(&self, mix_node: usize, which: usize) -> Branch {
-        let Some(link) = self
-            .connections
-            .iter()
-            .find(|c| c.to == mix_node && c.input == Port::AudioIn(which))
-        else {
-            return Branch::SILENT;
-        };
-        if self.nodes[link.from].kind != NodeKind::Oscillator {
-            return Branch::SILENT;
-        }
-        self.oscillator_branch(link.from)
-    }
-
-    /// Walks the audio connections back from one slot of `output` to an oscillator. The lane
-    /// takes its knob values from the nodes on the way, so each lane has its own.
-    pub(super) fn lane_chain(&self, output: usize, slot: usize) -> Option<LaneChain> {
-        let mut chain = LaneChain::SILENT;
-        chain.active = true;
-        let gain = slot_knob(slot);
-        chain.knobs[gain as usize] = self.knob_value(output, gain);
-
-        let mut current = output;
-        let mut input = Port::Slot(slot);
-        // A graph can't have more links than nodes, so a longer walk means a loop.
-        for _ in 0..self.nodes.len() {
-            let from = self
-                .connections
-                .iter()
-                .find(|c| c.to == current && c.input == input)?
-                .from;
-            input = Port::Audio;
-            let node = &self.nodes[from];
-            match node.kind {
-                NodeKind::Oscillator => {
-                    chain.waveform = oscillator::waveform(node);
-                    chain.noise = oscillator::noise_type(node);
-                    chain.warp = oscillator::warp_mode(node);
-                    // An envelope wired to the oscillator's input shapes its amplitude.
-                    chain.envelope = self.amp_envelope(from);
-                    self.copy_knobs(&mut chain.knobs, from);
-                    return Some(chain);
-                }
-                // A mix node stands in for the single oscillator above, combining two of its own.
-                NodeKind::Mix => {
-                    chain.mix = Some(MixChain {
-                        mode: mix::mix_mode(node),
-                        mix: self.knob_value(from, KnobId::Mix),
-                        a: self.mix_branch(from, 0),
-                        b: self.mix_branch(from, 1),
-                    });
-                    return Some(chain);
-                }
-                // The walk starts at the output, so the first filter found is the last in the chain.
-                NodeKind::Filter => {
-                    if chain.filter.is_none() {
-                        chain.filter = Some(filter::filter_type(node));
-                        self.copy_knobs(&mut chain.knobs, from);
-                    }
-                }
-                NodeKind::Map
-                | NodeKind::Output
-                | NodeKind::Lfo
-                | NodeKind::Input
-                | NodeKind::Envelope => return None,
-            }
-            current = from;
-        }
-        None
     }
 
     /// Removes the connection on an input port and returns it.

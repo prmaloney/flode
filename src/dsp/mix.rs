@@ -16,15 +16,6 @@ impl MixMode {
     /// Every mode, in the order the dropdown lists them.
     pub const ALL: [MixMode; 3] = [MixMode::Crossfade, MixMode::Am, MixMode::RingMod];
 
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Unknown values fall back to the crossfade.
-    pub fn from_u8(value: u8) -> Self {
-        Self::ALL.get(value as usize).copied().unwrap_or_default()
-    }
-
     /// Combines two samples. `mix` runs from 0.0, which is plain signal A, to 1.0, which is the
     /// full effect. For a crossfade that is all of B.
     pub fn combine(self, a: f32, b: f32, mix: f32) -> f32 {
@@ -69,12 +60,5 @@ mod tests {
     fn ring_mod_at_full_mix_is_the_plain_product() {
         assert_eq!(MixMode::RingMod.combine(0.5, 0.4, 1.0), 0.2);
         assert_eq!(MixMode::RingMod.combine(0.5, 0.4, 0.0), 0.5);
-    }
-
-    #[test]
-    fn modes_round_trip_through_their_byte() {
-        for mode in MixMode::ALL {
-            assert_eq!(MixMode::from_u8(mode.to_u8()), mode);
-        }
     }
 }

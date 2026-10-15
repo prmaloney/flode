@@ -763,10 +763,12 @@ name = "flode"
 version = "0.1.0"
 dependencies = [
  "arrayvec 0.7.8",
+ "assert_no_alloc",
  "nih_plug",
  "nih_plug_iced",
  "rtrb",
  "serde",
+ "triple_buffer",
 ]
 
 [[package]]
@@ -2375,6 +2377,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow 1.0.4",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

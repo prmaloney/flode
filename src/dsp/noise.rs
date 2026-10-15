@@ -25,15 +25,6 @@ impl NoiseType {
         NoiseType::Brown,
         NoiseType::Geiger,
     ];
-
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Unknown values fall back to white.
-    pub fn from_u8(value: u8) -> Self {
-        Self::ALL.get(value as usize).copied().unwrap_or_default()
-    }
 }
 
 /// What one voice's noise remembers between samples. Each voice has its own, so voices don't

@@ -30,16 +30,6 @@ impl Waveform {
         self as usize
     }
 
-    /// Stored as a u8 so the editor can publish the waveform to the audio thread atomically.
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Unknown values fall back to sine.
-    pub fn from_u8(value: u8) -> Self {
-        Self::ALL.get(value as usize).copied().unwrap_or_default()
-    }
-
     /// The shape of one cycle at `phase`, from 0.0 to 1.0, in the range -1.0 to 1.0. It has sharp
     /// edges for saw and square. Played directly, those alias at high pitches. Audio uses
     /// `WaveTables`, which drops the partials above Nyquist.

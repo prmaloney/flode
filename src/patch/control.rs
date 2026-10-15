@@ -18,28 +18,6 @@ pub enum Source {
     Midi(MidiSource),
 }
 
-impl Source {
-    pub fn to_u8(self) -> u8 {
-        match self {
-            Source::Envelope(index) => index as u8,
-            Source::Lfo(index) => (MAX_ENVELOPES + index) as u8,
-            Source::Midi(source) => (MAX_ENVELOPES + MAX_LFOS + source.index()) as u8,
-        }
-    }
-
-    pub fn from_u8(value: u8) -> Self {
-        let value = value as usize;
-        if value < MAX_ENVELOPES {
-            Source::Envelope(value)
-        } else if value < MAX_ENVELOPES + MAX_LFOS {
-            Source::Lfo(value - MAX_ENVELOPES)
-        } else {
-            let index = (value - MAX_ENVELOPES - MAX_LFOS) % MIDI_SOURCE_COUNT;
-            Source::Midi(MidiSource::ALL[index])
-        }
-    }
-}
-
 /// The most envelope nodes a patch can run. Each voice keeps a copy of every one, so the audio
 /// thread can size them ahead of time.
 pub const MAX_ENVELOPES: usize = 8;
@@ -133,11 +111,6 @@ pub struct KnobValue {
 }
 
 impl KnobValue {
-    pub const ZERO: KnobValue = KnobValue {
-        value: 0.0,
-        route: None,
-    };
-
     /// The knob's normalized value now. A driven knob follows its control source.
     pub fn normalized(&self, levels: &ControlLevels) -> f32 {
         match self.route {
@@ -154,14 +127,12 @@ impl KnobValue {
 
 /// A knob a stage reads. It pairs the knob's id with the node's value and control route, so a
 /// stage never repeats which knob it is reading.
-#[allow(dead_code)] // Used once the engine runs the stage arena.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Param {
     id: KnobId,
     knob: KnobValue,
 }
 
-#[allow(dead_code)]
 impl Param {
     pub const fn new(id: KnobId, knob: KnobValue) -> Self {
         Self { id, knob }
