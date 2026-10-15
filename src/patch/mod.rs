@@ -89,7 +89,7 @@ impl Default for Globals {
 }
 
 /// Everything the audio thread needs from the graph.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Patch {
     /// The stages behind each output slot. A slot with no stages is silent.
     pub lanes: [LaneGraph; MAX_SLOTS],
@@ -99,6 +99,29 @@ pub struct Patch {
     /// The LFO nodes in graph order, or None past the last one.
     pub lfos: [Option<LfoSettings>; MAX_LFOS],
     pub globals: Globals,
+}
+
+impl Clone for Patch {
+    fn clone(&self) -> Self {
+        Self {
+            lanes: self.lanes.clone(),
+            envelopes: self.envelopes,
+            lfos: self.lfos,
+            globals: self.globals,
+        }
+    }
+
+    /// Copies field by field into `self`. The audio thread calls this every block, and the default
+    /// builds a whole patch on the stack first, which is too big for a 2 MB audio stack in a debug
+    /// build.
+    fn clone_from(&mut self, source: &Self) {
+        for (lane, from) in self.lanes.iter_mut().zip(&source.lanes) {
+            lane.clone_from(from);
+        }
+        self.envelopes = source.envelopes;
+        self.lfos = source.lfos;
+        self.globals = source.globals;
+    }
 }
 
 impl Patch {
@@ -128,5 +151,29 @@ impl Patch {
 impl Default for Patch {
     fn default() -> Self {
         Self::silent()
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+
+    /// The audio thread copies the patch every block on a stack of about 2 MB, shared with the
+    /// whole process call. Copying in place needs almost none of it, so a thread with a small
+    /// stack can do it. A copy that builds a temporary patch first would overflow here.
+    #[test]
+    fn copying_a_patch_into_another_needs_little_stack() {
+        let source = Patch::silent();
+        let copied = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let mut target = Patch::silent();
+                target.clone_from(&source);
+                target == source
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(copied);
     }
 }

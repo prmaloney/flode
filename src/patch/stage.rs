@@ -143,10 +143,26 @@ impl StageSpec {
 
 /// Everything one output slot plays: its stages in signal order, ending at the stage that feeds
 /// the slot, and the slot's gain.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct LaneGraph {
     pub stages: ArrayVec<StageSpec, MAX_STAGES>,
     pub gain: Param,
+}
+
+impl Clone for LaneGraph {
+    fn clone(&self) -> Self {
+        Self {
+            stages: self.stages.clone(),
+            gain: self.gain,
+        }
+    }
+
+    /// Copies the stages one at a time into `self`, with no whole-lane temporary on the stack.
+    fn clone_from(&mut self, source: &Self) {
+        self.stages.clear();
+        self.stages.extend(source.stages.iter().copied());
+        self.gain = source.gain;
+    }
 }
 
 impl LaneGraph {
