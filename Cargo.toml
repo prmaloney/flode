@@ -3,7 +3,7 @@ name = "flode"
 version = "0.1.0"
 edition = "2021"
 authors = ["Patrick Maloney"]
-description = "A MIDI-driven sine wave synth (VST3 / CLAP)"
+description = "A synth you build by wiring nodes together (VST3 / CLAP / standalone)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
