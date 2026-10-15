@@ -57,7 +57,7 @@ impl NodeBehavior for Lfo {
         &["Wave"]
     }
 
-    /// Two cycles of the chosen wave. The box shows a fixed number of cycles, so the rate knob
+    /// One cycle of the chosen wave. The box shows a fixed number of cycles, so the rate knob
     /// does not change it.
     fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
         let wave = waveform(node);
@@ -69,8 +69,8 @@ impl NodeBehavior for Lfo {
                 (wave.naive((x * CYCLES as f32).fract()) + 1.0) * 0.5
             })
         };
-        // The dot rides the first of the two cycles shown. Noise holds a random value per cycle, so
-        // its fixed picture has no place for a dot.
+        // The dot rides the cycle shown, at the LFO's phase. Noise holds a random value per cycle,
+        // so its fixed picture has no place for a dot.
         let cursor = match (wave, live.lfo()) {
             (Waveform::Noise, _) | (_, None) => None,
             (_, Some((phase, level))) => Some((phase.clamp(0.0, 1.0) / CYCLES as f32, level)),
@@ -84,7 +84,7 @@ impl NodeBehavior for Lfo {
 }
 
 /// Cycles of the wave the viewer shows.
-const CYCLES: usize = 2;
+const CYCLES: usize = 1;
 /// Steps in the noise trace.
 const NOISE_STEPS: usize = 16;
 
@@ -128,15 +128,15 @@ mod tests {
         }
     }
 
-    /// A sine trace peaks once per cycle, so two cycles have two peaks.
+    /// A sine trace peaks once per cycle, so one cycle has one peak.
     #[test]
-    fn a_sine_trace_has_two_cycles() {
+    fn a_sine_trace_has_one_cycle() {
         let points = trace_of(Waveform::Sine);
         let peaks = points
             .windows(3)
             .filter(|w| w[1] > w[0] && w[1] >= w[2] && w[1] > 0.9)
             .count();
-        assert_eq!(peaks, 2);
+        assert_eq!(peaks, 1);
     }
 
     #[test]
@@ -162,9 +162,9 @@ mod tests {
         assert_eq!(trace.cursor, None);
     }
 
-    /// The dot rides the first of the two cycles, and sits on the drawn wave.
+    /// The dot sits at the LFO's phase across the box, on the drawn wave.
     #[test]
-    fn the_cursor_rides_the_first_cycle() {
+    fn the_cursor_sits_at_the_phase_on_the_wave() {
         for wave in [
             Waveform::Sine,
             Waveform::Saw,
@@ -172,7 +172,7 @@ mod tests {
             Waveform::Square,
         ] {
             let (x, y) = cursor_of(wave, 0.3).expect("a cursor");
-            assert!((x - 0.15).abs() < 1e-6, "{wave:?}");
+            assert!((x - 0.3).abs() < 1e-6, "{wave:?}");
             let points = trace_of(wave);
             let drawn = points[(x * (TRACE_SAMPLES - 1) as f32).round() as usize];
             assert!((drawn - y).abs() < 0.1, "{wave:?}: {drawn} vs {y}");

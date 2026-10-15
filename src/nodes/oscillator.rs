@@ -7,7 +7,7 @@ use crate::dsp::warp::{warp_phase, warp_value, WarpMode};
 use crate::dsp::wavetable::Waveform;
 
 /// How many cycles the viewer draws.
-const TRACE_CYCLES: f32 = 2.0;
+const TRACE_CYCLES: f32 = 1.0;
 
 pub struct Oscillator;
 
@@ -105,7 +105,7 @@ impl NodeBehavior for Oscillator {
         dropdowns
     }
 
-    /// Two cycles of the chosen waveform, through the warp at its live amount. Noise has no
+    /// One cycle of the chosen waveform, through the warp at its live amount. Noise has no
     /// cycle, so it draws a fixed jagged line that does not change between frames.
     fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
         let wave = waveform(node);
@@ -200,10 +200,10 @@ mod tests {
         assert!(node.trace(&Live::of(&node)).is_some());
     }
 
-    /// Two sine cycles cross the midline at each half cycle between the ends, three times.
-    /// Both ends sit on the midline.
+    /// A sine cycle crosses the midline once between its ends, at the half cycle. Both ends sit
+    /// on the midline.
     #[test]
-    fn a_sine_crosses_the_midline_twice_per_cycle() {
+    fn a_sine_crosses_the_midline_once_between_its_ends() {
         let mut node = oscillator();
         node.choose(0, 0);
         let points = Oscillator
@@ -222,7 +222,7 @@ mod tests {
             }
             side = s.signum();
         }
-        assert_eq!(crossings, 3);
+        assert_eq!(crossings, 1);
     }
 
     /// The warp amount in `Live` changes the picture.
