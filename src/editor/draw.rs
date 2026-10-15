@@ -164,10 +164,13 @@ pub(super) fn wire_color(out: Port) -> Color {
     }
 }
 
-/// The four points of a wire's cubic curve. Control points stay at least 60 pixels out so short
-/// wires still curve.
+/// The four points of a wire's cubic curve. Control points stay out from the pins so a wire
+/// leaves and enters level, up to 60 pixels, but never farther than half the wire's length. A
+/// longer reach on a short wire makes the handles cross and kink the curve.
 pub(super) fn wire_curve(from: Point, to: Point) -> [Point; 4] {
-    let reach = ((to.x - from.x).abs() * 0.5).max(60.0);
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let length = dx.hypot(dy);
+    let reach = (dx.abs() * 0.5).max((length * 0.5).min(MIN_WIRE_REACH));
     [
         from,
         Point::new(from.x + reach, from.y),

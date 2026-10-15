@@ -64,6 +64,8 @@ pub(super) const DROPDOWN_COLOR: Color = Color::from_rgb(0.16, 0.16, 0.19);
 pub(super) const DROPDOWN_HOVER_COLOR: Color = Color::from_rgb(0.23, 0.23, 0.28);
 pub(super) const LIST_ROW_HOVER_COLOR: Color = Color::from_rgb(0.26, 0.26, 0.32);
 pub(super) const HIGHLIGHT_WIRE_COLOR: Color = Color::from_rgb(1.0, 0.75, 0.25);
+/// The farthest a wire's handles reach from a pin when the pins are close together.
+pub(super) const MIN_WIRE_REACH: f32 = 60.0;
 /// Points sampled along a wire when checking whether a node sits on it.
 pub(super) const WIRE_SAMPLES: usize = 24;
 pub(super) const CHECKBOX_CHECKED_COLOR: Color = Color::from_rgb(0.19, 0.50, 0.90);

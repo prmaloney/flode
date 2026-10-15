@@ -1814,6 +1814,47 @@ mod section_tests {
 }
 
 #[cfg(test)]
+mod wire_curve_tests {
+    use super::*;
+
+    /// The curve's x along a wire, sampled from end to end.
+    fn xs(curve: &[Point; 4]) -> Vec<f32> {
+        (0..=40)
+            .map(|i| bezier_point(curve, i as f32 / 40.0).x)
+            .collect()
+    }
+
+    /// A short wire to a pin just ahead of it runs forward without doubling back, so it has no
+    /// kink.
+    #[test]
+    fn a_short_wire_does_not_double_back() {
+        for (dx, dy) in [(20.0, 10.0), (30.0, -25.0), (12.0, 0.0), (40.0, 40.0)] {
+            let from = Point::new(100.0, 100.0);
+            let curve = wire_curve(from, Point::new(from.x + dx, from.y + dy));
+            let xs = xs(&curve);
+            assert!(
+                xs.windows(2).all(|pair| pair[1] >= pair[0] - 1e-3),
+                "{dx} {dy}"
+            );
+            assert!(xs
+                .iter()
+                .all(|&x| x >= from.x - 1e-3 && x <= from.x + dx + 1e-3));
+        }
+    }
+
+    /// A long wire keeps its full 60 px handles, and a wire straight down still leaves level.
+    #[test]
+    fn a_long_wire_keeps_its_reach() {
+        let curve = wire_curve(Point::new(0.0, 0.0), Point::new(400.0, 100.0));
+        assert_eq!(curve[1], Point::new(200.0, 0.0));
+        assert_eq!(curve[2], Point::new(200.0, 100.0));
+        let curve = wire_curve(Point::new(0.0, 0.0), Point::new(0.0, 300.0));
+        assert_eq!(curve[1], Point::new(60.0, 0.0));
+        assert_eq!(curve[2], Point::new(-60.0, 300.0));
+    }
+}
+
+#[cfg(test)]
 mod notes_tests {
     use super::*;
 
