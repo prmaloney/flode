@@ -49,6 +49,9 @@ pub struct LfoSettings {
     pub rate: Param,
     /// The Sync knob. Zero is free running, and each step past it is a note division.
     pub sync: Param,
+    /// Restart the cycle at every note on. It applies to a free running LFO. A synced LFO follows
+    /// the playhead and ignores it.
+    pub retrigger: bool,
 }
 
 impl LfoSettings {
@@ -57,6 +60,7 @@ impl LfoSettings {
             waveform: Waveform::Sine,
             rate: Param::default_of(KnobId::LfoRate),
             sync: Param::default_of(KnobId::LfoSync),
+            retrigger: false,
         }
     }
 }

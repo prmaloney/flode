@@ -349,3 +349,23 @@ fn slots_panned_apart_come_out_on_separate_channels() {
     assert!(out.iter().map(|f| f.l.abs()).fold(0.0f32, f32::max) > 0.05);
     assert!(out.iter().map(|f| f.r.abs()).fold(0.0f32, f32::max) > 0.05);
 }
+
+/// An LFO with Retrigger on starts its cycle again at every note, through the engine.
+#[test]
+fn a_note_retriggers_the_lfo_through_the_engine() {
+    let mut patch = plain_oscillator_patch();
+    let mut lfo = crate::patch::LfoSettings::new();
+    lfo.waveform = crate::dsp::wavetable::Waveform::Saw;
+    lfo.rate = Param::fixed(KnobId::LfoRate, 3.0);
+    lfo.retrigger = true;
+    patch.lfos[0] = Some(lfo);
+    let mut engine = engine_on(&patch);
+    engine.note_on(60, 1.0);
+    render(&mut engine, 20000);
+    let before = engine.levels().lfo[0];
+    engine.note_on(64, 1.0);
+    render(&mut engine, 1);
+    let after = engine.levels().lfo[0];
+    assert!(before > 0.1, "{before}");
+    assert!(after < 0.01, "{after}");
+}

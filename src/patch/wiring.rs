@@ -217,6 +217,7 @@ impl<'a> Wiring<'a> {
                 waveform: lfo::waveform(node),
                 rate: self.param(index, KnobId::LfoRate),
                 sync: self.param(index, KnobId::LfoSync),
+                retrigger: node.switch(0),
             });
         }
         out

@@ -187,6 +187,9 @@ impl Engine {
         self.held.push(note, velocity);
         self.midi_levels[MidiSource::Note.index()] = f32::from(note) / 127.0;
         self.midi_levels[MidiSource::Velocity.index()] = velocity;
+        let levels = self.levels();
+        self.lfos
+            .retrigger(&self.patch.lfos, &levels, &self.transport, &mut self.rng);
 
         // Portamento in mono mode starts the new note at the last pitch, while any voice still
         // sounds. Otherwise the voice starts at its own pitch.

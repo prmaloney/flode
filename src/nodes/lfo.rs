@@ -38,7 +38,12 @@ impl NodeBehavior for Lfo {
             Row::driven_knob(KnobId::LfoRate).with_output(Port::Shape),
             Row::plain_knob(KnobId::LfoSync),
             Row::control(Control::Dropdown(0)),
+            Row::control(Control::Switch(0)),
         ]
+    }
+
+    fn switch_labels(&self) -> &'static [&'static str] {
+        &["Retrigger"]
     }
 
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {

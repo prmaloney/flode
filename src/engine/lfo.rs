@@ -8,6 +8,12 @@ use crate::nodes::lfo::cycles_per_beat;
 use crate::patch::control::{ControlLevels, MAX_LFOS};
 use crate::patch::LfoSettings;
 
+/// True while a Sync step past free locks an LFO to the host's playhead. That needs the host to
+/// be playing.
+fn follows_playhead(sync: usize, transport: &Transport) -> bool {
+    sync >= 1 && transport.playing
+}
+
 pub struct Lfos {
     phase: [f32; MAX_LFOS],
     levels: [f32; MAX_LFOS],
@@ -31,6 +37,29 @@ impl Lfos {
         self.levels
     }
 
+    /// Restarts every free running LFO that has Retrigger on, as a note starts. A noise LFO draws a
+    /// new value too. An LFO that follows the playhead keeps its place in the song.
+    pub fn retrigger(
+        &mut self,
+        settings: &[Option<LfoSettings>; MAX_LFOS],
+        levels: &ControlLevels,
+        transport: &Transport,
+        rng: &mut Rng,
+    ) {
+        for (lfo, settings) in settings.iter().enumerate() {
+            let Some(settings) = settings else { continue };
+            let sync = settings.sync.plain(levels).round() as usize;
+            if !settings.retrigger || follows_playhead(sync, transport) {
+                continue;
+            }
+            self.phase[lfo] = 0.0;
+            self.prev[lfo] = 0.0;
+            if settings.waveform == Waveform::Noise {
+                self.hold[lfo] = rng.unit();
+            }
+        }
+    }
+
     /// Moves every LFO on by one sample. `levels` is what its rate and sync knobs read.
     pub fn advance(
         &mut self,
@@ -49,8 +78,12 @@ impl Lfos {
             // A Sync step past free locks the LFO to the playhead, so it follows the song while it
             // plays. Otherwise, or without a host tempo, it runs at its rate.
             let sync = settings.sync.plain(levels).round() as usize;
-            let beats = match (transport.playing, transport.beats, transport.tempo) {
-                (true, Some(beat), Some(bpm)) if sync >= 1 => {
+            let beats = match (
+                follows_playhead(sync, transport),
+                transport.beats,
+                transport.tempo,
+            ) {
+                (true, Some(beat), Some(bpm)) => {
                     Some(beat + sample_id as f64 * bpm / (60.0 * sample_rate as f64))
                 }
                 _ => None,
@@ -98,8 +131,82 @@ mod tests {
             waveform,
             rate: Param::fixed(KnobId::LfoRate, rate),
             sync: Param::fixed(KnobId::LfoSync, sync),
+            retrigger: false,
         });
         settings
+    }
+
+    fn retriggering(
+        mut settings: [Option<LfoSettings>; MAX_LFOS],
+    ) -> [Option<LfoSettings>; MAX_LFOS] {
+        settings[0].as_mut().unwrap().retrigger = true;
+        settings
+    }
+
+    /// A free running saw, run partway through its cycle, then told a note started.
+    fn level_after_a_note(
+        settings: &[Option<LfoSettings>; MAX_LFOS],
+        transport: &Transport,
+    ) -> f32 {
+        let mut lfos = Lfos::new();
+        run(&mut lfos, settings, transport, 12345);
+        lfos.retrigger(
+            settings,
+            &ControlLevels::default(),
+            transport,
+            &mut Rng::default(),
+        );
+        run(&mut lfos, settings, transport, 1)[0]
+    }
+
+    /// With Retrigger on, a note puts a free running LFO back at the start of its cycle.
+    #[test]
+    fn a_note_restarts_a_retriggering_lfo() {
+        let saw = retriggering(lfo(Waveform::Saw, 3.0, 0.0));
+        let level = level_after_a_note(&saw, &Transport::default());
+        assert!(level < 0.01, "{level}");
+    }
+
+    /// With it off, a note leaves the LFO where it was.
+    #[test]
+    fn a_note_leaves_a_plain_lfo_alone() {
+        let saw = lfo(Waveform::Saw, 3.0, 0.0);
+        let level = level_after_a_note(&saw, &Transport::default());
+        // 12345 samples at 3 Hz is 0.84 of a cycle.
+        assert!(level > 0.8, "{level}");
+    }
+
+    /// A synced LFO follows the playhead, so a note does not move it.
+    #[test]
+    fn a_note_does_not_move_a_synced_lfo() {
+        let synced = retriggering(lfo(Waveform::Saw, 1.0, 3.0));
+        let transport = Transport {
+            beats: Some(0.5),
+            tempo: Some(120.0),
+            playing: true,
+        };
+        let level = level_after_a_note(&synced, &transport);
+        assert!((level - 0.5).abs() < 0.01, "{level}");
+    }
+
+    /// A noise LFO draws a fresh value at a note.
+    #[test]
+    fn a_note_draws_a_new_noise_value() {
+        let noise = retriggering(lfo(Waveform::Noise, 1.0, 0.0));
+        let mut lfos = Lfos::new();
+        let before = run(&mut lfos, &noise, &Transport::default(), 100)[99];
+        let mut seen = false;
+        let mut rng = Rng::default();
+        for _ in 0..5 {
+            lfos.retrigger(
+                &noise,
+                &ControlLevels::default(),
+                &Transport::default(),
+                &mut rng,
+            );
+            seen |= run(&mut lfos, &noise, &Transport::default(), 1)[0] != before;
+        }
+        assert!(seen);
     }
 
     fn run(

@@ -589,3 +589,23 @@ mod mix_tests {
         assert_eq!(lane.stages.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod lfo_retrigger_tests {
+    use super::*;
+
+    /// The Retrigger switch on an LFO node reaches the patch, and a save keeps it.
+    #[test]
+    fn the_retrigger_switch_reaches_the_patch_and_survives_saving() {
+        let mut graph = Graph::default();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 200.0));
+        assert_eq!(graph.nodes[lfo].switch_labels(), &["Retrigger"]);
+        assert!(!graph.patch().lfos[0].unwrap().retrigger);
+
+        graph.nodes[lfo].set_switch(0, true);
+        assert!(graph.patch().lfos[0].unwrap().retrigger);
+
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert!(loaded.patch().lfos[0].unwrap().retrigger);
+    }
+}
