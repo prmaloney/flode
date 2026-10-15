@@ -52,6 +52,33 @@ impl Coefficients {
     }
 }
 
+/// The gain of the filter at `freq` Hz, as a ratio where 1.0 is unity. It uses the same cutoff
+/// clamp and damping as `Coefficients::new`, so the number matches what `Svf::tick` does to a sine.
+/// The filter is a bilinear transform of the analog one, so the response is the analog one with
+/// the frequency warped by `tan`. `cutoff` is in Hz and `resonance` runs from 0.0 to 1.0.
+pub fn magnitude(
+    kind: FilterType,
+    freq: f32,
+    cutoff: f32,
+    resonance: f32,
+    sample_rate: f32,
+) -> f32 {
+    let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
+    let k = 2.0 - 1.9 * resonance.clamp(0.0, 1.0);
+    let g = (PI * cutoff / sample_rate).tan();
+    let freq = freq.clamp(1.0, sample_rate * 0.499);
+    // The warped frequency over the warped cutoff.
+    let x = (PI * freq / sample_rate).tan() / g;
+    let re = 1.0 - x * x;
+    let im = k * x;
+    let denominator = (re * re + im * im).sqrt();
+    match kind {
+        FilterType::LowPass => 1.0 / denominator,
+        FilterType::HighPass => x * x / denominator,
+        FilterType::BandPass => im / denominator,
+    }
+}
+
 /// The filter's memory: the two integrators.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Svf {
@@ -131,6 +158,54 @@ mod tests {
         assert!(peak(FilterType::BandPass, 1000.0, 1000.0) > 0.9);
         assert!(peak(FilterType::BandPass, 1000.0, 100.0) < 0.2);
         assert!(peak(FilterType::BandPass, 1000.0, 10000.0) < 0.2);
+    }
+
+    fn peak_with(kind: FilterType, cutoff: f32, resonance: f32, freq: f32) -> f32 {
+        let mut svf = Svf::new();
+        let mut peak = 0.0f32;
+        for n in 0..44100 {
+            let input = (TAU * freq * n as f32 / 44100.0).sin();
+            let out = svf.process(input, cutoff, resonance, kind, 44100.0);
+            if n > 22050 {
+                peak = peak.max(out.abs());
+            }
+        }
+        peak
+    }
+
+    fn db(gain: f32) -> f32 {
+        20.0 * gain.max(1e-9).log10()
+    }
+
+    /// The response function agrees with sines run through the real filter, below, at, and above
+    /// the cutoff, for every type and a few resonances.
+    #[test]
+    fn magnitude_matches_the_filter() {
+        for kind in FilterType::ALL {
+            for resonance in [0.0, 0.5, 0.9] {
+                for freq in [250.0, 1000.0, 4000.0] {
+                    let measured = db(peak_with(kind, 1000.0, resonance, freq));
+                    let predicted = db(magnitude(kind, freq, 1000.0, resonance, 44100.0));
+                    assert!(
+                        (measured - predicted).abs() < 1.0,
+                        "{kind:?} r={resonance} f={freq}: measured {measured} dB, predicted {predicted} dB"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn magnitude_has_each_types_shape() {
+        let m = |kind, freq| magnitude(kind, freq, 1000.0, 0.0, 44100.0);
+        assert!(db(m(FilterType::LowPass, 50.0)).abs() < 0.5);
+        assert!(m(FilterType::LowPass, 8000.0) < m(FilterType::LowPass, 1000.0));
+        assert!(db(m(FilterType::HighPass, 15000.0)).abs() < 1.5);
+        assert!(m(FilterType::HighPass, 100.0) < m(FilterType::HighPass, 1000.0));
+        let at = m(FilterType::BandPass, 1000.0);
+        assert!(at > m(FilterType::BandPass, 250.0));
+        assert!(at > m(FilterType::BandPass, 4000.0));
+        assert!((at - 1.0).abs() < 0.01);
     }
 
     /// Two filters keep separate memory, so one voice's signal never leaks into another's.
