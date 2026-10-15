@@ -92,22 +92,36 @@ pub(super) enum Hover {
 
 /// Where the starting nodes sit: the oscillator at the far left and the output at the far right of
 /// the default 1024 px editor, with a 24 px margin.
-pub(super) const DEFAULT_OSC_X: f32 = 24.0;
+/// The default graph's envelope sits at the left edge, with the oscillator it shapes to its right.
+pub(super) const DEFAULT_ENVELOPE_X: f32 = 24.0;
+pub(super) const DEFAULT_OSC_X: f32 = DEFAULT_ENVELOPE_X + NODE_WIDTH + 48.0;
 pub(super) const DEFAULT_OUTPUT_X: f32 = 1024.0 - 24.0 - NODE_WIDTH;
 
+/// The graph a new instance starts with: an oscillator, wired to the output, with an envelope
+/// shaping its amplitude. The oscillator is node 0 and the output is node 1, and the envelope is
+/// node 2.
 impl Default for Graph {
     fn default() -> Self {
         let mut graph = Self::with(
             vec![
                 FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
                 FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
+                FlodeNode::new(NodeKind::Envelope, Point::new(DEFAULT_ENVELOPE_X, 80.0)),
             ],
-            vec![Connection {
-                from: 0,
-                out: Port::Audio,
-                to: 1,
-                input: Port::Slot(0),
-            }],
+            vec![
+                Connection {
+                    from: 0,
+                    out: Port::Audio,
+                    to: 1,
+                    input: Port::Slot(0),
+                },
+                Connection {
+                    from: 2,
+                    out: Port::Shape,
+                    to: 0,
+                    input: Port::Shape,
+                },
+            ],
         );
         graph.refresh_slots();
         graph

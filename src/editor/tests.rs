@@ -11,6 +11,26 @@ use nih_plug_iced::{Point, Rectangle};
 
 use super::{curve::*, draw::*, graph::*, menus::*, saved::*};
 
+/// The smallest working graph: an oscillator at node 0, wired to the output at node 1. Most tests
+/// want exactly this, so they start from it and add what they need. The default graph a new
+/// instance loads has an envelope as well, and its own tests are in `default_graph_tests`.
+fn minimal_graph() -> Graph {
+    let mut graph = Graph::with(
+        vec![
+            FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
+            FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
+        ],
+        vec![Connection {
+            from: 0,
+            out: Port::Audio,
+            to: 1,
+            input: Port::Slot(0),
+        }],
+    );
+    graph.refresh_slots();
+    graph
+}
+
 /// The oscillator settings of the stage at `index` in a slot.
 fn osc_params(lane: &LaneGraph, index: usize) -> crate::patch::stage::OscillatorParams {
     match lane.stages[index].params {
@@ -31,7 +51,7 @@ mod tests {
     /// into the gain. The shape 0 reaches 0.5 + 0.5 * 0.2 and the shape 1 reaches 0.5 + 0.5 * 0.6.
     #[test]
     fn chained_maps_compose_into_one_range() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
         let first = graph.add_node(NodeKind::Map, Point::new(0.0, 0.0));
         let second = graph.add_node(NodeKind::Map, Point::new(0.0, 0.0));
@@ -59,7 +79,7 @@ mod tests {
     /// A map with nothing upstream does not drive its knob.
     #[test]
     fn map_without_envelope_does_not_drive() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let map = graph.add_node(NodeKind::Map, Point::new(0.0, 0.0));
         graph.connect(map, Port::Shape, 1, Port::Knob(KnobId::Gain));
         assert_eq!(graph.control_route(1, KnobId::Gain), None);
@@ -69,7 +89,7 @@ mod tests {
     /// Two filters keep separate knobs. A wire into one's cutoff drives only that filter.
     #[test]
     fn a_control_wire_drives_only_its_own_node() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
         let first = graph.add_node(NodeKind::Filter, Point::new(0.0, 0.0));
         let second = graph.add_node(NodeKind::Filter, Point::new(0.0, 0.0));
@@ -86,7 +106,7 @@ mod slot_tests {
     /// The default graph has one slot in use, and one empty pin below it.
     #[test]
     fn default_output_has_one_slot_and_an_empty_pin() {
-        let graph = Graph::default();
+        let graph = minimal_graph();
         let output = &graph.nodes[1];
         assert_eq!(output.used, 1);
         assert_eq!(output.slots, 2);
@@ -97,7 +117,7 @@ mod slot_tests {
     /// Wiring the empty pin adds a slot and a new empty pin below it.
     #[test]
     fn wiring_the_empty_pin_adds_a_slot() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
         let output = &graph.nodes[1];
@@ -114,7 +134,7 @@ mod slot_tests {
     /// only for connected slots, so a load has to count the wires before it checks them.
     #[test]
     fn wires_into_later_output_slots_survive_saving() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
         let third = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 400.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
@@ -130,7 +150,7 @@ mod slot_tests {
     /// Two oscillators wired to two slots keep their own knobs. Turning one does not move the other.
     #[test]
     fn two_oscillators_keep_separate_knobs() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
 
@@ -176,7 +196,7 @@ mod slot_tests {
     /// Saved knob values and the dropdown come back, and old fields still load.
     #[test]
     fn saving_and_loading_keeps_node_state() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.nodes[0].set_value(KnobId::Unison, KnobId::Unison.to_normalized(5.0));
         graph.nodes[0].choose(0, 2);
         graph.nodes[1].switches = vec![true, true];
@@ -210,7 +230,7 @@ mod slot_tests {
     /// A node dropped on the wire into an output slot splices into that wire.
     #[test]
     fn a_node_dropped_on_a_slot_wire_is_spliced_in() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let curve = graph.link_curve(&graph.connections[0]).unwrap();
         let middle = bezier_point(&curve, 0.5);
         let filter = graph.add_node(
@@ -240,7 +260,7 @@ mod lfo_and_category_tests {
     /// An LFO wired into the output's gain drives that knob from LFO 0.
     #[test]
     fn an_lfo_drives_a_knob_as_its_own_source() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
         graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::Gain));
 
@@ -264,7 +284,7 @@ mod lfo_and_category_tests {
     /// The first LFO is the one the audio thread runs. Later LFOs make no signal.
     #[test]
     fn only_the_first_lfos_are_run() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let mut lfos = Vec::new();
         for x in 0..3 {
             let lfo = graph.add_node(NodeKind::Lfo, Point::new(x as f32 * 10.0, 200.0));
@@ -315,7 +335,7 @@ mod lfo_and_category_tests {
     /// An envelope can drive an LFO's rate, and the LFO reports that route.
     #[test]
     fn an_envelope_can_drive_an_lfo_rate() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
         let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
         graph.connect(env, Port::Shape, lfo, Port::Knob(KnobId::LfoRate));
@@ -333,7 +353,7 @@ mod input_node_tests {
     /// The mod wheel pin of an input node drives a knob as its own source.
     #[test]
     fn a_midi_pin_drives_a_knob() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let input = graph.add_node(NodeKind::Input, Point::new(0.0, 0.0));
         graph.connect(
             input,
@@ -349,7 +369,7 @@ mod input_node_tests {
     /// A MIDI source goes through a map like any other control signal.
     #[test]
     fn a_midi_pin_can_feed_a_map() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let input = graph.add_node(NodeKind::Input, Point::new(0.0, 0.0));
         let map = graph.add_node(NodeKind::Map, Point::new(0.0, 0.0));
         graph.connect(input, Port::Midi(MidiSource::Velocity), map, Port::Shape);
@@ -363,7 +383,7 @@ mod input_node_tests {
     /// through the map.
     #[test]
     fn a_map_dropped_on_a_control_wire_is_spliced_in() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
         graph.connect(env, Port::Shape, 1, Port::Knob(KnobId::Gain));
         let link = graph.connections.len() - 1;
@@ -478,7 +498,7 @@ mod mix_tests {
 
     /// A mix node between two oscillators and the output.
     fn chain() -> (Graph, usize, usize, usize) {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.connections.clear();
         let a = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 0.0));
         let b = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 0.0));
@@ -548,7 +568,7 @@ mod mix_tests {
     /// and the mix feeding the old target.
     #[test]
     fn a_mix_dropped_on_an_audio_wire_joins_at_input_a() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let curve = graph.link_curve(&graph.connections[0]).unwrap();
         let middle = bezier_point(&curve, 0.5);
         let mix = graph.add_node(NodeKind::Mix, Point::new(middle.x - 80.0, middle.y - 20.0));
@@ -574,7 +594,7 @@ mod mix_tests {
     /// A source with no audio input still does not splice into a wire.
     #[test]
     fn an_oscillator_dropped_on_an_audio_wire_does_not_splice() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let curve = graph.link_curve(&graph.connections[0]).unwrap();
         let middle = bezier_point(&curve, 0.5);
         let osc = graph.add_node(
@@ -587,7 +607,7 @@ mod mix_tests {
     /// A chain without a mix node is a single oscillator.
     #[test]
     fn a_plain_oscillator_chain_is_one_stage() {
-        let lane = Graph::default().patch().lanes[0].clone();
+        let lane = minimal_graph().patch().lanes[0].clone();
         assert_eq!(lane.stages.len(), 1);
     }
 }
@@ -599,7 +619,7 @@ mod lfo_retrigger_tests {
     /// The Retrigger switch on an LFO node reaches the patch, and a save keeps it.
     #[test]
     fn the_retrigger_switch_reaches_the_patch_and_survives_saving() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 200.0));
         assert_eq!(graph.nodes[lfo].switch_labels(), &["Retrigger"]);
         assert!(!graph.patch().lfos[0].unwrap().retrigger);
@@ -621,7 +641,7 @@ mod layering_tests {
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
 
     fn three_nodes() -> Graph {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.add_node(NodeKind::Filter, Point::new(0.0, 300.0));
         graph
     }
@@ -656,7 +676,7 @@ mod layering_tests {
     /// Where two nodes overlap, a press goes to the one on top, which is the selected one.
     #[test]
     fn a_press_goes_to_the_node_on_top() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let a = graph.add_node(NodeKind::Reverb, Point::new(500.0, 100.0));
         let b = graph.add_node(NodeKind::Reverb, Point::new(520.0, 120.0));
         let overlap = Point::new(560.0, 160.0);
@@ -702,7 +722,7 @@ mod layering_tests {
             height: 712.0,
         };
         let strip = piano::strip_bounds(bounds);
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         // Move the oscillator so the last row of its Wave list lands 30 px into the strip.
         graph.nodes[0].position = Point::new(100.0, 0.0);
         let dropdown = graph.nodes[0].dropdowns().remove(0);
@@ -743,7 +763,7 @@ mod layering_tests {
             height: 712.0,
         };
         let strip = piano::strip_bounds(bounds);
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         let (_, message) = editor.update(
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
@@ -777,7 +797,7 @@ mod bypass_and_duplicate_tests {
     /// An oscillator through a filter into the output: nodes 0, 2, 1 (the default graph has the
     /// oscillator at 0 and the output at 1).
     fn osc_filter_output() -> (Graph, usize) {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let filter = graph.add_node(NodeKind::Filter, Point::new(300.0, 300.0));
         let wire = graph
             .connections
@@ -860,7 +880,7 @@ mod bypass_and_duplicate_tests {
     /// A muted oscillator is silence, so its slot has no stages.
     #[test]
     fn a_muted_oscillator_makes_no_sound() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         assert_eq!(stage_count(&graph), 1);
         assert!(graph.toggle_bypass(0));
         assert_eq!(stage_count(&graph), 0);
@@ -882,7 +902,7 @@ mod bypass_and_duplicate_tests {
     /// A bypassed effect at the end of a chain leaves the per-voice path to play, with no tap.
     #[test]
     fn a_bypassed_effect_leaves_the_voices_to_play() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let reverb = graph.add_node(NodeKind::Reverb, Point::new(300.0, 300.0));
         let wire = graph.connections.iter().position(|c| c.to == 1).unwrap();
         graph.insert_into(reverb, wire);
@@ -899,7 +919,7 @@ mod bypass_and_duplicate_tests {
     /// A bypassed mix plays signal A, and a muted source on B is silence in the mix.
     #[test]
     fn a_bypassed_mix_plays_a_and_a_muted_source_is_silent() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 300.0));
         let mix = graph.add_node(NodeKind::Mix, Point::new(300.0, 300.0));
         let wire = graph.connections.iter().position(|c| c.to == 1).unwrap();
@@ -920,7 +940,7 @@ mod bypass_and_duplicate_tests {
     /// A node that can't be switched off ignores a stray flag, so an old or edited save is safe.
     #[test]
     fn the_flag_on_a_node_that_cannot_be_switched_off_does_nothing() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.nodes[1].bypassed = true;
         assert_eq!(stage_count(&graph), 1);
         assert!(!graph.toggle_bypass(1));
@@ -931,7 +951,7 @@ mod bypass_and_duplicate_tests {
     /// The off state survives saving, and a save from before it loads switched on.
     #[test]
     fn the_off_state_survives_saving() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.toggle_bypass(0);
         let loaded = Graph::from_saved(&graph.to_saved());
         assert!(loaded.nodes[0].bypassed);
@@ -950,7 +970,7 @@ mod bypass_and_duplicate_tests {
     /// A copy has the same settings, sits offset from the original, has no wires, and is selected.
     #[test]
     fn a_duplicate_copies_the_settings_but_not_the_wires() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.nodes[0].set_value(KnobId::Unison, KnobId::Unison.to_normalized(5.0));
         graph.nodes[0].choose(0, 2);
         graph.nodes[0].toggle_bypass();
@@ -975,7 +995,7 @@ mod bypass_and_duplicate_tests {
     /// The copy is its own node. Turning a knob on it leaves the original alone.
     #[test]
     fn a_duplicate_does_not_share_knobs_with_the_original() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let copy = graph.duplicate_node(0).unwrap();
         graph.nodes[copy].set_value(KnobId::Detune, 1.0);
         assert_eq!(
@@ -987,7 +1007,7 @@ mod bypass_and_duplicate_tests {
     /// An output node is one per patch, so it can't be copied.
     #[test]
     fn an_output_node_cannot_be_duplicated() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         assert_eq!(graph.duplicate_node(1), None);
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.duplicate_node(9), None);
@@ -1078,14 +1098,14 @@ mod bypass_and_duplicate_tests {
                 .1
         };
 
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let message = click_entry(&mut graph, 1);
         assert!(matches!(message, Some(Message::GraphChanged)));
         assert!(graph.nodes[0].bypassed);
         assert!(graph.menu.is_none());
 
         // Duplicate leaves the copy in the placing state, following the cursor.
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         click_entry(&mut graph, 0);
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.selected, Some(2));
@@ -1094,7 +1114,7 @@ mod bypass_and_duplicate_tests {
             Interaction::Placing { node: 2, .. }
         ));
 
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         click_entry(&mut graph, 2);
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].kind, NodeKind::Output);
@@ -1105,7 +1125,7 @@ mod bypass_and_duplicate_tests {
     /// M mutes the selected node, and pressing it again brings it back.
     #[test]
     fn m_toggles_the_selected_node() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         let message = press(&mut editor, KeyCode::M, Modifiers::default());
@@ -1119,7 +1139,7 @@ mod bypass_and_duplicate_tests {
     /// Holding the key repeats its press. The node toggles once, not on every repeat.
     #[test]
     fn holding_m_toggles_once() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         press(&mut editor, KeyCode::M, Modifiers::default());
@@ -1136,7 +1156,7 @@ mod bypass_and_duplicate_tests {
     /// With nothing selected, or a node that can't be switched off, M does nothing.
     #[test]
     fn m_needs_a_node_that_can_be_switched_off() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         let mut editor = editor(&mut graph);
         assert!(press(&mut editor, KeyCode::M, Modifiers::default()).is_none());
         release(&mut editor, KeyCode::M);
@@ -1156,7 +1176,7 @@ mod bypass_and_duplicate_tests {
     /// Shift+D copies the selected node and selects the copy.
     #[test]
     fn shift_d_duplicates_the_selected_node() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
@@ -1170,7 +1190,7 @@ mod bypass_and_duplicate_tests {
     #[test]
     fn a_duplicate_follows_the_cursor_until_the_next_press() {
         use nih_plug_iced::Vector;
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         let grab = Vector::new(NODE_WIDTH / 2.0, HEADER_HEIGHT / 2.0);
@@ -1206,7 +1226,7 @@ mod bypass_and_duplicate_tests {
     /// While a copy is being placed, Shift+D does not make another.
     #[test]
     fn shift_d_waits_while_a_node_is_being_placed() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         press(&mut editor, KeyCode::D, Modifiers::SHIFT);
@@ -1219,7 +1239,7 @@ mod bypass_and_duplicate_tests {
     /// A plain D still plays a note, and does not copy anything.
     #[test]
     fn a_plain_d_still_plays_the_piano() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         let message = press(&mut editor, KeyCode::D, Modifiers::default());
@@ -1233,11 +1253,107 @@ mod bypass_and_duplicate_tests {
     /// Shortcuts that include Control or Command are left to the host.
     #[test]
     fn control_and_command_combinations_are_ignored() {
-        let mut graph = Graph::default();
+        let mut graph = minimal_graph();
         graph.selected = Some(0);
         let mut editor = editor(&mut graph);
         assert!(press(&mut editor, KeyCode::M, Modifiers::CTRL).is_none());
         assert!(press(&mut editor, KeyCode::M, Modifiers::LOGO).is_none());
         assert!(!editor.graph.nodes[0].bypassed);
+    }
+}
+
+#[cfg(test)]
+mod default_graph_tests {
+    use super::*;
+
+    /// A new instance starts with an oscillator and an output, wired together, and an envelope
+    /// wired to the oscillator's shape pin.
+    #[test]
+    fn the_default_graph_has_an_oscillator_an_output_and_an_envelope() {
+        let graph = Graph::default();
+        let kinds: Vec<NodeKind> = graph.nodes.iter().map(|n| n.kind).collect();
+        assert_eq!(
+            kinds,
+            [NodeKind::Oscillator, NodeKind::Output, NodeKind::Envelope]
+        );
+        assert!(graph.connections.contains(&Connection {
+            from: 0,
+            out: Port::Audio,
+            to: 1,
+            input: Port::Slot(0),
+        }));
+        assert!(graph.connections.contains(&Connection {
+            from: 2,
+            out: Port::Shape,
+            to: 0,
+            input: Port::Shape,
+        }));
+        assert_eq!(graph.connections.len(), 2);
+    }
+
+    /// Every wire of the default graph is valid, so none is dropped on a save and load.
+    #[test]
+    fn every_default_wire_is_valid_and_survives_saving() {
+        let graph = Graph::default();
+        assert!(graph.connections.iter().all(|c| c.is_valid(&graph.nodes)));
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.connections, graph.connections);
+        assert_eq!(loaded.nodes.len(), 3);
+    }
+
+    /// The envelope reaches the patch, and the oscillator takes its amplitude from it.
+    #[test]
+    fn the_envelope_shapes_the_oscillator_in_the_patch() {
+        let patch = Graph::default().patch();
+        assert!(patch.has_envelopes());
+        assert!(patch.envelopes[0].is_some());
+        let lane = &patch.lanes[0];
+        assert_eq!(lane.stages.len(), 1);
+        assert_eq!(osc_params(lane, 0).envelope, Some(0));
+    }
+
+    /// The nodes sit side by side without overlapping, envelope on the left, inside the default
+    /// window.
+    #[test]
+    fn the_default_nodes_do_not_overlap() {
+        let graph = Graph::default();
+        let bounds: Vec<Rectangle> = graph.nodes.iter().map(|n| n.bounds()).collect();
+        for (i, a) in bounds.iter().enumerate() {
+            assert!(
+                a.x >= 0.0 && a.x + a.width <= 1024.0,
+                "node {i} is off screen"
+            );
+            for b in &bounds[i + 1..] {
+                let apart = a.x + a.width <= b.x || b.x + b.width <= a.x;
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
+        assert!(graph.nodes[2].position.x < graph.nodes[0].position.x);
+    }
+
+    /// The default graph plays: a note makes sound, and it ends after release.
+    #[test]
+    fn the_default_graph_plays_a_note_and_lets_it_go() {
+        use crate::dsp::wavetable::WaveTables;
+        use crate::engine::{Engine, Transport};
+        use std::sync::Arc;
+        let patch = Graph::default().patch();
+        let mut engine = Engine::new(Arc::new(WaveTables::new()));
+        engine.begin_block(&patch, Transport::default());
+        engine.note_on(60, 1.0);
+        let mut peak = 0.0f32;
+        for n in 0..4410 {
+            peak = peak.max(engine.process_sample(n).peak());
+        }
+        assert!(peak > 0.05, "{peak}");
+
+        engine.note_off(60);
+        for n in 0..44100 {
+            engine.process_sample(n);
+        }
+        let after = (0..100)
+            .map(|n| engine.process_sample(n).peak())
+            .fold(0.0f32, f32::max);
+        assert_eq!(after, 0.0);
     }
 }
