@@ -244,8 +244,8 @@ mod lfo_and_category_tests {
             lfos.push(lfo);
         }
         // The third LFO is past the two the audio thread runs.
-        assert_eq!(graph.lfo_index(lfos[2]), None);
-        assert_eq!(graph.lfo_index(lfos[1]), Some(1));
+        assert_eq!(graph.wiring().lfo_index(lfos[2]), None);
+        assert_eq!(graph.wiring().lfo_index(lfos[1]), Some(1));
         assert!(graph.lfo_settings().iter().all(|s| s.active));
     }
 

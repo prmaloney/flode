@@ -8,7 +8,6 @@ use crate::nodes::{FlodeNode, NodeKind, Port};
 use nih_plug_iced::Point;
 use serde::{Deserialize, Serialize};
 
-
 /// The node graph as saved with the project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedGraph {

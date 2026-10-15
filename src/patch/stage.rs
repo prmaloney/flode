@@ -97,6 +97,17 @@ pub enum StageParams {
     Mix(MixParams),
 }
 
+impl StageParams {
+    /// How many audio inputs the stage reads. The compiler wires that many.
+    pub fn input_count(&self) -> usize {
+        match self {
+            StageParams::Oscillator(_) => 0,
+            StageParams::Filter(_) => 1,
+            StageParams::Mix(_) => 2,
+        }
+    }
+}
+
 /// One stage in a slot's arena, and the stages that feed it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StageSpec {

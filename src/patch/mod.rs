@@ -3,3 +3,4 @@
 pub mod control;
 #[allow(dead_code)] // Used once the engine runs the stage arena.
 pub mod stage;
+pub mod wiring;

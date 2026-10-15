@@ -315,8 +315,11 @@ mod tests {
     /// Every stage kind reports how many inputs the compiler should wire.
     #[test]
     fn each_stage_declares_its_inputs() {
-        assert_eq!(Oscillator::INPUTS, 0);
-        assert_eq!(Filter::INPUTS, 1);
-        assert_eq!(Mix::INPUTS, 2);
+        let osc = StageParams::Oscillator(OscillatorParams::default());
+        let filter = StageParams::Filter(FilterParams::default());
+        let mix = StageParams::Mix(MixParams::default());
+        assert_eq!(Oscillator::INPUTS, osc.input_count());
+        assert_eq!(Filter::INPUTS, filter.input_count());
+        assert_eq!(Mix::INPUTS, mix.input_count());
     }
 }

@@ -4,15 +4,13 @@ use crate::editor::piano::Piano;
 use crate::nodes::connection::Connection;
 use crate::nodes::filter;
 use crate::nodes::knobs::KnobId;
-use crate::nodes::lfo;
-use crate::nodes::map;
 use crate::nodes::mix;
 use crate::nodes::oscillator;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{Category, FlodeNode, NodeKind, Port, NODE_WIDTH};
-use crate::patch::control::{
-    ControlLevels, KnobValue, MapStage, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
-};
+use crate::patch::control::{ControlLevels, KnobValue, Route, MAX_ENVELOPES, MAX_LFOS};
+use crate::patch::stage::LaneGraph;
+use crate::patch::wiring::Wiring;
 use crate::routing::{Branch, EnvelopeSettings, Globals, LaneChain, LfoSettings, MixChain};
 use nih_plug_iced::{Point, Vector};
 
@@ -183,201 +181,65 @@ impl Graph {
             .find(|&index| self.nodes[index].bounds().contains(point))
     }
 
-    /// True if the envelope shape drives this knob. A driven knob can't be dragged.
+    /// The graph's wires as the compiler reads them.
+    pub fn wiring(&self) -> Wiring<'_> {
+        Wiring::new(&self.nodes, &self.connections)
+    }
+
+    /// True if a control wire drives this knob. A driven knob can't be dragged.
     pub(super) fn is_driven(&self, node: usize, id: KnobId) -> bool {
-        self.control_route(node, id).is_some()
+        self.wiring().is_driven(node, id)
     }
 
     /// True if any knob in the graph is driven by a control wire.
     pub fn any_driven(&self) -> bool {
-        self.nodes.iter().enumerate().any(|(index, node)| {
-            node.rows()
-                .iter()
-                .filter_map(|row| row.knob)
-                .any(|id| self.is_driven(index, id))
-        })
+        self.wiring().any_driven()
     }
 
-    /// The envelope shape's path to a knob, as the linear map `value = a + b * shape`. Each map
-    /// on the path rescales the value it receives into its own min and max. The path is only
-    /// valid if it ends at an envelope's shape pin. Returns None for a knob without one.
+    /// The control route that drives a knob, if one does.
     pub fn control_route(&self, node: usize, id: KnobId) -> Option<Route> {
-        let mut link = self
-            .connections
-            .iter()
-            .find(|c| c.out.is_control_out() && c.to == node && c.input == Port::Knob(id))?;
-        // The maps on the path, from the knob back toward the source.
-        let mut maps: Vec<usize> = Vec::new();
-        // A graph can't have more links than nodes, so a longer walk means a loop.
-        for _ in 0..self.nodes.len() {
-            let source = link.from;
-            match self.nodes[source].kind {
-                NodeKind::Envelope => {
-                    let index = self.envelope_index(source)?;
-                    return Self::compose(&self.nodes, &maps, Source::Envelope(index));
-                }
-                NodeKind::Lfo => {
-                    let index = self.lfo_index(source)?;
-                    return Self::compose(&self.nodes, &maps, Source::Lfo(index));
-                }
-                NodeKind::Input => {
-                    // An input node's pins are the MIDI sources, so the wire says which one.
-                    let Port::Midi(midi) = link.out else {
-                        return None;
-                    };
-                    return Self::compose(&self.nodes, &maps, Source::Midi(midi));
-                }
-                NodeKind::Map => {
-                    maps.push(source);
-                    link = self
-                        .connections
-                        .iter()
-                        .find(|c| c.to == source && c.input == Port::Shape)?;
-                }
-                _ => return None,
-            }
-        }
-        None
-    }
-
-    /// Applies the maps to a source in signal order, starting from the source.
-    pub(super) fn compose(nodes: &[FlodeNode], maps: &[usize], source: Source) -> Option<Route> {
-        if maps.len() > MAX_MAPS {
-            return None;
-        }
-        // The maps are stored from the knob back toward the source, so reverse them to signal order.
-        let mut stages = [MapStage::IDENTITY; MAX_MAPS];
-        for (slot, &index) in maps.iter().rev().enumerate() {
-            stages[slot] = map::stage(&nodes[index]);
-        }
-        Some(Route {
-            source,
-            stages,
-            count: maps.len(),
-        })
-    }
-
-    /// The level of the signal on a control output, as the live control levels give it. Maps on
-    /// the way apply their curves.
-    pub(super) fn control_level(
-        &self,
-        from: usize,
-        out: Port,
-        levels: &ControlLevels,
-        depth: usize,
-    ) -> Option<f32> {
-        if depth > self.nodes.len() {
-            return None;
-        }
-        match self.nodes.get(from)?.kind {
-            NodeKind::Envelope => {
-                let index = self.envelope_index(from)?;
-                Some(levels.envelope[index])
-            }
-            NodeKind::Lfo => self.lfo_index(from).map(|index| levels.lfo[index]),
-            NodeKind::Input => match out {
-                Port::Midi(source) => Some(levels.midi[source.index()]),
-                _ => None,
-            },
-            NodeKind::Map => {
-                let link = self
-                    .connections
-                    .iter()
-                    .find(|c| c.to == from && c.input == Port::Shape)?;
-                let input = self.control_level(link.from, link.out, levels, depth + 1)?;
-                Some(map::stage(&self.nodes[from]).apply(input))
-            }
-            _ => None,
-        }
+        self.wiring().control_route(node, id)
     }
 
     /// The level arriving at a map's input, if a control source feeds it.
     pub(super) fn map_input_level(&self, node: usize, levels: &ControlLevels) -> Option<f32> {
-        let link = self
-            .connections
-            .iter()
-            .find(|c| c.to == node && c.input == Port::Shape)?;
-        self.control_level(link.from, link.out, levels, 0)
+        self.wiring().map_input_level(node, levels)
     }
 
-    /// The index of the envelope wired to an oscillator's input, if one is.
-    pub(super) fn amp_envelope(&self, oscillator: usize) -> Option<usize> {
-        let link = self
-            .connections
-            .iter()
-            .find(|c| c.to == oscillator && c.input == Port::Shape)?;
-        if self.nodes.get(link.from)?.kind != NodeKind::Envelope {
-            return None;
-        }
-        self.envelope_index(link.from)
-    }
-
-    /// The index of an envelope among the envelope nodes in graph order, or None past the
-    /// envelopes the audio thread runs.
-    pub(super) fn envelope_index(&self, node: usize) -> Option<usize> {
-        let index = self.nodes[..node]
-            .iter()
-            .filter(|n| n.kind == NodeKind::Envelope)
-            .count();
-        (index < MAX_ENVELOPES).then_some(index)
-    }
-
-    /// The envelopes the audio thread runs, in graph order. Each one's knob values are read per
-    /// block, so an envelope can have its times driven too.
+    /// The envelopes the audio thread runs, in graph order.
     pub fn envelope_settings(&self) -> [EnvelopeSettings; MAX_ENVELOPES] {
-        let mut out = [EnvelopeSettings::OFF; MAX_ENVELOPES];
-        let envelopes = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.kind == NodeKind::Envelope);
-        for (slot, (index, _)) in envelopes.take(MAX_ENVELOPES).enumerate() {
-            out[slot] = EnvelopeSettings {
-                active: true,
-                attack: self.knob_value(index, KnobId::Attack),
-                decay: self.knob_value(index, KnobId::Decay),
-                sustain: self.knob_value(index, KnobId::Sustain),
-                release: self.knob_value(index, KnobId::Release),
-            };
-        }
-        out
-    }
-
-    /// The index of an LFO among the LFO nodes in graph order, or None past the LFOs the audio
-    /// thread runs.
-    pub(super) fn lfo_index(&self, node: usize) -> Option<usize> {
-        let index = self.nodes[..node]
-            .iter()
-            .filter(|n| n.kind == NodeKind::Lfo)
-            .count();
-        (index < MAX_LFOS).then_some(index)
+        self.wiring().envelope_settings()
     }
 
     /// The LFOs the audio thread runs, in graph order.
     pub fn lfo_settings(&self) -> [LfoSettings; MAX_LFOS] {
-        let mut out = [LfoSettings::OFF; MAX_LFOS];
-        let lfos = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.kind == NodeKind::Lfo);
-        for (slot, (index, node)) in lfos.take(MAX_LFOS).enumerate() {
-            out[slot] = LfoSettings {
-                active: true,
-                waveform: lfo::waveform(node),
-                rate: self.knob_value(index, KnobId::LfoRate),
-                sync: self.knob_value(index, KnobId::LfoSync),
-            };
-        }
-        out
+        self.wiring().lfo_settings()
     }
 
-    /// A knob as the audio thread reads it: the node's own value and the route that drives it.
+    /// The settings of the output node that apply to every slot.
+    pub fn globals(&self) -> Globals {
+        self.wiring().globals()
+    }
+
+    /// The audio stages behind each output slot.
+    #[allow(dead_code)] // Used once the engine runs the stage arena.
+    pub fn lane_graphs(&self) -> [LaneGraph; MAX_SLOTS] {
+        self.wiring().lane_graphs()
+    }
+
+    // The three below belong to the old single-chain path, which the engine's switch to stages
+    // removes.
+
     pub(super) fn knob_value(&self, node: usize, id: KnobId) -> KnobValue {
-        KnobValue {
-            value: self.nodes[node].value(id),
-            route: self.control_route(node, id),
-        }
+        self.wiring().knob_value(node, id)
+    }
+
+    pub(super) fn amp_envelope(&self, oscillator: usize) -> Option<usize> {
+        self.wiring().amp_envelope(oscillator)
+    }
+
+    pub(super) fn first_output(&self) -> Option<usize> {
+        self.wiring().first_output()
     }
 
     /// Rebuilds the graph from saved state. Empty state gives the default graph, and connections
@@ -431,10 +293,6 @@ impl Graph {
         }
     }
 
-    pub(super) fn first_output(&self) -> Option<usize> {
-        self.nodes.iter().position(|n| n.kind == NodeKind::Output)
-    }
-
     /// The chain behind each output slot of the first output node. A slot with no chain is silent.
     pub fn lane_chains(&self) -> [LaneChain; MAX_SLOTS] {
         let output = self.first_output();
@@ -447,19 +305,6 @@ impl Graph {
             }
             self.lane_chain(output, slot).unwrap_or(LaneChain::SILENT)
         })
-    }
-
-    /// The settings of the output node that apply to every slot.
-    pub fn globals(&self) -> Globals {
-        match self.first_output() {
-            Some(output) => Globals {
-                mono: self.nodes[output].switch(0),
-                glide_always: self.nodes[output].switch(1),
-                gain: self.knob_value(output, KnobId::Gain),
-                glide: self.knob_value(output, KnobId::Glide),
-            },
-            None => Globals::SILENT,
-        }
     }
 
     /// Copies the knobs of one node into a knob table, such as a lane's or a mix branch's.
