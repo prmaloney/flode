@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 
 mod dsp;
 mod editor;
-mod node_editor;
 mod nodes;
 mod patch;
 mod routing;
@@ -601,14 +600,14 @@ struct FlodeParams {
     /// The node graph, so the wiring, the node positions, and every node's knobs survive save and
     /// reload.
     #[persist = "graph"]
-    graph: Mutex<node_editor::SavedGraph>,
+    graph: Mutex<editor::saved::SavedGraph>,
 }
 
 impl Default for FlodeParams {
     fn default() -> Self {
         Self {
             editor_state: editor::default_state(),
-            graph: Mutex::new(node_editor::SavedGraph::default()),
+            graph: Mutex::new(editor::saved::SavedGraph::default()),
         }
     }
 }
@@ -667,7 +666,7 @@ impl Plugin for Flode {
         self.smooth_coef = 1.0 - (-1.0 / (SMOOTH_SECONDS * self.sample_rate)).exp();
         // Set the audio chain from the saved graph. The editor keeps it current while it is open.
         if let Ok(saved) = self.params.graph.lock() {
-            let graph = node_editor::Graph::from_saved(&saved);
+            let graph = editor::graph::Graph::from_saved(&saved);
             self.routing.publish(&graph);
         }
         true

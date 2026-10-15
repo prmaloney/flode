@@ -6,7 +6,7 @@
 use crate::dsp::noise::NoiseType;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
-use crate::node_editor::Graph;
+use crate::editor::graph::Graph;
 use crate::nodes::filter::FilterType;
 use crate::nodes::input::MIDI_SOURCE_COUNT;
 use crate::nodes::knobs::KnobId;

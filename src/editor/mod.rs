@@ -1,5 +1,25 @@
+//! A freeform node graph for the plugin UI. Click a pill button at the top to add a node. It
+//! follows the mouse until the next click places it. Drag a node by its header, and click one to
+//! select it. Right-click a node to delete it. The arrow in a header collapses the node. Pins sit
+//! on the node edges, with labels. Inputs are on the left and outputs are on the right. Audio
+//! wires are grey. Control wires are green. A knob that a control wire drives is greyed out and
+//! shows the live signal. Scrolling pans the canvas, and a pinch zooms it.
+//!
+//! The nodes themselves are in `nodes`. This module holds the graph, the wiring between nodes,
+//! and the editor widget that draws the graph and handles the mouse.
+
+pub mod canvas;
+mod curve;
+mod draw;
+pub mod graph;
 pub mod knob;
+mod menus;
 pub mod piano;
+pub mod saved;
+mod style;
+#[cfg(test)]
+mod tests;
+mod view;
 
 use nih_plug::prelude::{Editor, GuiContext};
 use nih_plug_iced::*;
@@ -7,9 +27,9 @@ use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
 use crate::editor::piano::PianoEvent;
-use crate::node_editor::{self, NodeEditor};
 use crate::routing::AudioRouting;
 use crate::FlodeParams;
+use canvas::NodeEditor;
 
 pub(crate) fn default_state() -> Arc<IcedState> {
     IcedState::from_size(1024, 712)
@@ -32,13 +52,13 @@ struct FlodeEditor {
     note_tx: Option<Arc<Mutex<Producer<PianoEvent>>>>,
     routing: Arc<AudioRouting>,
 
-    graph: node_editor::Graph,
+    graph: graph::Graph,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Message {
     /// A message from the node graph.
-    Graph(node_editor::Message),
+    Graph(canvas::Message),
     /// A timer tick, sent while a control drives a knob so the live indicator redraws.
     Tick,
 }
@@ -57,8 +77,8 @@ impl IcedEditor for FlodeEditor {
         context: Arc<dyn GuiContext>,
     ) -> (Self, Command<Self::Message>) {
         let graph = match params.graph.lock() {
-            Ok(saved) => node_editor::Graph::from_saved(&saved),
-            Err(_) => node_editor::Graph::default(),
+            Ok(saved) => graph::Graph::from_saved(&saved),
+            Err(_) => graph::Graph::default(),
         };
         routing.publish(&graph);
         let editor = FlodeEditor {
@@ -81,7 +101,7 @@ impl IcedEditor for FlodeEditor {
         message: Self::Message,
     ) -> Command<Self::Message> {
         match message {
-            Message::Graph(node_editor::Message::Note(note)) => {
+            Message::Graph(canvas::Message::Note(note)) => {
                 if let Some(tx) = &self.note_tx {
                     // A full queue drops the note. The lock is only ever taken on the GUI thread.
                     if let Ok(mut tx) = tx.lock() {
@@ -90,11 +110,11 @@ impl IcedEditor for FlodeEditor {
                 }
             }
             // The cursor moved over or off a dropdown. The next frame draws the change.
-            Message::Graph(node_editor::Message::Hovered) => {}
+            Message::Graph(canvas::Message::Hovered) => {}
             Message::Tick => {}
             // A change to the graph, a node, or a knob. The audio thread gets the new state, and
             // the project saves it.
-            Message::Graph(node_editor::Message::GraphChanged) => {
+            Message::Graph(canvas::Message::GraphChanged) => {
                 self.routing.publish(&self.graph);
                 if let Ok(mut saved) = self.params.graph.lock() {
                     *saved = self.graph.to_saved();
@@ -116,7 +136,7 @@ impl IcedEditor for FlodeEditor {
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
-        let editor: Canvas<node_editor::Message, NodeEditor<'_>> = Canvas::new(NodeEditor::new(
+        let editor: Canvas<canvas::Message, NodeEditor<'_>> = Canvas::new(NodeEditor::new(
             &mut self.graph,
             self.routing.levels(),
             self.routing.active_notes(),
