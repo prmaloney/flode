@@ -33,6 +33,10 @@ pub struct OscillatorParams {
     pub phase_random: Param,
     pub warp_amount: Param,
     pub level: Param,
+    /// Where the oscillator sits in the stereo field, from -1.0 (left) to 1.0 (right).
+    pub pan: Param,
+    /// How far the unison copies spread across the field around the pan, from 0.0 to 1.0.
+    pub spread: Param,
 }
 
 impl Default for OscillatorParams {
@@ -50,6 +54,8 @@ impl Default for OscillatorParams {
             phase_random: Param::default_of(KnobId::PhaseRandom),
             warp_amount: Param::default_of(KnobId::WarpAmount),
             level: Param::default_of(KnobId::OscGain),
+            pan: Param::default_of(KnobId::Pan),
+            spread: Param::default_of(KnobId::Spread),
         }
     }
 }

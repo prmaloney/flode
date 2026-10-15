@@ -51,6 +51,10 @@ pub enum KnobId {
     Octave,
     /// A mix node's blend, from 0.0 (just signal A) to 1.0 (fully the chosen combination).
     Mix,
+    /// An oscillator's place in the stereo field, from -1 (left) to 1 (right).
+    Pan,
+    /// How far an oscillator's unison copies spread across the stereo field, from 0 to 1.
+    Spread,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -64,7 +68,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 27;
+    pub const COUNT: usize = 29;
 
     pub const ALL: [KnobId; KnobId::COUNT] = [
         KnobId::Gain,
@@ -94,6 +98,8 @@ impl KnobId {
         KnobId::Fine,
         KnobId::Octave,
         KnobId::Mix,
+        KnobId::Pan,
+        KnobId::Spread,
     ];
 
     /// The name shown beside the knob.
@@ -126,6 +132,8 @@ impl KnobId {
             KnobId::Fine => "Fin",
             KnobId::Octave => "Oct",
             KnobId::Mix => "Mix",
+            KnobId::Pan => "Pan",
+            KnobId::Spread => "Spread",
         }
     }
 
@@ -179,7 +187,11 @@ impl KnobId {
                 min: -2.0,
                 max: 2.0,
             },
-            KnobId::Mix => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::Mix | KnobId::Spread => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::Pan => FloatRange::Linear {
+                min: -1.0,
+                max: 1.0,
+            },
             // Zero is free running. Each step past it is one of the note divisions.
             KnobId::LfoSync => FloatRange::Linear {
                 min: 0.0,
@@ -214,7 +226,8 @@ impl KnobId {
             KnobId::LfoSync => 0.0,
             KnobId::WarpAmount => 0.0,
             KnobId::Coarse | KnobId::Fine | KnobId::Octave => 0.0,
-            KnobId::Mix => 0.5,
+            KnobId::Mix | KnobId::Spread => 0.5,
+            KnobId::Pan => 0.0,
         }
     }
 
@@ -274,7 +287,12 @@ impl KnobId {
             KnobId::Coarse => format!("{:+} st", plain.round() as i32),
             KnobId::Fine => format!("{plain:+.0} ct"),
             KnobId::Octave => format!("{:+} oct", plain.round() as i32),
-            KnobId::Mix => format!("{:.0}%", plain * 100.0),
+            KnobId::Mix | KnobId::Spread => format!("{:.0}%", plain * 100.0),
+            KnobId::Pan => match (plain * 100.0).round() as i32 {
+                0 => "C".to_string(),
+                side if side < 0 => format!("L {}", -side),
+                side => format!("R {side}"),
+            },
             KnobId::LfoRate => format!("{plain:.2} Hz"),
             KnobId::LfoSync => match plain.round() as usize {
                 0 => "Free".to_string(),
@@ -347,5 +365,19 @@ mod rate_tests {
         let top = KnobId::LfoRate.to_plain(1.0);
         assert!((top - 200.0).abs() < 1e-3, "{top}");
         assert_eq!(KnobId::LfoRate.format(1.0), "200.00 Hz");
+    }
+}
+
+#[cfg(test)]
+mod pan_tests {
+    use super::*;
+
+    /// The pan reads as a side and a percentage, and the centre is the knob's default.
+    #[test]
+    fn pan_reads_as_a_side() {
+        assert_eq!(KnobId::Pan.format(KnobId::Pan.to_normalized(0.0)), "C");
+        assert_eq!(KnobId::Pan.format(0.0), "L 100");
+        assert_eq!(KnobId::Pan.format(1.0), "R 100");
+        assert_eq!(KnobId::Pan.format(KnobId::Pan.to_normalized(-0.25)), "L 25");
     }
 }

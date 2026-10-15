@@ -3,6 +3,7 @@
 //! reads one signal and uses it to push its own phase around.
 
 use super::{AudioStage, StartContext, Tick};
+use crate::dsp::frame::{pan_gains, Frame};
 use crate::dsp::gain::db_to_linear;
 use crate::dsp::noise::NoiseState;
 use crate::dsp::pitch::transpose_ratio;
@@ -29,6 +30,25 @@ pub struct OscillatorState {
     /// How far the FM signal pushed the phase on the last sample, in cycles. The change from one
     /// sample to the next is how fast the modulation is moving the phase.
     last_modulation: f32,
+    /// Where each sub-oscillator sits across the unison spread, from -1.0 to 1.0. The lowest
+    /// detune sits at the left end. Noise has one stream and sits at the centre.
+    positions: [f32; MAX_UNISON],
+    /// The left and right gains of each sub-oscillator, for the pan and spread below.
+    gains: [Frame; MAX_UNISON],
+    /// The pan and spread `gains` was made for. Placing a copy takes a sine and a cosine, so the
+    /// gains are made again only when a knob moves.
+    placed_at: (f32, f32),
+}
+
+impl OscillatorState {
+    /// Makes the gains of the first `count` sub-oscillators for a pan and a spread. The spread is
+    /// how far the ends of the unison stack sit from the pan, as a share of the half field.
+    fn place(&mut self, pan: f32, spread: f32) {
+        for (gain, position) in self.gains.iter_mut().zip(&self.positions).take(self.count) {
+            *gain = pan_gains(pan + spread * position);
+        }
+        self.placed_at = (pan, spread);
+    }
 }
 
 #[cfg(test)]
@@ -54,8 +74,10 @@ impl AudioStage for Oscillator {
         let detune_cents = p.detune.plain(ctx.levels);
         let randomness = p.phase_random.plain(ctx.levels);
 
+        let noise = p.waveform == Waveform::Noise;
         let mut phases = [0.0; MAX_UNISON];
         let mut detune_ratios = [1.0; MAX_UNISON];
+        let mut positions = [0.0; MAX_UNISON];
         for i in 0..count {
             let spread = if count > 1 {
                 2.0 * i as f32 / (count - 1) as f32 - 1.0
@@ -66,31 +88,43 @@ impl AudioStage for Oscillator {
             let random = ctx.rng.unit();
             phases[i] = even + randomness * (random - even);
             detune_ratios[i] = 2.0f32.powf(spread * detune_cents / 1200.0);
+            if !noise {
+                positions[i] = spread;
+            }
         }
-        let norm = if p.waveform == Waveform::Noise {
+        let norm = if noise {
             1.0
         } else {
             1.0 / (count as f32).sqrt()
         };
-        OscillatorState {
+        let mut state = OscillatorState {
             noise: NoiseState::default(),
             phases,
             detune_ratios,
             count,
             norm,
             last_modulation: 0.0,
-        }
+            positions,
+            gains: [Frame::SILENT; MAX_UNISON],
+            placed_at: (0.0, 0.0),
+        };
+        state.place(p.pan.plain(ctx.levels), p.spread.plain(ctx.levels));
+        state
     }
 
     fn process(
         p: &OscillatorParams,
         state: &mut OscillatorState,
-        inputs: &[f32; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
-    ) -> f32 {
+    ) -> Frame {
         let levels = tick.levels;
+        let placed_at = (p.pan.plain(levels), p.spread.plain(levels));
+        if placed_at != state.placed_at {
+            state.place(placed_at.0, placed_at.1);
+        }
         let raw = if p.waveform == Waveform::Noise {
-            state.noise.sample(p.noise, tick.rng)
+            state.gains[0] * state.noise.sample(p.noise, tick.rng)
         } else {
             let transpose = transpose_ratio(
                 p.octave.plain(levels),
@@ -102,9 +136,10 @@ impl AudioStage for Oscillator {
             // Under the FM warp, the signal on the input pushes the read phase around. The phase
             // accumulators keep their own pitch, so this is phase modulation, and the other
             // oscillator's tuning sets the ratio between the two. The modulator's own envelope and
-            // level scale the depth, since the input is its finished output.
+            // level scale the depth, since the input is its finished output. The phase is one
+            // number per copy, so the modulator is the average of its two sides.
             let modulation = if p.warp == WarpMode::Fm {
-                inputs[0] * fm_depth(warp_amount)
+                inputs[0].mid() * fm_depth(warp_amount)
             } else {
                 0.0
             };
@@ -113,7 +148,7 @@ impl AudioStage for Oscillator {
             let swing = (modulation - state.last_modulation).abs();
             state.last_modulation = modulation;
 
-            let mut sum = 0.0;
+            let mut sum = Frame::SILENT;
             for i in 0..state.count {
                 // The phase step, in cycles per sample. The waveform band-limits its edges by it.
                 let step = tick.pitch_step * state.detune_ratios[i] * transpose;
@@ -121,11 +156,12 @@ impl AudioStage for Oscillator {
                 if p.warp == WarpMode::Fm {
                     phase = (phase + modulation).rem_euclid(1.0);
                 }
-                sum += warp_value(
+                let sample = warp_value(
                     p.warp,
                     tick.tables.sample(p.waveform, phase, step + swing),
                     warp_amount,
                 );
+                sum += state.gains[i] * sample;
                 state.phases[i] += step;
                 if state.phases[i] >= 1.0 {
                     state.phases[i] -= 1.0;
@@ -141,7 +177,7 @@ impl AudioStage for Oscillator {
             None if tick.envelopes_active => 1.0,
             None => tick.envs[MAX_ENVELOPES].level,
         };
-        raw * state.norm * tick.velocity * amplitude * db_to_linear(p.level.plain(levels))
+        raw * (state.norm * tick.velocity * amplitude * db_to_linear(p.level.plain(levels)))
     }
 }
 
@@ -158,7 +194,13 @@ mod tests {
         let mut last = 0.0f32;
         let mut count = 0;
         for _ in 0..samples {
-            let out = Oscillator::process(params, &mut state, &[0.0; MAX_INPUTS], &mut rig.tick());
+            let out = Oscillator::process(
+                params,
+                &mut state,
+                &[Frame::SILENT; MAX_INPUTS],
+                &mut rig.tick(),
+            )
+            .l;
             if last < 0.0 && out >= 0.0 {
                 count += 1;
             }
@@ -203,6 +245,120 @@ mod tests {
         assert!((state.norm - 1.0 / 3.0f32.sqrt()).abs() < 1e-6);
     }
 
+    /// Renders `samples` frames of an oscillator.
+    fn frames(params: &OscillatorParams, samples: usize) -> Vec<Frame> {
+        let mut rig = Rig::new();
+        let mut state = Oscillator::start(params, &mut rig.start_context());
+        (0..samples)
+            .map(|_| {
+                Oscillator::process(
+                    params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+            })
+            .collect()
+    }
+
+    /// A lone oscillator at the centre sounds the same on both sides, at the level it had before
+    /// the engine was stereo.
+    #[test]
+    fn a_centred_oscillator_is_the_same_on_both_sides() {
+        let out = frames(&OscillatorParams::default(), 500);
+        assert!(out.iter().all(|f| f.l == f.r));
+        let peak = out.iter().map(|f| f.peak()).fold(0.0f32, f32::max);
+        assert!(peak > 0.95 && peak <= 1.01, "{peak}");
+    }
+
+    /// The pan knob moves the whole oscillator, and a hard pan leaves the other side silent.
+    #[test]
+    fn the_pan_knob_places_the_oscillator() {
+        let at = |pan| {
+            frames(
+                &OscillatorParams {
+                    pan: Param::fixed(KnobId::Pan, pan),
+                    ..OscillatorParams::default()
+                },
+                500,
+            )
+        };
+        assert!(at(-1.0).iter().all(|f| f.r.abs() < 1e-5));
+        assert!(at(1.0).iter().all(|f| f.l.abs() < 1e-5));
+        let left_heavy = at(-0.5).iter().fold((0.0f32, 0.0f32), |(l, r), f| {
+            (l.max(f.l.abs()), r.max(f.r.abs()))
+        });
+        assert!(left_heavy.0 > left_heavy.1 * 1.5, "{left_heavy:?}");
+    }
+
+    /// Unison copies spread across the field, so the two sides differ. With no spread, or one
+    /// copy, they do not.
+    #[test]
+    fn unison_spread_widens_the_image() {
+        let stack = |unison, spread| {
+            frames(
+                &OscillatorParams {
+                    unison: Param::fixed(KnobId::Unison, unison),
+                    detune: Param::fixed(KnobId::Detune, 30.0),
+                    spread: Param::fixed(KnobId::Spread, spread),
+                    ..OscillatorParams::default()
+                },
+                2000,
+            )
+        };
+        let difference =
+            |out: &[Frame]| out.iter().map(|f| (f.l - f.r).abs()).fold(0.0f32, f32::max);
+        assert!(difference(&stack(5.0, 1.0)) > 0.2);
+        assert!(difference(&stack(5.0, 0.0)) < 1e-5);
+        assert!(difference(&stack(1.0, 1.0)) < 1e-5);
+    }
+
+    /// With spread, the lowest copy sits to the left and the highest to the right, so a hard
+    /// spread of two copies puts one on each side.
+    #[test]
+    fn a_full_spread_of_two_copies_puts_one_on_each_side() {
+        let out = frames(
+            &OscillatorParams {
+                unison: Param::fixed(KnobId::Unison, 2.0),
+                spread: Param::fixed(KnobId::Spread, 1.0),
+                ..OscillatorParams::default()
+            },
+            500,
+        );
+        // At full spread, copy 0 is hard left and copy 1 is hard right, so each side holds one
+        // copy at the unison scale.
+        let peak =
+            |side: fn(&Frame) -> f32| out.iter().map(|f| side(f).abs()).fold(0.0f32, f32::max);
+        assert!((peak(|f| f.l) - 1.0).abs() < 0.05);
+        assert!((peak(|f| f.r) - 1.0).abs() < 0.05);
+    }
+
+    /// Moving the pan while a note sounds takes effect on the next sample.
+    #[test]
+    fn the_pan_is_read_every_sample() {
+        let mut rig = Rig::new();
+        let centre = OscillatorParams::default();
+        let left = OscillatorParams {
+            pan: Param::fixed(KnobId::Pan, -1.0),
+            ..OscillatorParams::default()
+        };
+        let mut state = Oscillator::start(&centre, &mut rig.start_context());
+        let run = |params: &OscillatorParams, state: &mut OscillatorState, rig: &mut Rig| {
+            (0..200)
+                .map(|_| {
+                    Oscillator::process(
+                        params,
+                        state,
+                        &[Frame::SILENT; MAX_INPUTS],
+                        &mut rig.tick(),
+                    )
+                })
+                .fold(0.0f32, |r, f| r.max(f.r.abs()))
+        };
+        assert!(run(&centre, &mut state, &mut rig) > 0.5);
+        assert!(run(&left, &mut state, &mut rig) < 1e-5);
+    }
+
     /// With no envelope wired and none in the patch, the bypass copy sets the amplitude.
     #[test]
     fn the_bypass_envelope_shapes_an_unwired_oscillator() {
@@ -213,7 +369,14 @@ mod tests {
         let mut silent = 0.0f32;
         for _ in 0..200 {
             silent = silent.max(
-                Oscillator::process(&params, &mut state, &[0.0; MAX_INPUTS], &mut rig.tick()).abs(),
+                Oscillator::process(
+                    &params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+                .l
+                .abs(),
             );
         }
         assert_eq!(silent, 0.0);
@@ -232,7 +395,14 @@ mod tests {
         let mut peak = 0.0f32;
         for _ in 0..200 {
             peak = peak.max(
-                Oscillator::process(&params, &mut state, &[0.0; MAX_INPUTS], &mut rig.tick()).abs(),
+                Oscillator::process(
+                    &params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+                .l
+                .abs(),
             );
         }
         assert!(peak > 0.4 && peak <= 0.5, "{peak}");
@@ -249,7 +419,14 @@ mod tests {
         let mut state = Oscillator::start(&params, &mut rig.start_context());
         let peak = (0..1000)
             .map(|_| {
-                Oscillator::process(&params, &mut state, &[0.0; MAX_INPUTS], &mut rig.tick()).abs()
+                Oscillator::process(
+                    &params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+                .l
+                .abs()
             })
             .fold(0.0f32, f32::max);
         assert!(peak > 0.5);
@@ -264,7 +441,12 @@ mod tests {
         let b = Oscillator::start(&params, &mut rig.start_context());
         let before = b.phases()[0];
         for _ in 0..100 {
-            Oscillator::process(&params, &mut a, &[0.0; MAX_INPUTS], &mut rig.tick());
+            Oscillator::process(
+                &params,
+                &mut a,
+                &[Frame::SILENT; MAX_INPUTS],
+                &mut rig.tick(),
+            );
         }
         assert_eq!(b.phases()[0], before);
         assert_ne!(a.phases()[0], before);
@@ -286,7 +468,13 @@ mod tests {
             .map(|n| {
                 let modulator =
                     modulator_level * (std::f32::consts::TAU * 440.0 * n as f32 / RATE).sin();
-                Oscillator::process(&params, &mut state, &[modulator, 0.0], &mut rig.tick())
+                Oscillator::process(
+                    &params,
+                    &mut state,
+                    &[Frame::mono(modulator), Frame::SILENT],
+                    &mut rig.tick(),
+                )
+                .l
             })
             .collect()
     }
@@ -372,7 +560,13 @@ mod tests {
         let mut state = Oscillator::start(&params, &mut rig.start_context());
         for n in 0..20000 {
             let modulator = (std::f32::consts::TAU * 3000.0 * n as f32 / RATE).sin();
-            let out = Oscillator::process(&params, &mut state, &[modulator, 0.0], &mut rig.tick());
+            let out = Oscillator::process(
+                &params,
+                &mut state,
+                &[Frame::mono(modulator), Frame::SILENT],
+                &mut rig.tick(),
+            )
+            .l;
             assert!(out.is_finite() && out.abs() < 1.5, "sample {n}: {out}");
         }
     }

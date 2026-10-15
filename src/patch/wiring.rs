@@ -305,6 +305,8 @@ impl<'a> Wiring<'a> {
                 phase_random: knob(KnobId::PhaseRandom),
                 warp_amount: knob(KnobId::WarpAmount),
                 level: knob(KnobId::OscGain),
+                pan: knob(KnobId::Pan),
+                spread: knob(KnobId::Spread),
             })),
             NodeKind::Filter => Some(StageParams::Filter(FilterParams {
                 kind: filter::filter_type(n),

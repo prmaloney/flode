@@ -3,6 +3,7 @@
 
 pub mod delay;
 pub mod envelope;
+pub mod frame;
 pub mod gain;
 pub mod mix;
 pub mod noise;

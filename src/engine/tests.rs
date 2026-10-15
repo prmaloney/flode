@@ -52,7 +52,12 @@ fn newest(engine: &Engine) -> &Voice {
     engine.lanes[0].voices().max_by_key(|v| v.age).unwrap()
 }
 
+/// The left channel of `samples` frames. A patch with nothing panned sounds the same on both.
 fn render(engine: &mut Engine, samples: usize) -> Vec<f32> {
+    render_stereo(engine, samples).iter().map(|f| f.l).collect()
+}
+
+fn render_stereo(engine: &mut Engine, samples: usize) -> Vec<Frame> {
     (0..samples).map(|n| engine.process_sample(n)).collect()
 }
 
@@ -381,4 +386,64 @@ fn an_fm_pair_sounds_different_from_the_plain_carrier() {
         .map(|(a, b)| (a - b).abs())
         .sum();
     assert!(difference > 1.0, "{difference}");
+}
+
+/// A wide unison stack through a filter, then a mix, keeps its stereo image to the output.
+#[test]
+fn a_unison_stack_stays_wide_through_a_filter_and_a_mix() {
+    let stack = OscillatorParams {
+        unison: Param::fixed(KnobId::Unison, 5.0),
+        detune: Param::fixed(KnobId::Detune, 30.0),
+        spread: Param::fixed(KnobId::Spread, 1.0),
+        ..OscillatorParams::default()
+    };
+    let through = patch_with(
+        0,
+        &[
+            osc(stack),
+            StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 0),
+            StageSpec::new(StageParams::Mix(MixParams {
+                mode: MixMode::Crossfade,
+                amount: Param::fixed(KnobId::Mix, 0.0),
+            }))
+            .with_input(0, 1)
+            .with_input(1, 0),
+        ],
+    );
+    let mut engine = engine_on(&through);
+    engine.note_on(57, 1.0);
+    let out = render_stereo(&mut engine, 6000);
+    let difference = out[2000..]
+        .iter()
+        .map(|f| (f.l - f.r).abs())
+        .fold(0.0f32, f32::max);
+    assert!(difference > 0.02, "{difference}");
+}
+
+/// The default patch has nothing panned or spread, so it stays identical on both channels.
+#[test]
+fn a_plain_oscillator_stays_centred_through_the_engine() {
+    let mut engine = engine_on(&plain_oscillator_patch());
+    engine.note_on(60, 1.0);
+    let out = render_stereo(&mut engine, 4000);
+    assert!(out.iter().any(|f| f.l.abs() > 0.05));
+    assert!(out.iter().all(|f| f.l == f.r));
+}
+
+/// Two slots panned to opposite sides come out on opposite channels.
+#[test]
+fn slots_panned_apart_come_out_on_separate_channels() {
+    let panned = |pan| {
+        osc(OscillatorParams {
+            pan: Param::fixed(KnobId::Pan, pan),
+            ..OscillatorParams::default()
+        })
+    };
+    let mut patch = patch_with(0, &[panned(-1.0)]);
+    patch.lanes[1].stages.extend([panned(1.0)]);
+    let mut engine = engine_on(&patch);
+    engine.note_on(60, 1.0);
+    let out = render_stereo(&mut engine, 4000);
+    assert!(out.iter().map(|f| f.l.abs()).fold(0.0f32, f32::max) > 0.05);
+    assert!(out.iter().map(|f| f.r.abs()).fold(0.0f32, f32::max) > 0.05);
 }

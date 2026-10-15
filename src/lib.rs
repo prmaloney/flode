@@ -180,8 +180,12 @@ impl Plugin for Flode {
             }
 
             let out = self.engine.process_sample(sample_id);
-            for sample in channel_samples {
-                *sample = out;
+            for (channel, sample) in channel_samples.into_iter().enumerate() {
+                *sample = match channel {
+                    0 => out.l,
+                    1 => out.r,
+                    _ => out.mid(),
+                };
             }
         }
 

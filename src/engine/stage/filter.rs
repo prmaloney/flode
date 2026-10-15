@@ -2,7 +2,8 @@
 //! cutoff driven by an envelope follows each note's own envelope.
 
 use super::{AudioStage, StartContext, Tick};
-use crate::dsp::svf::Svf;
+use crate::dsp::frame::Frame;
+use crate::dsp::svf::{Coefficients, Svf};
 use crate::patch::stage::{FilterParams, MAX_INPUTS};
 
 pub struct Filter;
@@ -11,7 +12,7 @@ pub struct Filter;
 /// eased to. Easing keeps a knob move from clicking.
 #[derive(Clone, Copy)]
 pub struct FilterState {
-    svf: Svf,
+    svf: [Svf; 2],
     /// The cutoff as log2 of Hz, so the easing is even across octaves.
     cutoff_log2: f32,
     resonance: f32,
@@ -32,7 +33,7 @@ impl AudioStage for Filter {
     /// Starts at the knob values, not easing in from zero.
     fn start(p: &FilterParams, ctx: &mut StartContext) -> FilterState {
         FilterState {
-            svf: Svf::new(),
+            svf: [Svf::new(); 2],
             cutoff_log2: p.cutoff.plain(ctx.levels).log2(),
             resonance: p.resonance.plain(ctx.levels),
         }
@@ -41,19 +42,20 @@ impl AudioStage for Filter {
     fn process(
         p: &FilterParams,
         state: &mut FilterState,
-        inputs: &[f32; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
-    ) -> f32 {
+    ) -> Frame {
         let cutoff_target = p.cutoff.plain(tick.levels);
         let resonance_target = p.resonance.plain(tick.levels);
         state.cutoff_log2 += (cutoff_target.log2() - state.cutoff_log2) * tick.smooth;
         state.resonance += (resonance_target - state.resonance) * tick.smooth;
-        state.svf.process(
-            inputs[0],
-            state.cutoff_log2.exp2(),
-            state.resonance,
-            p.kind,
-            tick.sample_rate,
+        // Both sides run the same response, so they share one set of coefficients.
+        let coefficients =
+            Coefficients::new(state.cutoff_log2.exp2(), state.resonance, tick.sample_rate);
+        let [left, right] = &mut state.svf;
+        Frame::new(
+            left.tick(inputs[0].l, &coefficients, p.kind),
+            right.tick(inputs[0].r, &coefficients, p.kind),
         )
     }
 }
@@ -74,9 +76,14 @@ mod tests {
         let mut peak = 0.0f32;
         for n in 0..44100 {
             let input = (TAU * freq * n as f32 / 44100.0).sin();
-            let out = Filter::process(params, &mut state, &[input, 0.0], &mut rig.tick());
+            let out = Filter::process(
+                params,
+                &mut state,
+                &[Frame::mono(input), Frame::SILENT],
+                &mut rig.tick(),
+            );
             if n > 22050 {
-                peak = peak.max(out.abs());
+                peak = peak.max(out.l.abs());
             }
         }
         peak
@@ -104,12 +111,40 @@ mod tests {
         let mut a = Filter::start(&params, &mut rig.start_context());
         let mut b = Filter::start(&params, &mut rig.start_context());
         for _ in 0..100 {
-            Filter::process(&params, &mut a, &[1.0, 0.0], &mut rig.tick());
+            Filter::process(
+                &params,
+                &mut a,
+                &[Frame::mono(1.0), Frame::SILENT],
+                &mut rig.tick(),
+            );
         }
         assert_eq!(
-            Filter::process(&params, &mut b, &[0.0, 0.0], &mut rig.tick()),
-            0.0
+            Filter::process(&params, &mut b, &[Frame::SILENT; 2], &mut rig.tick()),
+            Frame::SILENT
         );
+    }
+
+    /// Each side has its own integrators, so a signal on the left leaves the right silent.
+    #[test]
+    fn the_two_sides_filter_independently() {
+        let mut rig = Rig::new();
+        let params = low_pass(1000.0);
+        let mut state = Filter::start(&params, &mut rig.start_context());
+        let mut right_peak = 0.0f32;
+        let mut left_peak = 0.0f32;
+        for n in 0..2000 {
+            let input = Frame::new((TAU * 200.0 * n as f32 / 44100.0).sin(), 0.0);
+            let out = Filter::process(
+                &params,
+                &mut state,
+                &[input, Frame::SILENT],
+                &mut rig.tick(),
+            );
+            left_peak = left_peak.max(out.l.abs());
+            right_peak = right_peak.max(out.r.abs());
+        }
+        assert!(left_peak > 0.5);
+        assert_eq!(right_peak, 0.0);
     }
 
     /// The cutoff eases toward a new knob value instead of jumping to it.
@@ -118,11 +153,11 @@ mod tests {
         let mut rig = Rig::new();
         let mut state = Filter::start(&low_pass(1000.0), &mut rig.start_context());
         let moved = low_pass(4000.0);
-        Filter::process(&moved, &mut state, &[0.0, 0.0], &mut rig.tick());
+        Filter::process(&moved, &mut state, &[Frame::SILENT; 2], &mut rig.tick());
         let after_one = state.cutoff_log2.exp2();
         assert!(after_one > 1000.0 && after_one < 1100.0, "{after_one}");
         for _ in 0..2000 {
-            Filter::process(&moved, &mut state, &[0.0, 0.0], &mut rig.tick());
+            Filter::process(&moved, &mut state, &[Frame::SILENT; 2], &mut rig.tick());
         }
         assert!((state.cutoff_log2.exp2() - 4000.0).abs() < 40.0);
     }

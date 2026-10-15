@@ -87,7 +87,7 @@ fn the_audio_path_never_allocates() {
             }
             engine.pitch_bend(0.7);
             for n in 0..512 {
-                peak = peak.max(engine.process_sample(n).abs());
+                peak = peak.max(engine.process_sample(n).peak());
             }
             engine.levels();
             engine.active_notes();

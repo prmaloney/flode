@@ -13,6 +13,7 @@ mod tests;
 mod voice;
 
 use crate::dsp::envelope::{AdsrConfig, FADE_SECONDS};
+use crate::dsp::frame::Frame;
 use crate::dsp::gain::db_to_linear;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
@@ -285,9 +286,9 @@ impl Engine {
         }
     }
 
-    /// One sample of the whole synth. `sample_id` is the sample's place in the block, which a
-    /// synced LFO needs to find the playhead.
-    pub fn process_sample(&mut self, sample_id: usize) -> f32 {
+    /// One stereo frame of the whole synth. `sample_id` is the sample's place in the block, which
+    /// a synced LFO needs to find the playhead.
+    pub fn process_sample(&mut self, sample_id: usize) -> Frame {
         let levels = self.levels();
 
         // A gain is exactly silent at its minimum. The master gain eases toward its knob.
@@ -303,7 +304,7 @@ impl Engine {
         // knobs that no single voice owns read for the next sample.
         let mut newest_age = [0u64; MAX_ENVELOPES];
         let mut newest_level = [0.0f32; MAX_ENVELOPES];
-        let mut out = 0.0;
+        let mut out = Frame::SILENT;
         for (lane, graph) in self.lanes.iter_mut().zip(&self.patch.lanes) {
             if !graph.is_active() {
                 lane.go_quiet();
@@ -318,7 +319,7 @@ impl Engine {
                 smooth: self.smooth,
                 rng: &mut self.rng,
             };
-            let mut lane_out = 0.0;
+            let mut lane_out = Frame::SILENT;
             for (index, slot) in lane.voices.iter_mut().enumerate() {
                 let Some(voice) = slot else { continue };
                 for index in 0..MAX_ENVELOPES {
@@ -351,9 +352,9 @@ impl Engine {
         );
 
         if self.patch.is_audible() {
-            out * VOICE_MIX * self.master_gain
+            out * (VOICE_MIX * self.master_gain)
         } else {
-            0.0
+            Frame::SILENT
         }
     }
 }

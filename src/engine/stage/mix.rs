@@ -14,6 +14,7 @@
 
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::delay::DELAY_CAPACITY;
+use crate::dsp::frame::Frame;
 use crate::dsp::mix::MixMode;
 use crate::dsp::warp::fm_depth;
 use crate::patch::stage::{MixParams, MAX_INPUTS};
@@ -32,9 +33,9 @@ const MAX_SWING: f32 = (DELAY_CAPACITY as f32 - 4.0) / (2.0 * HEADROOM);
 /// What one voice remembers of a mix.
 #[derive(Clone, Copy)]
 pub struct MixState {
-    /// The delay lines for signals A and B, which this stage took at the start of the note if the
-    /// voice had two free.
-    delays: Option<[usize; 2]>,
+    /// The delay lines for the left and right of signals A and B, in that order, which this stage
+    /// took at the start of the note if the voice had four free.
+    delays: Option<[usize; 4]>,
     /// Where the read point rests, in samples behind the newest.
     center: f32,
 }
@@ -53,7 +54,7 @@ impl AudioStage for Mix {
     type Params = MixParams;
     type State = MixState;
 
-    /// Takes two delay lines for FM, and starts the centre where the depth needs it, so a note
+    /// Takes four delay lines for FM, and starts the centre where the depth needs it, so a note
     /// has no ramp in.
     fn start(p: &MixParams, ctx: &mut StartContext) -> MixState {
         let amount = p.amount.plain(ctx.levels);
@@ -66,15 +67,15 @@ impl AudioStage for Mix {
     fn process(
         p: &MixParams,
         state: &mut MixState,
-        inputs: &[f32; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
-    ) -> f32 {
+    ) -> Frame {
         let amount = p.amount.plain(tick.levels);
         if p.mode != MixMode::Fm {
-            return p.mode.combine(inputs[0], inputs[1], amount);
+            return inputs[0].zip(inputs[1], |a, b| p.mode.combine(a, b, amount));
         }
         // A voice with no free delay lines can't run FM, so it passes A through.
-        let Some([a, b]) = state.delays else {
+        let Some([a_left, a_right, b_left, b_right]) = state.delays else {
             return inputs[0];
         };
 
@@ -82,11 +83,17 @@ impl AudioStage for Mix {
         let wanted = center_for(swing);
         state.center += (wanted - state.center).clamp(-SLEW, SLEW);
 
-        tick.delays[a].push(inputs[0]);
-        tick.delays[b].push(inputs[1]);
-        // The modulator as it was when the carrier sample being read was current.
-        let modulator = tick.delays[b].read(state.center);
-        tick.delays[a].read(state.center + swing * modulator)
+        tick.delays[a_left].push(inputs[0].l);
+        tick.delays[a_right].push(inputs[0].r);
+        tick.delays[b_left].push(inputs[1].l);
+        tick.delays[b_right].push(inputs[1].r);
+        // Each side of the carrier follows the same side of the modulator, as it was when the
+        // carrier sample being read was current.
+        let center = state.center;
+        let side = |carrier: usize, modulator: usize| {
+            tick.delays[carrier].read(center + swing * tick.delays[modulator].read(center))
+        };
+        Frame::new(side(a_left, b_left), side(a_right, b_right))
     }
 }
 
@@ -112,7 +119,13 @@ mod tests {
         let mut rig = Rig::new();
         let params = params(mode, amount);
         let mut state = Mix::start(&params, &mut rig.start_context());
-        Mix::process(&params, &mut state, &[a, b], &mut rig.tick())
+        Mix::process(
+            &params,
+            &mut state,
+            &[Frame::mono(a), Frame::mono(b)],
+            &mut rig.tick(),
+        )
+        .l
     }
 
     #[test]
@@ -133,7 +146,13 @@ mod tests {
             .map(|n| {
                 let a = (TAU * pitch * n as f32 / RATE).sin();
                 let b = (TAU * pitch * ratio * n as f32 / RATE).sin();
-                Mix::process(&params, &mut state, &[a, b], &mut rig.tick())
+                Mix::process(
+                    &params,
+                    &mut state,
+                    &[Frame::mono(a), Frame::mono(b)],
+                    &mut rig.tick(),
+                )
+                .l
             })
             .collect()
     }
@@ -165,7 +184,15 @@ mod tests {
         let input = [0.3, -0.7, 0.2, 0.9, -0.4];
         let out: Vec<f32> = input
             .iter()
-            .map(|&a| Mix::process(&params, &mut state, &[a, 0.8], &mut rig.tick()))
+            .map(|&a| {
+                Mix::process(
+                    &params,
+                    &mut state,
+                    &[Frame::mono(a), Frame::mono(0.8)],
+                    &mut rig.tick(),
+                )
+                .l
+            })
             .collect();
         assert_eq!(out[0], 0.0);
         assert_eq!(&out[1..], &input[..4]);
@@ -199,18 +226,24 @@ mod tests {
         assert!((low / high - 1.0).abs() < 0.3, "{low} vs {high}");
     }
 
-    /// A voice with no delay lines left plays signal A unchanged. Each mix takes two lines.
+    /// A voice with no delay lines left plays signal A unchanged. Each mix takes four lines.
     #[test]
     fn a_stage_with_no_free_delay_lines_passes_a_through() {
         let mut rig = Rig::new();
         let params = params(MixMode::Fm, 0.8);
         let mut ctx = rig.start_context();
-        let fits = MAX_DELAY_LINES / 2;
+        let fits = MAX_DELAY_LINES / 4;
         let states: Vec<MixState> = (0..=fits).map(|_| Mix::start(&params, &mut ctx)).collect();
         assert!(states[..fits].iter().all(|s| s.delays.is_some()));
         let mut last = states[fits];
         assert!(last.delays.is_none());
-        let out = Mix::process(&params, &mut last, &[0.42, 1.0], &mut rig.tick());
+        let out = Mix::process(
+            &params,
+            &mut last,
+            &[Frame::mono(0.42), Frame::mono(1.0)],
+            &mut rig.tick(),
+        )
+        .l;
         assert_eq!(out, 0.42);
     }
 
@@ -222,9 +255,40 @@ mod tests {
         let mut ctx = rig.start_context();
         let first = Mix::start(&params, &mut ctx).delays.unwrap();
         let second = Mix::start(&params, &mut ctx).delays.unwrap();
-        let mut all = [first[0], first[1], second[0], second[1]];
+        let mut all: Vec<usize> = first.into_iter().chain(second).collect();
         all.sort();
-        assert_eq!(all, [0, 1, 2, 3]);
+        assert_eq!(all, (0..MAX_DELAY_LINES).collect::<Vec<_>>());
+    }
+
+    /// Each side of the carrier follows the same side of the modulator, so a signal that lives
+    /// on one side stays there. Here the carrier is on the left only, and the modulator on the
+    /// right only, so the right of the output stays silent and the left is not bent by it.
+    #[test]
+    fn fm_keeps_each_side_with_its_own_modulator() {
+        let mut rig = Rig::new();
+        rig.pitch_step = 440.0 / RATE;
+        let params = params(MixMode::Fm, 0.8);
+        let mut state = Mix::start(&params, &mut rig.start_context());
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        for n in 0..4000 {
+            let carrier = (TAU * 440.0 * n as f32 / RATE).sin();
+            let modulator = (TAU * 440.0 * n as f32 / RATE).sin();
+            let out = Mix::process(
+                &params,
+                &mut state,
+                &[Frame::new(carrier, 0.0), Frame::new(0.0, modulator)],
+                &mut rig.tick(),
+            );
+            left.push(out.l);
+            right.push(out.r);
+        }
+        assert!(right.iter().all(|&x| x == 0.0));
+        // The left modulator is silent, so the left side is the carrier, one centre late.
+        let delay = center_for(swing(0.8, 440.0 / RATE)).round() as usize;
+        for n in 3000..3100 {
+            let expected = (TAU * 440.0 * (n - delay) as f32 / RATE).sin();
+            assert!((left[n] - expected).abs() < 0.05, "sample {n}");
+        }
     }
 
     /// Switching to another mode in the middle of a note works, since every mix takes a line.
@@ -234,7 +298,13 @@ mod tests {
         let fm = params(MixMode::Fm, 0.5);
         let mut state = Mix::start(&fm, &mut rig.start_context());
         let ring = params(MixMode::RingMod, 1.0);
-        let out = Mix::process(&ring, &mut state, &[0.5, 0.4], &mut rig.tick());
+        let out = Mix::process(
+            &ring,
+            &mut state,
+            &[Frame::mono(0.5), Frame::mono(0.4)],
+            &mut rig.tick(),
+        )
+        .l;
         assert!((out - 0.2).abs() < 1e-6);
     }
 
@@ -249,7 +319,13 @@ mod tests {
         for n in 0..30000 {
             let a = (TAU * 20.0 * n as f32 / RATE).sin();
             let b = 2.0 * (TAU * 777.0 * n as f32 / RATE).sin();
-            let out = Mix::process(&params, &mut state, &[a, b], &mut rig.tick());
+            let out = Mix::process(
+                &params,
+                &mut state,
+                &[Frame::mono(a), Frame::mono(b)],
+                &mut rig.tick(),
+            )
+            .l;
             assert!(out.is_finite() && out.abs() <= 1.01, "sample {n}: {out}");
         }
     }
@@ -264,7 +340,7 @@ mod tests {
         let mut state = Mix::start(&low, &mut rig.start_context());
         let mut last = state.center;
         for _ in 0..500 {
-            Mix::process(&high, &mut state, &[0.0, 0.0], &mut rig.tick());
+            Mix::process(&high, &mut state, &[Frame::SILENT; 2], &mut rig.tick());
             assert!((state.center - last).abs() <= SLEW + 1e-6);
             last = state.center;
         }

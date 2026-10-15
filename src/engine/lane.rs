@@ -8,7 +8,9 @@ use crate::dsp::delay::DelayLine;
 pub const NUM_VOICES: usize = 16;
 
 pub struct Lane {
-    pub(super) voices: [Option<Voice>; NUM_VOICES],
+    /// On the heap, since a voice carries every stage's state and a lane of them is too big for
+    /// a small stack.
+    pub(super) voices: Box<[Option<Voice>]>,
     /// The delay lines of every voice, `MAX_DELAY_LINES` for each in voice order. They are built
     /// once here, because a delay line allocates and the audio thread can't.
     pub(super) delays: Box<[DelayLine]>,
@@ -22,7 +24,7 @@ pub struct Lane {
 impl Lane {
     pub fn new() -> Self {
         Self {
-            voices: std::array::from_fn(|_| None),
+            voices: (0..NUM_VOICES).map(|_| None).collect(),
             delays: (0..NUM_VOICES * MAX_DELAY_LINES)
                 .map(|_| DelayLine::new())
                 .collect(),
@@ -38,7 +40,7 @@ impl Lane {
 
     /// Drops every voice.
     pub fn clear(&mut self) {
-        self.voices = std::array::from_fn(|_| None);
+        self.voices.iter_mut().for_each(|voice| *voice = None);
     }
 
     pub fn voices(&self) -> impl Iterator<Item = &Voice> {

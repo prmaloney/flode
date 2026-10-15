@@ -11,6 +11,7 @@ mod oscillator;
 
 use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::Adsr;
+use crate::dsp::frame::Frame;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::patch::control::{ControlLevels, ENV_SLOTS};
@@ -20,10 +21,11 @@ pub use filter::{Filter, FilterState};
 pub use mix::{Mix, MixState};
 pub use oscillator::{Oscillator, OscillatorState};
 
-/// The delay lines each voice owns. A mix stage takes two at the start of a note, one for each of
-/// its signals, so a voice runs FM on half this many mix stages. A mix past that passes signal A
-/// through. The lines are built before the audio thread runs, since a delay line allocates.
-pub const MAX_DELAY_LINES: usize = 4;
+/// The delay lines each voice owns. An FM mix stage takes four at the start of a note, a pair for
+/// each of its two signals, so a voice runs FM on a quarter this many mix stages. A mix past that
+/// passes signal A through. The lines are built before the audio thread runs, since a delay line
+/// allocates.
+pub const MAX_DELAY_LINES: usize = 8;
 
 /// One kind of audio node, run once per voice. `Params` is what the patch says about the stage,
 /// and `State` is what a voice remembers between samples.
@@ -34,14 +36,14 @@ pub trait AudioStage {
     /// Builds a voice's state for this stage when a note starts.
     fn start(params: &Self::Params, ctx: &mut StartContext) -> Self::State;
 
-    /// One output sample. `inputs` holds the samples on the stage's audio inputs, with silence on
+    /// One output frame. `inputs` holds the frames on the stage's audio inputs, with silence on
     /// an input that has no wire.
     fn process(
         params: &Self::Params,
         state: &mut Self::State,
-        inputs: &[f32; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
-    ) -> f32;
+    ) -> Frame;
 }
 
 /// What a stage reads when a note starts.
@@ -126,21 +128,21 @@ impl StageState {
         }
     }
 
-    /// One sample from a stage. A state that does not match its stage makes silence, which only
+    /// One frame from a stage. A state that does not match its stage makes silence, which only
     /// happens if a patch changes under a voice. The next note starts clean.
     pub fn process(
         &mut self,
         params: &StageParams,
-        inputs: &[f32; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
-    ) -> f32 {
+    ) -> Frame {
         match (params, self) {
             (StageParams::Oscillator(p), Self::Oscillator(s)) => {
                 Oscillator::process(p, s, inputs, tick)
             }
             (StageParams::Filter(p), Self::Filter(s)) => Filter::process(p, s, inputs, tick),
             (StageParams::Mix(p), Self::Mix(s)) => Mix::process(p, s, inputs, tick),
-            _ => 0.0,
+            _ => Frame::SILENT,
         }
     }
 }
@@ -156,19 +158,23 @@ pub fn start_arena(graph: &LaneGraph, ctx: &mut StartContext) -> [StageState; MA
 
 /// Runs a slot's stages for one voice and one sample, and returns what the last stage makes. The
 /// arena is in signal order, so each stage finds its inputs already computed.
-pub fn evaluate(graph: &LaneGraph, states: &mut [StageState; MAX_STAGES], tick: &mut Tick) -> f32 {
-    let mut outputs = [0.0f32; MAX_STAGES];
+pub fn evaluate(
+    graph: &LaneGraph,
+    states: &mut [StageState; MAX_STAGES],
+    tick: &mut Tick,
+) -> Frame {
+    let mut outputs = [Frame::SILENT; MAX_STAGES];
     for (index, spec) in graph.stages.iter().enumerate() {
         let inputs = spec
             .inputs
-            .map(|source| source.map_or(0.0, |i| outputs[i as usize]));
+            .map(|source| source.map_or(Frame::SILENT, |i| outputs[i as usize]));
         outputs[index] = states[index].process(&spec.params, &inputs, tick);
     }
     graph
         .stages
         .len()
         .checked_sub(1)
-        .map_or(0.0, |root| outputs[root])
+        .map_or(Frame::SILENT, |root| outputs[root])
 }
 
 #[cfg(test)]
@@ -277,7 +283,7 @@ mod tests {
         for n in 0..samples {
             let out = evaluate(lane, &mut states, &mut rig.tick());
             if n >= samples / 2 {
-                peak = peak.max(out.abs());
+                peak = peak.max(out.peak());
             }
         }
         peak
@@ -339,7 +345,7 @@ mod tests {
         let mut rig = Rig::new();
         let mut states = start_arena(&lane, &mut rig.start_context());
         let lowest = (0..2000)
-            .map(|_| evaluate(&lane, &mut states, &mut rig.tick()))
+            .map(|_| evaluate(&lane, &mut states, &mut rig.tick()).l)
             .fold(f32::MAX, f32::min);
         assert!(lowest >= 0.0, "{lowest}");
     }
@@ -350,7 +356,10 @@ mod tests {
         let mut rig = Rig::new();
         let params = StageParams::Mix(MixParams::default());
         let mut state = StageState::Empty;
-        assert_eq!(state.process(&params, &[1.0, 1.0], &mut rig.tick()), 0.0);
+        assert_eq!(
+            state.process(&params, &[Frame::mono(1.0); 2], &mut rig.tick()),
+            Frame::SILENT
+        );
     }
 
     /// Every stage kind reports how many inputs the compiler should wire.

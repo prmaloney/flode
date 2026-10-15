@@ -3,6 +3,7 @@
 use super::stage::{evaluate, StageState, Tick};
 use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::{Adsr, AdsrConfig};
+use crate::dsp::frame::Frame;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::MIDI_SOURCE_COUNT;
@@ -91,7 +92,7 @@ impl Voice {
         graph: &LaneGraph,
         env: &mut RenderEnv,
         delays: &mut [DelayLine],
-    ) -> f32 {
+    ) -> Frame {
         // A voice's own envelopes drive its knobs, so each note moves on its own.
         let levels = ControlLevels {
             envelope: self.env_levels(),

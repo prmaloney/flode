@@ -35,6 +35,7 @@ impl NodeBehavior for Oscillator {
         rows.push(Row::driven_knob(KnobId::Octave));
         rows.push(Row::driven_knob(KnobId::Unison).with_output(Port::Audio));
         rows.push(Row::driven_knob(KnobId::Detune));
+        rows.push(Row::driven_knob(KnobId::Spread));
         rows.push(Row::driven_knob(KnobId::PhaseRandom));
         rows.push(Row::control(Control::Dropdown(1)));
         rows.push(Row::driven_knob(KnobId::WarpAmount));
@@ -43,6 +44,7 @@ impl NodeBehavior for Oscillator {
         if warp_mode(node) == WarpMode::Fm {
             rows.push(Row::input(Port::AudioIn(0)).labelled("FM"));
         }
+        rows.push(Row::driven_knob(KnobId::Pan));
         rows.push(Row::driven_knob(KnobId::OscGain));
         rows
     }

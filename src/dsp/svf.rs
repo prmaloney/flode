@@ -28,6 +28,30 @@ impl FilterType {
     }
 }
 
+/// What the cutoff and resonance work out to. Making them takes a `tan`, so they are made once
+/// per sample and handed to each filter that needs them.
+#[derive(Debug, Clone, Copy)]
+pub struct Coefficients {
+    /// The damping. 2.0 is no resonance, and the floor keeps the filter stable.
+    k: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+}
+
+impl Coefficients {
+    /// `cutoff` is in Hz and `resonance` runs from 0.0 to 1.0.
+    pub fn new(cutoff: f32, resonance: f32, sample_rate: f32) -> Self {
+        let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
+        let g = (PI * cutoff / sample_rate).tan();
+        let k = 2.0 - 1.9 * resonance.clamp(0.0, 1.0);
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        Self { k, a1, a2, a3 }
+    }
+}
+
 /// The filter's memory: the two integrators.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Svf {
@@ -41,6 +65,7 @@ impl Svf {
     }
 
     /// One sample through the filter. `cutoff` is in Hz and `resonance` runs from 0.0 to 1.0.
+    #[cfg(test)]
     pub fn process(
         &mut self,
         input: f32,
@@ -49,14 +74,17 @@ impl Svf {
         kind: FilterType,
         sample_rate: f32,
     ) -> f32 {
-        let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
-        let g = (PI * cutoff / sample_rate).tan();
-        // Damping: 2.0 is no resonance, and the floor keeps the filter stable.
-        let k = 2.0 - 1.9 * resonance.clamp(0.0, 1.0);
-        let a1 = 1.0 / (1.0 + g * (g + k));
-        let a2 = g * a1;
-        let a3 = g * a2;
+        self.tick(
+            input,
+            &Coefficients::new(cutoff, resonance, sample_rate),
+            kind,
+        )
+    }
 
+    /// One sample through the filter with coefficients made ahead of time. Two filters that run
+    /// the same response, such as the two sides of a stereo signal, can share them.
+    pub fn tick(&mut self, input: f32, c: &Coefficients, kind: FilterType) -> f32 {
+        let Coefficients { k, a1, a2, a3 } = *c;
         let v3 = input - self.ic2;
         let v1 = a1 * self.ic1 + a2 * v3;
         let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
