@@ -1,9 +1,13 @@
 //! The oscillator node. It makes the sound: a waveform with unison, detune, and phase randomness.
 
+use super::viewer::{sample, Live, Trace};
 use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row, Section};
 use crate::dsp::noise::NoiseType;
-use crate::dsp::warp::WarpMode;
+use crate::dsp::warp::{warp_phase, warp_value, WarpMode};
 use crate::dsp::wavetable::Waveform;
+
+/// How many cycles the viewer draws.
+const TRACE_CYCLES: f32 = 2.0;
 
 pub struct Oscillator;
 
@@ -38,6 +42,7 @@ impl NodeBehavior for Oscillator {
         if waveform(node) == Waveform::Noise {
             rows.push(Row::control(Control::Dropdown(2)));
         }
+        rows.push(Row::control(Control::Viewer));
         // The envelope input shapes this oscillator's amplitude, one copy per voice.
         rows.push(Row::input(Port::Shape).with_output(Port::Audio));
         rows.push(Row::driven_knob(KnobId::OscGain));
@@ -99,6 +104,40 @@ impl NodeBehavior for Oscillator {
         }
         dropdowns
     }
+
+    /// Two cycles of the chosen waveform, through the warp at its live amount. Noise has no
+    /// cycle, so it draws a fixed jagged line that does not change between frames.
+    fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
+        let wave = waveform(node);
+        let points = if wave == Waveform::Noise {
+            sample(samples, noise_shape)
+        } else {
+            let mode = warp_mode(node);
+            let amount = live.value(KnobId::WarpAmount);
+            sample(samples, |x| {
+                let phase = (x * TRACE_CYCLES).fract();
+                let phase = warp_phase(mode, phase, amount);
+                let value = warp_value(mode, wave.naive(phase), amount);
+                value * 0.5 + 0.5
+            })
+        };
+        Some(Trace {
+            points,
+            markers: Vec::new(),
+            fill: false,
+        })
+    }
+}
+
+/// A fixed jagged line for the noise waveform, from 0.0 to 1.0. It hashes the position, so the
+/// same position gives the same height every frame.
+fn noise_shape(x: f32) -> f32 {
+    let step = (x * 95.0).round() as u32;
+    let mut h = step.wrapping_mul(0x9E37_79B1) ^ 0x85EB_CA6B;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    0.1 + 0.8 * (h & 0xFFFF) as f32 / 65535.0
 }
 
 /// The waveform an oscillator node plays.
@@ -132,6 +171,92 @@ mod tests {
 
     fn oscillator() -> FlodeNode {
         FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0))
+    }
+
+    fn trace_of(node: &FlodeNode, live: &Live) -> Vec<f32> {
+        node.trace(live)
+            .expect("the oscillator has a viewer")
+            .points
+    }
+
+    /// Every waveform gives one point per sample, inside the box.
+    #[test]
+    fn every_waveform_traces_samples_points_in_range() {
+        let mut node = oscillator();
+        for choice in 0..WAVEFORM_LABELS.len() {
+            node.choose(0, choice);
+            let trace = Oscillator
+                .trace(&node, &Live::of(&node), 64)
+                .expect("a trace");
+            assert_eq!(trace.points.len(), 64, "{choice}");
+            assert!(trace.points.iter().all(|p| (0.0..=1.0).contains(p)));
+        }
+    }
+
+    /// The node has a viewer row and a trace.
+    #[test]
+    fn the_oscillator_has_a_viewer() {
+        let node = oscillator();
+        assert!(node.has_viewer());
+        assert!(node.trace(&Live::of(&node)).is_some());
+    }
+
+    /// Two sine cycles cross the midline at each half cycle between the ends, three times.
+    /// Both ends sit on the midline.
+    #[test]
+    fn a_sine_crosses_the_midline_twice_per_cycle() {
+        let mut node = oscillator();
+        node.choose(0, 0);
+        let points = Oscillator
+            .trace(&node, &Live::of(&node), 100)
+            .expect("a trace")
+            .points;
+        let mut crossings = 0;
+        let mut side = 0.0f32;
+        for p in points {
+            let s = p - 0.5;
+            if s == 0.0 {
+                continue;
+            }
+            if side != 0.0 && s.signum() != side {
+                crossings += 1;
+            }
+            side = s.signum();
+        }
+        assert_eq!(crossings, 3);
+    }
+
+    /// The warp amount in `Live` changes the picture.
+    #[test]
+    fn the_warp_amount_changes_the_trace() {
+        let mut node = oscillator();
+        node.choose(0, 1);
+        node.choose(1, 1);
+        let low = Live::new(&node, |id| (id == KnobId::WarpAmount).then_some(0.0));
+        let high = Live::new(&node, |id| (id == KnobId::WarpAmount).then_some(1.0));
+        assert_ne!(trace_of(&node, &low), trace_of(&node, &high));
+    }
+
+    /// A value a control wire drives, passed through `Live::new`, moves the shape even when the
+    /// node's own value stays put.
+    #[test]
+    fn a_driven_value_moves_the_trace() {
+        let mut node = oscillator();
+        node.choose(0, 2);
+        node.choose(1, 3);
+        node.set_value(KnobId::WarpAmount, 0.5);
+        let own = Live::of(&node);
+        let driven = Live::new(&node, |id| (id == KnobId::WarpAmount).then_some(0.9));
+        assert_ne!(trace_of(&node, &own), trace_of(&node, &driven));
+    }
+
+    /// The noise trace is the same on every call.
+    #[test]
+    fn the_noise_trace_is_fixed() {
+        let mut node = oscillator();
+        node.choose(0, 4);
+        let live = Live::of(&node);
+        assert_eq!(trace_of(&node, &live), trace_of(&node, &live));
     }
 
     /// The warp dropdown lists one row for every warp mode, in the same order.
