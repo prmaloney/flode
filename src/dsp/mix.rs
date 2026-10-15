@@ -10,14 +10,23 @@ pub enum MixMode {
     Crossfade = 0,
     Am = 1,
     RingMod = 2,
+    /// Signal B pushes the phase of signal A around, as FM does to a carrier. It needs a delay
+    /// line, so the mix stage runs it, and `combine` only passes A through.
+    Fm = 3,
 }
 
 impl MixMode {
     /// Every mode, in the order the dropdown lists them.
-    pub const ALL: [MixMode; 3] = [MixMode::Crossfade, MixMode::Am, MixMode::RingMod];
+    pub const ALL: [MixMode; 4] = [
+        MixMode::Crossfade,
+        MixMode::Am,
+        MixMode::RingMod,
+        MixMode::Fm,
+    ];
 
-    /// Combines two samples. `mix` runs from 0.0, which is plain signal A, to 1.0, which is the
-    /// full effect. For a crossfade that is all of B.
+    /// Combines two samples, for the modes that need no memory. `mix` runs from 0.0, which is
+    /// plain signal A, to 1.0, which is the full effect. For a crossfade that is all of B. FM
+    /// passes A through, since the mix stage does it with a delay line.
     pub fn combine(self, a: f32, b: f32, mix: f32) -> f32 {
         match self {
             // An equal-power blend, so the perceived loudness stays level across the sweep.
@@ -30,6 +39,7 @@ impl MixMode {
             MixMode::Am => a * (1.0 + mix * b),
             // The product of the two signals, faded in as the mix rises.
             MixMode::RingMod => a * (1.0 - mix) + a * b * mix,
+            MixMode::Fm => a,
         }
     }
 }

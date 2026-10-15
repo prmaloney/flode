@@ -1,12 +1,17 @@
 //! One output slot: its voices and its smoothed gain.
 
+use super::stage::MAX_DELAY_LINES;
 use super::voice::Voice;
+use crate::dsp::delay::DelayLine;
 
 /// The most notes that can sound at once in one output slot.
 pub const NUM_VOICES: usize = 16;
 
 pub struct Lane {
     pub(super) voices: [Option<Voice>; NUM_VOICES],
+    /// The delay lines of every voice, `MAX_DELAY_LINES` for each in voice order. They are built
+    /// once here, because a delay line allocates and the audio thread can't.
+    pub(super) delays: Box<[DelayLine]>,
     /// The slot's gain, easing toward the knob so a move does not click.
     gain: f32,
     /// False until the gain has a first value. It then starts at the knob instead of easing in
@@ -18,9 +23,17 @@ impl Lane {
     pub fn new() -> Self {
         Self {
             voices: std::array::from_fn(|_| None),
+            delays: (0..NUM_VOICES * MAX_DELAY_LINES)
+                .map(|_| DelayLine::new())
+                .collect(),
             gain: 0.0,
             settled: false,
         }
+    }
+
+    /// The delay lines that belong to the voice in slot `slot`.
+    pub fn delays_of(&mut self, slot: usize) -> &mut [DelayLine] {
+        &mut self.delays[slot * MAX_DELAY_LINES..(slot + 1) * MAX_DELAY_LINES]
     }
 
     /// Drops every voice.

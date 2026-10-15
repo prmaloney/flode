@@ -24,7 +24,7 @@ use lane::Lane;
 use lfo::Lfos;
 use nih_plug::util;
 use notes::HeldNotes;
-use stage::{start_arena, StartContext};
+use stage::{start_arena, StartContext, MAX_DELAY_LINES};
 use std::sync::Arc;
 use voice::{RenderEnv, Voice};
 
@@ -222,10 +222,12 @@ impl Engine {
         let levels = self.levels();
         let stages = start_arena(
             &self.patch.lanes[lane],
-            &mut StartContext {
-                levels: &levels,
-                rng: &mut self.rng,
-            },
+            &mut StartContext::new(
+                &levels,
+                &mut self.rng,
+                step,
+                self.lanes[lane].delays_of(slot),
+            ),
         );
         self.age_counter += 1;
         self.lanes[lane].voices[slot] = Some(Voice::new(
@@ -317,7 +319,7 @@ impl Engine {
                 rng: &mut self.rng,
             };
             let mut lane_out = 0.0;
-            for slot in lane.voices.iter_mut() {
+            for (index, slot) in lane.voices.iter_mut().enumerate() {
                 let Some(voice) = slot else { continue };
                 for index in 0..MAX_ENVELOPES {
                     if voice.age > newest_age[index] {
@@ -326,7 +328,9 @@ impl Engine {
                     }
                 }
                 voice.glide(self.glide_coef);
-                lane_out += voice.render(graph, &mut env);
+                let delays =
+                    &mut lane.delays[index * MAX_DELAY_LINES..(index + 1) * MAX_DELAY_LINES];
+                lane_out += voice.render(graph, &mut env, delays);
                 voice.advance(&self.env_configs);
                 if voice.finished() {
                     *slot = None;

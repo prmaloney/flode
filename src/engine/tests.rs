@@ -3,10 +3,11 @@
 use super::stage::StageState;
 use super::*;
 use crate::dsp::envelope::EnvPhase;
+use crate::dsp::mix::MixMode;
 use crate::dsp::warp::WarpMode;
 use crate::nodes::knobs::KnobId;
 use crate::patch::control::{KnobValue, MapStage, Param, Route, Source, MAX_MAPS};
-use crate::patch::stage::{FilterParams, OscillatorParams, StageParams, StageSpec};
+use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageParams, StageSpec};
 use crate::patch::EnvelopeSettings;
 use std::sync::OnceLock;
 
@@ -283,6 +284,72 @@ fn a_driven_cutoff_follows_each_voices_own_envelope() {
         .collect();
     assert_eq!(cutoffs.len(), 2);
     assert!(cutoffs[0] > cutoffs[1] * 2.0, "{cutoffs:?}");
+}
+
+/// The power of `signal` at `freq`, from the Goertzel recurrence.
+fn power_at(signal: &[f32], freq: f32) -> f32 {
+    let coef = 2.0 * (std::f32::consts::TAU * freq / 44100.0).cos();
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for &x in signal {
+        let s0 = x + coef * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - coef * s1 * s2
+}
+
+/// FM done in the mix node and FM done by the oscillator's own warp are the same modulation, so
+/// the same two sines give the same spectrum. The mix reads signal A from a delay line, and the
+/// oscillator reads its table at a moved phase.
+#[test]
+fn mix_fm_matches_the_oscillators_fm_warp() {
+    const DEPTH: f32 = 0.5;
+    let modulator = || osc(OscillatorParams::default());
+
+    // The oscillator way: the carrier warps its own phase by the modulator.
+    let warped = OscillatorParams {
+        warp: WarpMode::Fm,
+        warp_amount: Param::fixed(KnobId::WarpAmount, DEPTH),
+        ..OscillatorParams::default()
+    };
+    let by_warp = patch_with(
+        0,
+        &[
+            modulator(),
+            StageSpec::new(StageParams::Oscillator(warped)).with_input(0, 0),
+        ],
+    );
+
+    // The mix way: a plain carrier and a plain modulator go into an FM mix.
+    let fm_mix = StageSpec::new(StageParams::Mix(MixParams {
+        mode: MixMode::Fm,
+        amount: Param::fixed(KnobId::Mix, DEPTH),
+    }))
+    .with_input(0, 0)
+    .with_input(1, 1);
+    let by_mix = patch_with(0, &[osc(OscillatorParams::default()), modulator(), fm_mix]);
+
+    // Both play A4, so the sidebands land on the harmonics of 440 Hz.
+    let harmonics = |patch: &Patch| -> Vec<f32> {
+        let mut engine = engine_on(patch);
+        engine.note_on(69, 1.0);
+        let out = render(&mut engine, 14000);
+        let tail = &out[3000..];
+        (1..=4)
+            .map(|k| power_at(tail, 440.0 * k as f32))
+            .collect::<Vec<_>>()
+    };
+    let (warp, mix) = (harmonics(&by_warp), harmonics(&by_mix));
+    for k in 1..4 {
+        // Each harmonic's share of the carrier's power agrees to within a quarter.
+        let warp_share = warp[k] / warp[0];
+        let mix_share = mix[k] / mix[0];
+        assert!(
+            (mix_share / warp_share - 1.0).abs() < 0.25,
+            "harmonic {}: warp {warp_share}, mix {mix_share}",
+            k + 1
+        );
+    }
 }
 
 /// An FM pair plays through the engine: the modulator runs first in each voice, the carrier

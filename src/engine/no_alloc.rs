@@ -3,6 +3,7 @@
 //! debug builds. This test plays a busy patch under it.
 
 use super::*;
+use crate::dsp::mix::MixMode;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
@@ -44,6 +45,21 @@ fn busy_patch() -> Patch {
     patch.lanes[1].stages.extend([
         StageSpec::new(StageParams::Oscillator(OscillatorParams::default())),
         StageSpec::new(StageParams::Oscillator(carrier)).with_input(0, 0),
+    ]);
+    // A third slot mixes two oscillators by FM, which runs a delay line per voice.
+    let fm_mix = MixParams {
+        mode: MixMode::Fm,
+        amount: Param::fixed(KnobId::Mix, 0.7),
+    };
+    patch.lanes[2].stages.extend([
+        StageSpec::new(StageParams::Oscillator(OscillatorParams::default())),
+        StageSpec::new(StageParams::Oscillator(OscillatorParams {
+            waveform: Waveform::Triangle,
+            ..OscillatorParams::default()
+        })),
+        StageSpec::new(StageParams::Mix(fm_mix))
+            .with_input(0, 0)
+            .with_input(1, 1),
     ]);
     patch.envelopes[0] = Some(EnvelopeSettings::new());
     patch.lfos[0] = Some(LfoSettings::new());

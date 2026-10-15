@@ -1,6 +1,7 @@
 //! One sounding note: its pitch, its envelopes, and the state of every stage in its slot.
 
 use super::stage::{evaluate, StageState, Tick};
+use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::{Adsr, AdsrConfig};
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
@@ -83,8 +84,14 @@ impl Voice {
         self.step += (self.target_step - self.step) * coef;
     }
 
-    /// One sample of the voice: its slot's stages, run in signal order.
-    pub fn render(&mut self, graph: &LaneGraph, env: &mut RenderEnv) -> f32 {
+    /// One sample of the voice: its slot's stages, run in signal order. `delays` are the voice's
+    /// own delay lines.
+    pub fn render(
+        &mut self,
+        graph: &LaneGraph,
+        env: &mut RenderEnv,
+        delays: &mut [DelayLine],
+    ) -> f32 {
         // A voice's own envelopes drive its knobs, so each note moves on its own.
         let levels = ControlLevels {
             envelope: self.env_levels(),
@@ -101,6 +108,7 @@ impl Voice {
             sample_rate: env.sample_rate,
             smooth: env.smooth,
             rng: env.rng,
+            delays,
         };
         evaluate(graph, &mut self.stages, &mut tick)
     }

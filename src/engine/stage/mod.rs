@@ -9,6 +9,7 @@ mod filter;
 mod mix;
 mod oscillator;
 
+use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::Adsr;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
@@ -16,8 +17,13 @@ use crate::patch::control::{ControlLevels, ENV_SLOTS};
 use crate::patch::stage::{LaneGraph, StageParams, MAX_INPUTS, MAX_STAGES};
 
 pub use filter::{Filter, FilterState};
-pub use mix::Mix;
+pub use mix::{Mix, MixState};
 pub use oscillator::{Oscillator, OscillatorState};
+
+/// The delay lines each voice owns. A mix stage takes two at the start of a note, one for each of
+/// its signals, so a voice runs FM on half this many mix stages. A mix past that passes signal A
+/// through. The lines are built before the audio thread runs, since a delay line allocates.
+pub const MAX_DELAY_LINES: usize = 4;
 
 /// One kind of audio node, run once per voice. `Params` is what the patch says about the stage,
 /// and `State` is what a voice remembers between samples.
@@ -42,6 +48,39 @@ pub trait AudioStage {
 pub struct StartContext<'a> {
     pub levels: &'a ControlLevels,
     pub rng: &'a mut Rng,
+    /// The pitch the voice starts at, as a phase step per sample.
+    pub pitch_step: f32,
+    /// The delay lines of the voice being started.
+    delays: &'a mut [DelayLine],
+    /// How many of them stages have taken so far.
+    next_delay: usize,
+}
+
+impl<'a> StartContext<'a> {
+    pub fn new(
+        levels: &'a ControlLevels,
+        rng: &'a mut Rng,
+        pitch_step: f32,
+        delays: &'a mut [DelayLine],
+    ) -> Self {
+        Self {
+            levels,
+            rng,
+            pitch_step,
+            delays,
+            next_delay: 0,
+        }
+    }
+
+    /// Hands out the next `N` free delay lines, cleared, or None if the voice has fewer than `N`
+    /// left. It takes all of them or none.
+    pub fn take_delays<const N: usize>(&mut self) -> Option<[usize; N]> {
+        let first = self.next_delay;
+        let lines = self.delays.get_mut(first..first + N)?;
+        lines.iter_mut().for_each(DelayLine::clear);
+        self.next_delay += N;
+        Some(std::array::from_fn(|i| first + i))
+    }
 }
 
 /// What every stage reads while it runs for one voice and one sample.
@@ -60,6 +99,8 @@ pub struct Tick<'a> {
     /// The share of the gap a smoothed value closes each sample.
     pub smooth: f32,
     pub rng: &'a mut Rng,
+    /// The voice's delay lines, which stages index by the number they took at the start.
+    pub delays: &'a mut [DelayLine],
 }
 
 /// A voice's memory for one stage.
@@ -69,7 +110,7 @@ pub enum StageState {
     Empty,
     Oscillator(OscillatorState),
     Filter(FilterState),
-    Mix,
+    Mix(MixState),
 }
 
 impl StageState {
@@ -81,10 +122,7 @@ impl StageState {
         match params {
             StageParams::Oscillator(p) => Self::Oscillator(Oscillator::start(p, ctx)),
             StageParams::Filter(p) => Self::Filter(Filter::start(p, ctx)),
-            StageParams::Mix(p) => {
-                Mix::start(p, ctx);
-                Self::Mix
-            }
+            StageParams::Mix(p) => Self::Mix(Mix::start(p, ctx)),
         }
     }
 
@@ -101,7 +139,7 @@ impl StageState {
                 Oscillator::process(p, s, inputs, tick)
             }
             (StageParams::Filter(p), Self::Filter(s)) => Filter::process(p, s, inputs, tick),
-            (StageParams::Mix(p), Self::Mix) => Mix::process(p, &mut (), inputs, tick),
+            (StageParams::Mix(p), Self::Mix(s)) => Mix::process(p, s, inputs, tick),
             _ => 0.0,
         }
     }
@@ -146,6 +184,7 @@ pub(crate) mod testing {
         pub tables: WaveTables,
         pub rng: Rng,
         pub pitch_step: f32,
+        pub delays: Vec<DelayLine>,
     }
 
     impl Rig {
@@ -159,14 +198,17 @@ pub(crate) mod testing {
                 tables: WaveTables::new(),
                 rng: Rng::default(),
                 pitch_step: 440.0 / 44100.0,
+                delays: (0..MAX_DELAY_LINES).map(|_| DelayLine::new()).collect(),
             }
         }
 
         pub fn start_context(&mut self) -> StartContext<'_> {
-            StartContext {
-                levels: &self.levels,
-                rng: &mut self.rng,
-            }
+            StartContext::new(
+                &self.levels,
+                &mut self.rng,
+                self.pitch_step,
+                &mut self.delays,
+            )
         }
 
         pub fn tick(&mut self) -> Tick<'_> {
@@ -180,6 +222,7 @@ pub(crate) mod testing {
                 sample_rate: 44100.0,
                 smooth: 0.01,
                 rng: &mut self.rng,
+                delays: &mut self.delays,
             }
         }
     }
