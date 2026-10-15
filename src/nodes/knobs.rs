@@ -86,6 +86,11 @@ pub enum KnobId {
     Center,
     /// A flanger's base delay in milliseconds.
     FlangerDelay,
+    /// The four macro knobs, from 0 to 1. Each one is a host parameter, so the DAW can automate it.
+    Macro1,
+    Macro2,
+    Macro3,
+    Macro4,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -99,7 +104,20 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 44;
+    pub const COUNT: usize = 48;
+
+    /// The macro knobs, in order. The first is macro 1.
+    pub const MACROS: [KnobId; 4] = [
+        KnobId::Macro1,
+        KnobId::Macro2,
+        KnobId::Macro3,
+        KnobId::Macro4,
+    ];
+
+    /// Which macro this knob is, from 0, or None for any other knob.
+    pub fn macro_index(self) -> Option<usize> {
+        Self::MACROS.iter().position(|&id| id == self)
+    }
 
     pub const ALL: [KnobId; KnobId::COUNT] = [
         KnobId::Gain,
@@ -146,6 +164,10 @@ impl KnobId {
         KnobId::Feedback,
         KnobId::Center,
         KnobId::FlangerDelay,
+        KnobId::Macro1,
+        KnobId::Macro2,
+        KnobId::Macro3,
+        KnobId::Macro4,
     ];
 
     /// The name shown beside the knob.
@@ -195,6 +217,10 @@ impl KnobId {
             KnobId::Feedback => "Feedback",
             KnobId::Center => "Freq",
             KnobId::FlangerDelay => "Delay",
+            KnobId::Macro1 => "Macro 1",
+            KnobId::Macro2 => "Macro 2",
+            KnobId::Macro3 => "Macro 3",
+            KnobId::Macro4 => "Macro 4",
         }
     }
 
@@ -254,7 +280,11 @@ impl KnobId {
             | KnobId::Tone
             | KnobId::Depth
             | KnobId::Size
-            | KnobId::Damp => FloatRange::Linear { min: 0.0, max: 1.0 },
+            | KnobId::Damp
+            | KnobId::Macro1
+            | KnobId::Macro2
+            | KnobId::Macro3
+            | KnobId::Macro4 => FloatRange::Linear { min: 0.0, max: 1.0 },
             KnobId::Pan => FloatRange::Linear {
                 min: -1.0,
                 max: 1.0,
@@ -341,6 +371,7 @@ impl KnobId {
             KnobId::WarpAmount => 0.0,
             KnobId::Coarse | KnobId::Fine | KnobId::Octave => 0.0,
             KnobId::Mix => 0.5,
+            KnobId::Macro1 | KnobId::Macro2 | KnobId::Macro3 | KnobId::Macro4 => 0.0,
             KnobId::Spread => 0.75,
             KnobId::Pan => 0.0,
             KnobId::Drive => 0.3,
@@ -418,6 +449,10 @@ impl KnobId {
             KnobId::Fine => format!("{plain:+.0} ct"),
             KnobId::Octave => format!("{:+} oct", plain.round() as i32),
             KnobId::Mix
+            | KnobId::Macro1
+            | KnobId::Macro2
+            | KnobId::Macro3
+            | KnobId::Macro4
             | KnobId::Spread
             | KnobId::Drive
             | KnobId::Tone

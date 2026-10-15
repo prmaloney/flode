@@ -28,7 +28,13 @@ impl NodeBehavior for Oscillator {
     /// folded. Level and pan follow, and the rest is in three sections that fold: pitch, unison,
     /// and warp. The warp dropdown sits directly above the warp amount.
     fn rows(&self, node: &FlodeNode) -> Vec<Row> {
-        let mut rows = vec![Row::control(Control::Dropdown(0))];
+        // The notes pin sits on the wave dropdown's row, at the very top. The dropdown starts
+        // clear of the pin, so the row stays one dropdown tall. With no wire here the oscillator
+        // is silent.
+        let mut rows = vec![Row {
+            input: Some(Port::Notes),
+            ..Row::control(Control::Dropdown(0))
+        }];
         if waveform(node) == Waveform::Noise {
             rows.push(Row::control(Control::Dropdown(2)));
         }

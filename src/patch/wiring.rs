@@ -16,8 +16,8 @@ use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, filter, lfo, map, mix, oscillator, phaser, Bypass, FlodeNode,
-    NodeKind, Port,
+    compressor, delay, distortion, filter, input, lfo, map, mix, oscillator, phaser, Bypass,
+    FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 
@@ -85,6 +85,12 @@ impl<'a> Wiring<'a> {
                     };
                     return self.compose(&maps, Source::Midi(midi));
                 }
+                NodeKind::Macro => {
+                    let Port::Macro(index) = link.out else {
+                        return None;
+                    };
+                    return self.compose(&maps, Source::Macro(index));
+                }
                 NodeKind::Map => {
                     maps.push(source);
                     link = self.input_link(source, Port::Shape)?;
@@ -132,6 +138,10 @@ impl<'a> Wiring<'a> {
             NodeKind::Lfo => self.lfo_index(from).map(|index| levels.lfo[index]),
             NodeKind::Input => match out {
                 Port::Midi(source) => Some(levels.midi[source.index()]),
+                _ => None,
+            },
+            NodeKind::Macro => match out {
+                Port::Macro(index) => levels.macros.get(index).copied(),
                 _ => None,
             },
             NodeKind::Map => {
@@ -222,17 +232,31 @@ impl<'a> Wiring<'a> {
         self.nodes.iter().position(|n| n.kind == NodeKind::Output)
     }
 
-    /// The settings of the output node that apply to every slot.
+    /// The first MIDI input node, which sets the voice behaviour: mono and glide.
+    pub fn first_input(&self) -> Option<usize> {
+        self.nodes.iter().position(|n| n.kind == NodeKind::Input)
+    }
+
+    /// The settings that apply to every slot: the master gain from the first output node, and
+    /// mono and glide from the first MIDI input node. A graph without one has the defaults.
     pub fn globals(&self) -> Globals {
-        match self.first_output() {
-            Some(output) => Globals {
-                mono: self.nodes[output].switch(0),
-                glide_always: self.nodes[output].switch(1),
-                gain: self.param(output, KnobId::Gain),
-                glide: self.param(output, KnobId::Glide),
-            },
-            None => Globals::default(),
+        let mut globals = Globals::default();
+        if let Some(output) = self.first_output() {
+            globals.gain = self.param(output, KnobId::Gain);
         }
+        if let Some(input) = self.first_input() {
+            globals.mono = input::mono(&self.nodes[input]);
+            globals.glide_always = input::glide_always(&self.nodes[input]);
+            globals.glide = self.param(input, KnobId::Glide);
+        }
+        globals
+    }
+
+    /// True if a MIDI input node's notes pin is wired to this oscillator.
+    pub fn has_notes(&self, oscillator: usize) -> bool {
+        self.input_link(oscillator, Port::Notes)
+            .and_then(|link| self.nodes.get(link.from))
+            .is_some_and(|node| node.kind == NodeKind::Input)
     }
 
     /// Compiles the whole graph for the audio thread.
@@ -374,6 +398,7 @@ impl<'a> Wiring<'a> {
             | NodeKind::Output
             | NodeKind::Lfo
             | NodeKind::Input
+            | NodeKind::Macro
             | NodeKind::Envelope => None,
         }
     }
@@ -451,6 +476,12 @@ impl<'p> LaneBuilder<'p> {
             }
         }
 
+        // An oscillator plays only the notes wired into it. With no MIDI input on its notes pin
+        // it is silent.
+        if wiring.nodes[node].kind == NodeKind::Oscillator && !wiring.has_notes(node) {
+            return None;
+        }
+
         let params = wiring.stage_params(node)?;
 
         self.path.push(node);
@@ -522,10 +553,99 @@ mod tests {
         }
     }
 
-    /// The lane for slot 0 of a graph whose output is the node at `output`.
-    fn lane(mut nodes: Vec<FlodeNode>, links: Vec<Connection>, output: usize) -> LaneGraph {
+    /// Adds a MIDI input node at the end and wires its notes to every oscillator, so the
+    /// oscillators sound. The nodes already there keep their indices.
+    pub(super) fn with_notes(nodes: &mut Vec<FlodeNode>, links: &mut Vec<Connection>) {
+        nodes.push(node(NodeKind::Input));
+        let input = nodes.len() - 1;
+        for oscillator in 0..input {
+            if nodes[oscillator].kind == NodeKind::Oscillator {
+                links.push(notes(input, oscillator));
+            }
+        }
+    }
+
+    pub(super) fn notes(from: usize, to: usize) -> Connection {
+        Connection {
+            from,
+            out: Port::Notes,
+            to,
+            input: Port::Notes,
+        }
+    }
+
+    /// The lane for slot 0 of a graph whose output is the node at `output`. Every oscillator
+    /// gets its notes from a MIDI input.
+    fn lane(mut nodes: Vec<FlodeNode>, mut links: Vec<Connection>, output: usize) -> LaneGraph {
         nodes[output].used = 1;
+        with_notes(&mut nodes, &mut links);
         Wiring::new(&nodes, &links).lane_graphs()[0].clone()
+    }
+
+    /// An oscillator plays only the notes wired into it.
+    #[test]
+    fn an_oscillator_with_no_notes_wired_is_silent() {
+        let mut nodes = vec![node(NodeKind::Oscillator), node(NodeKind::Output)];
+        nodes[1].used = 1;
+        let links = vec![audio(0, 1, Port::Slot(0))];
+        assert!(!Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
+
+        // A notes wire from a node that is not a MIDI input does not count.
+        nodes.push(node(NodeKind::Filter));
+        let links = vec![audio(0, 1, Port::Slot(0)), notes(2, 0)];
+        assert!(!Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
+
+        nodes[2] = node(NodeKind::Input);
+        assert!(Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
+    }
+
+    /// Mono and glide come from the first MIDI input, and the master gain from the output.
+    #[test]
+    fn the_voice_settings_come_from_the_midi_input() {
+        let mut input = node(NodeKind::Input);
+        input.set_switch(0, true);
+        input.set_switch(1, true);
+        input.set_value(KnobId::Glide, KnobId::Glide.to_normalized(0.5));
+        let mut output = node(NodeKind::Output);
+        output.set_value(KnobId::Gain, KnobId::Gain.to_normalized(-3.0));
+        let nodes = vec![output, input];
+        let globals = Wiring::new(&nodes, &[]).globals();
+        assert!(globals.mono && globals.glide_always);
+        let plain = |param: Param| param.plain(&ControlLevels::default());
+        assert!((plain(globals.glide) - 0.5).abs() < 1e-4);
+        assert!((plain(globals.gain) + 3.0).abs() < 1e-3);
+
+        // With no input node the voices are poly with no glide.
+        let nodes = vec![node(NodeKind::Output)];
+        let globals = Wiring::new(&nodes, &[]).globals();
+        assert!(!globals.mono && !globals.glide_always);
+        assert_eq!(globals.glide.plain(&ControlLevels::default()), 0.0);
+    }
+
+    /// A macro knob drives a wired knob from the macro's level, through any maps on the way.
+    #[test]
+    fn a_macro_drives_a_knob() {
+        let nodes = vec![node(NodeKind::Macro), node(NodeKind::Filter)];
+        let links = vec![Connection {
+            from: 0,
+            out: Port::Macro(2),
+            to: 1,
+            input: Port::Knob(KnobId::Cutoff),
+        }];
+        let wiring = Wiring::new(&nodes, &links);
+        let route = wiring.control_route(1, KnobId::Cutoff).expect("a route");
+        assert_eq!(route.source, Source::Macro(2));
+        let mut levels = ControlLevels::default();
+        levels.macros[2] = 1.0;
+        assert_eq!(route.apply(&levels), 1.0);
+        assert_eq!(
+            wiring.control_level(0, Port::Macro(2), &levels, 0),
+            Some(1.0)
+        );
+        assert_eq!(
+            wiring.control_level(0, Port::Macro(1), &levels, 0),
+            Some(0.0)
+        );
     }
 
     /// Every stage reads only stages placed before it.
@@ -746,9 +866,10 @@ mod tests {
     #[test]
     fn unused_slots_and_a_missing_output_are_silent() {
         let nodes = vec![node(NodeKind::Oscillator), node(NodeKind::Output)];
-        let links = vec![audio(0, 1, Port::Slot(0))];
+        let mut links = vec![audio(0, 1, Port::Slot(0))];
         let mut with_output = nodes;
         with_output[1].used = 1;
+        with_notes(&mut with_output, &mut links);
         let lanes = Wiring::new(&with_output, &links).lane_graphs();
         assert!(lanes[0].is_active());
         assert!(lanes[1..].iter().all(|lane| !lane.is_active()));
@@ -809,12 +930,14 @@ mod effect_tests {
     }
 
     fn lanes(
-        nodes: &mut [FlodeNode],
+        nodes: &mut Vec<FlodeNode>,
         links: &[Connection],
         output: usize,
     ) -> [LaneGraph; MAX_SLOTS] {
         nodes[output].used = MAX_SLOTS;
-        Wiring::new(nodes, links).lane_graphs()
+        let mut links = links.to_vec();
+        super::tests::with_notes(nodes, &mut links);
+        Wiring::new(nodes, &links).lane_graphs()
     }
 
     /// Every effect node makes an effect stage with one input, and no other node does.

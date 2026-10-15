@@ -99,6 +99,35 @@ fn a_note_sets_the_note_and_velocity_sources() {
     assert_eq!(midi[MidiSource::Velocity.index()], 0.5);
 }
 
+/// The macro levels the plugin sets are the macro source, and a knob driven by one follows it.
+#[test]
+fn a_macro_level_drives_a_knob() {
+    let driven = KnobValue {
+        value: 0.0,
+        route: Some(Route {
+            source: Source::Macro(2),
+            stages: [MapStage::IDENTITY; MAX_MAPS],
+            count: 0,
+        }),
+    };
+    let quiet_then_loud = OscillatorParams {
+        level: Param::new(KnobId::OscGain, driven),
+        ..OscillatorParams::default()
+    };
+    let patch = patch_with(0, &[osc(quiet_then_loud)]);
+    let mut engine = engine_on(&patch);
+    engine.note_on(60, 1.0);
+
+    // OscGain at zero is its floor, which is silent.
+    engine.set_macros([0.0; 4]);
+    assert_eq!(engine.levels().macros[2], 0.0);
+    let quiet = peak(&render(&mut engine, 2000));
+    engine.set_macros([0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(engine.levels().macros[2], 1.0);
+    let loud = peak(&render(&mut engine, 2000));
+    assert!(loud > 0.05 && quiet < loud * 0.1, "{quiet} {loud}");
+}
+
 /// In mono mode, a second note starts at the first note's pitch and glides to its own.
 #[test]
 fn mono_note_glides_from_the_previous_pitch() {

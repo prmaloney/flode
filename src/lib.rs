@@ -72,6 +72,25 @@ struct FlodeParams {
     /// reload.
     #[persist = "graph"]
     graph: Mutex<editor::saved::SavedGraph>,
+
+    /// The four macro knobs, the only host parameters. The macro node shows them and drives
+    /// whatever its pins are wired to, so the DAW can automate them.
+    #[id = "macro1"]
+    macro1: FloatParam,
+    #[id = "macro2"]
+    macro2: FloatParam,
+    #[id = "macro3"]
+    macro3: FloatParam,
+    #[id = "macro4"]
+    macro4: FloatParam,
+}
+
+/// A macro parameter: 0 to 100 percent, with a short glide so automation does not click.
+fn macro_param(name: &'static str) -> FloatParam {
+    FloatParam::new(name, 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+        .with_smoother(SmoothingStyle::Linear(10.0))
+        .with_value_to_string(formatters::v2s_f32_percentage(0))
+        .with_string_to_value(formatters::s2v_f32_percentage())
 }
 
 impl Default for FlodeParams {
@@ -79,7 +98,28 @@ impl Default for FlodeParams {
         Self {
             editor_state: editor::default_state(),
             graph: Mutex::new(editor::saved::SavedGraph::default()),
+            macro1: macro_param("Macro 1"),
+            macro2: macro_param("Macro 2"),
+            macro3: macro_param("Macro 3"),
+            macro4: macro_param("Macro 4"),
         }
+    }
+}
+
+impl FlodeParams {
+    /// Macro `index`, from 0. The macro node's knobs show these.
+    fn macro_param(&self, index: usize) -> &FloatParam {
+        match index {
+            0 => &self.macro1,
+            1 => &self.macro2,
+            2 => &self.macro3,
+            _ => &self.macro4,
+        }
+    }
+
+    /// The next smoothed value of every macro, from 0.0 to 1.0. Call it once per sample.
+    fn next_macro_levels(&self) -> [f32; nodes::macros::MACRO_COUNT] {
+        std::array::from_fn(|index| self.macro_param(index).smoothed.next())
     }
 }
 
@@ -179,6 +219,7 @@ impl Plugin for Flode {
                 next_event = context.next_event();
             }
 
+            self.engine.set_macros(self.params.next_macro_levels());
             let out = self.engine.process_sample(sample_id);
             for (channel, sample) in channel_samples.into_iter().enumerate() {
                 *sample = match channel {
@@ -220,3 +261,36 @@ impl Vst3Plugin for Flode {
 
 nih_export_clap!(Flode);
 nih_export_vst3!(Flode);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four macros are the plugin's only host parameters, with stable ids and names.
+    #[test]
+    fn the_macros_are_the_host_parameters() {
+        let params = FlodeParams::default();
+        let map = params.param_map();
+        let ids: Vec<&str> = map.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, ["macro1", "macro2", "macro3", "macro4"]);
+        assert_eq!(map.len(), nodes::macros::MACRO_COUNT);
+        for index in 0..nodes::macros::MACRO_COUNT {
+            let param = params.macro_param(index);
+            assert_eq!(param.name(), format!("Macro {}", index + 1));
+            assert_eq!(param.default_normalized_value(), 0.0);
+        }
+    }
+
+    /// The audio thread reads each macro's own value, and a changed value is smoothed to.
+    #[test]
+    fn each_macro_reads_its_own_value() {
+        let params = FlodeParams::default();
+        params.macro_param(2).smoothed.reset(0.5);
+        let levels = params.next_macro_levels();
+        assert_eq!(levels, [0.0, 0.0, 0.5, 0.0]);
+
+        params.macro_param(0).smoothed.set_target(48000.0, 1.0);
+        let first = params.next_macro_levels()[0];
+        assert!(first > 0.0 && first < 1.0, "{first}");
+    }
+}

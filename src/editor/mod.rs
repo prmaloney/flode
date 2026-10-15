@@ -23,7 +23,7 @@ mod style;
 mod tests;
 mod view;
 
-use nih_plug::prelude::{Editor, GuiContext};
+use nih_plug::prelude::{Editor, GuiContext, Param, ParamSetter};
 use nih_plug_iced::*;
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
@@ -68,6 +68,39 @@ enum Message {
     Graph(canvas::Message),
     /// A timer tick, sent while a control drives a knob so the live indicator redraws.
     Tick,
+}
+
+impl FlodeEditor {
+    /// Passes the macro knob changes the graph recorded to the host, so it can record automation.
+    fn send_macro_edits(&mut self) {
+        if self.graph.macro_edits.is_empty() {
+            return;
+        }
+        let setter = ParamSetter::new(self.context.as_ref());
+        for edit in std::mem::take(&mut self.graph.macro_edits) {
+            match edit {
+                graph::MacroEdit::Begin(index) => {
+                    setter.begin_set_parameter(self.params.macro_param(index))
+                }
+                graph::MacroEdit::Set(index, value) => {
+                    setter.set_parameter_normalized(self.params.macro_param(index), value)
+                }
+                graph::MacroEdit::End(index) => {
+                    setter.end_set_parameter(self.params.macro_param(index))
+                }
+            }
+        }
+    }
+
+    /// Shows the host's macro values on the macro node, which they may have moved by automation.
+    fn show_macros(&mut self) {
+        let values = std::array::from_fn(|index| {
+            self.params
+                .macro_param(index)
+                .unmodulated_normalized_value()
+        });
+        self.graph.show_macros(values);
+    }
 }
 
 impl IcedEditor for FlodeEditor {
@@ -130,6 +163,7 @@ impl IcedEditor for FlodeEditor {
                 }
             }
         }
+        self.send_macro_edits();
         Command::none()
     }
 
@@ -144,6 +178,7 @@ impl IcedEditor for FlodeEditor {
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
+        self.show_macros();
         let meters = self.link.meters();
         let now = Instant::now();
         let seconds = self

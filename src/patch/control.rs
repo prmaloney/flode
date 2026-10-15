@@ -3,6 +3,7 @@
 
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use crate::nodes::knobs::KnobId;
+use crate::nodes::macros::MACRO_COUNT;
 
 /// The most LFO nodes that drive knobs. Extra LFOs make no signal.
 pub const MAX_LFOS: usize = 2;
@@ -16,6 +17,8 @@ pub enum Source {
     Lfo(usize),
     /// A MIDI source on an input node.
     Midi(MidiSource),
+    /// The macro knob at this index, which is a host parameter.
+    Macro(usize),
 }
 
 /// The most envelope nodes a patch can run. Each voice keeps a copy of every one, so the audio
@@ -89,6 +92,7 @@ pub struct ControlLevels {
     pub envelope: [f32; MAX_ENVELOPES],
     pub lfo: [f32; MAX_LFOS],
     pub midi: [f32; MIDI_SOURCE_COUNT],
+    pub macros: [f32; MACRO_COUNT],
 }
 
 impl ControlLevels {
@@ -97,6 +101,7 @@ impl ControlLevels {
             Source::Envelope(index) => self.envelope[index],
             Source::Lfo(index) => self.lfo[index],
             Source::Midi(source) => self.midi[source.index()],
+            Source::Macro(index) => self.macros[index],
         }
     }
 }

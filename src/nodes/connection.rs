@@ -14,13 +14,13 @@ pub struct Connection {
 
 impl Connection {
     /// True if the wire joins ports that exist and carry the same kind of signal. Audio goes to
-    /// audio, and control goes to a knob.
+    /// audio, control goes to a knob, and notes go to notes.
     pub fn is_valid(&self, nodes: &[FlodeNode]) -> bool {
         let (Some(from), Some(to)) = (nodes.get(self.from), nodes.get(self.to)) else {
             return false;
         };
         self.from != self.to
-            && (self.out == Port::Audio) == self.input.is_audio()
+            && self.out.signal() == self.input.signal()
             && (self.out != Port::Audio || NodeKind::may_feed(from.kind, to.kind))
             && from.output_point(self.out).is_some()
             && to.input_point(self.input).is_some()
@@ -48,6 +48,49 @@ mod tests {
         };
         assert!(wire.is_valid(&nodes));
         assert!(!Connection { to: 0, ..wire }.is_valid(&nodes));
+    }
+
+    #[test]
+    fn notes_join_only_notes() {
+        let nodes = [
+            node(NodeKind::Input),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Filter),
+        ];
+        let notes = Connection {
+            from: 0,
+            out: Port::Notes,
+            to: 1,
+            input: Port::Notes,
+        };
+        assert!(notes.is_valid(&nodes));
+        // Notes do not drive a knob or a shape pin, and audio does not feed a notes pin.
+        let knob = Port::Knob(crate::nodes::KnobId::Cutoff);
+        assert!(!Connection {
+            to: 2,
+            input: knob,
+            ..notes
+        }
+        .is_valid(&nodes));
+        assert!(!Connection {
+            to: 1,
+            input: Port::Shape,
+            ..notes
+        }
+        .is_valid(&nodes));
+        let audio = Connection {
+            from: 1,
+            out: Port::Audio,
+            to: 1,
+            input: Port::Notes,
+        };
+        assert!(!Connection { from: 2, ..audio }.is_valid(&nodes));
+        // A controller pin does not feed a notes pin either.
+        let controller = Connection {
+            out: Port::Midi(crate::nodes::input::MidiSource::ModWheel),
+            ..notes
+        };
+        assert!(!controller.is_valid(&nodes));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::dsp::gain::db_to_linear;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
+use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::output::MAX_SLOTS;
 use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES};
 use crate::patch::stage::MAX_STAGES;
@@ -57,6 +58,8 @@ pub struct Engine {
     transport: Transport,
     /// The MIDI sources' latest values, from 0.0 to 1.0.
     midi_levels: [f32; MIDI_SOURCE_COUNT],
+    /// The macro knobs' latest values, from 0.0 to 1.0.
+    macro_levels: [f32; MACRO_COUNT],
     /// Each envelope node's times for the block, with the bypass copy last.
     env_configs: [AdsrConfig; ENV_SLOTS],
     /// The level of each envelope's newest voice. Knobs that no single voice owns read these.
@@ -97,6 +100,7 @@ impl Engine {
             lfos: Lfos::new(),
             transport: Transport::default(),
             midi_levels: MidiSource::ALL.map(|source| source.default_level()),
+            macro_levels: [0.0; MACRO_COUNT],
             env_configs: [AdsrConfig::BYPASS; ENV_SLOTS],
             env_levels: [0.0; MAX_ENVELOPES],
             envelopes_active: false,
@@ -141,7 +145,13 @@ impl Engine {
             envelope: self.env_levels,
             lfo: self.lfos.levels(),
             midi: self.midi_levels,
+            macros: self.macro_levels,
         }
+    }
+
+    /// Sets the macro knobs' levels, from the host parameters. The plugin calls it each sample.
+    pub fn set_macros(&mut self, levels: [f32; MACRO_COUNT]) {
+        self.macro_levels = levels;
     }
 
     /// The notes with a voice sounding, as two 64-bit words.
@@ -331,6 +341,7 @@ impl Engine {
                 tables: &self.tables,
                 lfo_levels: levels.lfo,
                 midi_levels: levels.midi,
+                macro_levels: levels.macros,
                 envelopes_active: self.envelopes_active,
                 sample_rate: self.sample_rate,
                 smooth: self.smooth,

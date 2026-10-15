@@ -1,8 +1,7 @@
 //! The output node. Each connected slot plays its own chain and has its own gain, and an empty
-//! slot pin sits below the last used one. The master gain, glide, and the mono switch apply to
-//! the whole output.
+//! slot pin sits below the last used one. The master gain applies to the whole output.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Output;
 
@@ -23,8 +22,8 @@ impl NodeBehavior for Output {
         "Output"
     }
 
-    /// A pin for each shown slot, with a gain knob beside each connected one. The glide and the
-    /// master gain follow. The master gain is last.
+    /// A pin for each shown slot, with a gain knob beside each connected one. The master gain is
+    /// last.
     fn rows(&self, node: &FlodeNode) -> Vec<Row> {
         let mut rows = Vec::new();
         for slot in 0..node.slots {
@@ -34,18 +33,11 @@ impl NodeBehavior for Output {
             }
             rows.push(row);
         }
-        rows.push(Row::driven_knob(KnobId::Glide));
         rows.push(Row::driven_knob(KnobId::Gain));
-        rows.push(Row::control(Control::Switch(0)));
-        rows.push(Row::control(Control::Switch(1)));
         rows
     }
 
     fn audio_in(&self) -> bool {
         true
-    }
-
-    fn switch_labels(&self) -> &'static [&'static str] {
-        &["Mono", "Always"]
     }
 }

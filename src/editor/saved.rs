@@ -4,13 +4,20 @@ use crate::dsp::svf::FilterType;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
-use crate::nodes::{FlodeNode, NodeKind, Port};
+use crate::nodes::{FlodeNode, NodeKind, Port, NODE_WIDTH};
 use nih_plug_iced::Point;
 use serde::{Deserialize, Serialize};
+
+/// The version of the save format this build writes. A graph without one is from before
+/// oscillators took their notes from a MIDI input node.
+pub(super) const SAVE_VERSION: u32 = 1;
 
 /// The node graph as saved with the project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedGraph {
+    /// Which save format this is. Missing in the oldest saves, which read as 0.
+    #[serde(default)]
+    pub(super) version: u32,
     pub(super) nodes: Vec<SavedNode>,
     /// Audio connections as (output node index, input node index). Graphs saved before ports
     /// existed use this. New saves leave it empty.
@@ -132,6 +139,55 @@ impl SavedNode {
             node.set_value(id, value);
         }
         node
+    }
+}
+
+/// Brings a save from before the MIDI input node up to date. Every oscillator is wired to a MIDI
+/// input, which is the first one in the graph or a new one left of the other nodes. That input
+/// takes the glide and mono settings the output node used to hold, so the patch sounds the same.
+pub(super) fn migrate_notes(nodes: &mut Vec<FlodeNode>, links: &mut Vec<Connection>) {
+    let oscillators: Vec<usize> = (0..nodes.len())
+        .filter(|&index| nodes[index].kind == NodeKind::Oscillator)
+        .collect();
+    if oscillators.is_empty() {
+        return;
+    }
+    let input = match nodes.iter().position(|n| n.kind == NodeKind::Input) {
+        Some(index) => index,
+        None => {
+            let left = nodes
+                .iter()
+                .map(|n| n.position.x)
+                .fold(f32::INFINITY, f32::min);
+            let top = nodes
+                .iter()
+                .map(|n| n.position.y)
+                .fold(f32::INFINITY, f32::min);
+            let x = (left - NODE_WIDTH - 48.0).max(0.0);
+            nodes.push(FlodeNode::new(NodeKind::Input, Point::new(x, top)));
+            nodes.len() - 1
+        }
+    };
+    if let Some(output) = nodes.iter().position(|n| n.kind == NodeKind::Output) {
+        let glide = nodes[output].value(KnobId::Glide);
+        let (mono, always) = (nodes[output].switch(0), nodes[output].switch(1));
+        nodes[input].set_value(KnobId::Glide, glide);
+        nodes[input].set_switch(0, mono);
+        nodes[input].set_switch(1, always);
+        nodes[output].switches.clear();
+    }
+    for oscillator in oscillators {
+        if !links
+            .iter()
+            .any(|c| c.to == oscillator && c.input == Port::Notes)
+        {
+            links.push(Connection {
+                from: input,
+                out: Port::Notes,
+                to: oscillator,
+                input: Port::Notes,
+            });
+        }
     }
 }
 

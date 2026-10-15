@@ -51,8 +51,10 @@ pub(super) const TEXT_COLOR: Color = Color::WHITE;
 pub(super) const DIM_TEXT_COLOR: Color = Color::from_rgb(0.55, 0.55, 0.58);
 pub(super) const TERMINAL_COLOR: Color = Color::from_rgb(0.75, 0.75, 0.80);
 pub(super) const WIRE_COLOR: Color = Color::from_rgb(0.85, 0.85, 0.90);
-/// Every non-audio connection is this green.
+/// Every control connection is this green.
 pub(super) const CONTROL_COLOR: Color = Color::from_rgb(0.35, 0.85, 0.45);
+/// Notes, the MIDI signal an input node sends to an oscillator, are purple.
+pub(super) const NOTES_COLOR: Color = Color::from_rgb(0.70, 0.48, 0.95);
 pub(super) const PENDING_WIRE_COLOR: Color = Color::from_rgb(0.50, 0.50, 0.55);
 pub(super) const PILL_COLOR: Color = Color::from_rgb(0.18, 0.18, 0.21);
 pub(super) const PILL_DIVIDER_COLOR: Color = Color::from_rgb(0.40, 0.40, 0.45);

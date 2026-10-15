@@ -7,6 +7,7 @@ use crate::dsp::frame::Frame;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::MIDI_SOURCE_COUNT;
+use crate::nodes::macros::MACRO_COUNT;
 use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES, MAX_LFOS};
 use crate::patch::stage::{LaneGraph, MAX_STAGES};
 
@@ -15,6 +16,7 @@ pub struct RenderEnv<'a> {
     pub tables: &'a WaveTables,
     pub lfo_levels: [f32; MAX_LFOS],
     pub midi_levels: [f32; MIDI_SOURCE_COUNT],
+    pub macro_levels: [f32; MACRO_COUNT],
     /// True while any envelope node is in the patch.
     pub envelopes_active: bool,
     pub sample_rate: f32,
@@ -99,6 +101,7 @@ impl Voice {
             envelope: self.env_levels(),
             lfo: env.lfo_levels,
             midi: env.midi_levels,
+            macros: env.macro_levels,
         };
         let mut tick = Tick {
             levels: &levels,

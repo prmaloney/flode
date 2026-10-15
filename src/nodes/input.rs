@@ -1,8 +1,9 @@
-//! The input node. It sends MIDI as control signals: the note, its velocity, the pitch bend, the
-//! mod wheel, and channel pressure. Each one is an output pin that can drive knobs and maps. It
-//! makes no sound.
+//! The MIDI input node. Its notes pin feeds the oscillators, and the node holds the voice
+//! settings: mono and glide. It also sends MIDI as control signals: the note, its velocity, the
+//! pitch bend, the mod wheel, and channel pressure. Each one is an output pin that can drive knobs
+//! and maps. It makes no sound.
 
-use super::{FlodeNode, NodeBehavior, Port, Row};
+use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row, Section};
 use serde::{Deserialize, Serialize};
 
 pub struct Input;
@@ -62,14 +63,72 @@ pub const MIDI_SOURCE_COUNT: usize = 5;
 
 impl NodeBehavior for Input {
     fn title(&self) -> &'static str {
-        "Input"
+        "MIDI Input"
     }
 
-    /// One output pin for each source, top to bottom.
+    /// The notes pin is first, and an oscillator plays what it is wired to. The voice settings
+    /// follow: glide, mono, and glide on every note. The five controllers fold away under their
+    /// own header, since their pins are all most patches use.
     fn rows(&self, _node: &FlodeNode) -> Vec<Row> {
-        MidiSource::ALL
+        let mut rows = vec![
+            Row::default().with_output(Port::Notes),
+            Row::driven_knob(KnobId::Glide),
+            Row::control(Control::Switch(0)),
+            Row::control(Control::Switch(1)),
+            Row::section(0),
+        ];
+        rows.extend(
+            MidiSource::ALL
+                .iter()
+                .map(|&source| Row::default().with_output(Port::Midi(source))),
+        );
+        rows
+    }
+
+    fn sections(&self) -> &'static [Section] {
+        &[Section {
+            title: "Controllers",
+            collapsed: true,
+        }]
+    }
+
+    fn switch_labels(&self) -> &'static [&'static str] {
+        &["Mono", "Always"]
+    }
+}
+
+/// True if the node plays one voice at a time.
+pub fn mono(node: &FlodeNode) -> bool {
+    node.switch(0)
+}
+
+/// True if the node glides on every mono note, not only while another note is still held.
+pub fn glide_always(node: &FlodeNode) -> bool {
+    node.switch(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::NodeKind;
+    use nih_plug_iced::Point;
+
+    #[test]
+    fn the_notes_pin_is_the_first_output() {
+        let node = FlodeNode::new(NodeKind::Input, Point::new(0.0, 0.0));
+        assert_eq!(node.output_ports()[0], Port::Notes);
+        assert_eq!(node.output_ports().len(), 1 + MIDI_SOURCE_COUNT);
+    }
+
+    #[test]
+    fn the_voice_settings_live_here() {
+        let mut node = FlodeNode::new(NodeKind::Input, Point::new(0.0, 0.0));
+        assert!(!mono(&node) && !glide_always(&node));
+        node.set_switch(0, true);
+        assert!(mono(&node));
+        assert!(node
+            .rows()
             .iter()
-            .map(|&source| Row::default().with_output(Port::Midi(source)))
-            .collect()
+            .any(|row| row.knob == Some(KnobId::Glide)));
     }
 }

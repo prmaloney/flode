@@ -4,7 +4,7 @@ use crate::editor::knob::{self};
 use crate::editor::piano::{self};
 use crate::nodes::map;
 use crate::nodes::{
-    Category, FlodeNode, Port, RowShape, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
+    Category, FlodeNode, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
     ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
 };
 use crate::patch::control::ControlLevels;
@@ -92,10 +92,10 @@ pub(super) fn draw_editor(
 
         if let Interaction::Wiring { from, out, cursor } = graph.interaction {
             if let Some(start) = graph.nodes[from].output_point(out) {
-                let color = if out == Port::Audio {
-                    PENDING_WIRE_COLOR
-                } else {
-                    CONTROL_COLOR
+                let color = match out.signal() {
+                    Signal::Audio => PENDING_WIRE_COLOR,
+                    Signal::Control => CONTROL_COLOR,
+                    Signal::Notes => NOTES_COLOR,
                 };
                 draw_curve(frame, &wire_curve(start, cursor), color, 2.0);
             }
@@ -149,18 +149,18 @@ pub(super) fn draw_editor(
     });
 
     if let Some(category) = graph.category_menu {
-        draw_category_list(&mut frame, bounds, category);
+        draw_category_list(&mut frame, bounds, category, graph);
     }
 
     vec![frame.into_geometry()]
 }
 
-/// Audio is grey. Every other signal is green.
+/// Audio is grey, control is green, and notes are purple.
 pub(super) fn wire_color(out: Port) -> Color {
-    if out == Port::Audio {
-        WIRE_COLOR
-    } else {
-        CONTROL_COLOR
+    match out.signal() {
+        Signal::Audio => WIRE_COLOR,
+        Signal::Control => CONTROL_COLOR,
+        Signal::Notes => NOTES_COLOR,
     }
 }
 
@@ -334,8 +334,9 @@ pub(super) fn draw_node(
         if let Some(port) = row.input {
             let point = Point::new(left, y);
             draw_pin_dot(frame, point, port);
-            // A pin with no knob to name it draws its own label, such as "Shape" or "A".
-            if row.knob.is_none() {
+            // A pin with no knob to name it draws its own label, such as "Shape" or "A". A pin on
+            // a dropdown's row has no room for one.
+            if row.knob.is_none() && row.control.is_none() {
                 if let Some(label) = port.input_label() {
                     draw_text(
                         frame,
@@ -514,25 +515,26 @@ pub(super) fn draw_collapse_arrow(frame: &mut Frame, node: &FlodeNode) {
     frame.fill(&path, TEXT_COLOR);
 }
 
-/// A pin without its label. Control pins are green and audio pins are grey.
+/// A pin without its label. Audio pins are grey and big, control pins are green, and notes pins
+/// are purple. The last two are the smaller size.
 pub(super) fn draw_pin_dot(frame: &mut Frame, point: Point, port: Port) {
-    if port.is_audio() {
-        frame.fill(&Path::circle(point, PIN_RADIUS), TERMINAL_COLOR);
-    } else {
-        frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), CONTROL_COLOR);
+    match port.signal() {
+        Signal::Audio => frame.fill(&Path::circle(point, PIN_RADIUS), TERMINAL_COLOR),
+        Signal::Control => frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), CONTROL_COLOR),
+        Signal::Notes => frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), NOTES_COLOR),
     }
 }
 
 /// A pin of a folded section or node: the same colors as an ordinary pin, but smaller, so a tight
 /// stack of them does not run together.
 pub(super) fn draw_packed_pin_dot(frame: &mut Frame, point: Point, port: Port) {
-    if port.is_audio() {
-        frame.fill(
+    match port.signal() {
+        Signal::Audio => frame.fill(
             &Path::circle(point, PACKED_PIN_RADIUS + 0.5),
             TERMINAL_COLOR,
-        );
-    } else {
-        frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), CONTROL_COLOR);
+        ),
+        Signal::Control => frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), CONTROL_COLOR),
+        Signal::Notes => frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), NOTES_COLOR),
     }
 }
 
@@ -870,7 +872,12 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle) {
 
 /// The list under an open category. Its rows are the category's node kinds, or a note when the
 /// category has none yet.
-pub(super) fn draw_category_list(frame: &mut Frame, bounds: Rectangle, category: Category) {
+pub(super) fn draw_category_list(
+    frame: &mut Frame,
+    bounds: Rectangle,
+    category: Category,
+    graph: &Graph,
+) {
     let list = category_list_bounds(bounds, category);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
 
@@ -880,13 +887,18 @@ pub(super) fn draw_category_list(frame: &mut Frame, bounds: Rectangle, category:
         category.kinds().iter().map(|kind| kind.title()).collect()
     };
     for (row, label) in labels.iter().enumerate() {
+        // A kind that is one per graph is dimmed while the graph has one.
+        let available = category
+            .kinds()
+            .get(row)
+            .is_none_or(|&kind| graph.can_add(kind));
         frame.fill_text(Text {
             content: label.to_string(),
             position: Point::new(
                 list.x + 12.0,
                 list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
             ),
-            color: if category.kinds().is_empty() {
+            color: if category.kinds().is_empty() || !available {
                 DIM_TEXT_COLOR
             } else {
                 TEXT_COLOR

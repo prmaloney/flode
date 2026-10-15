@@ -3,6 +3,7 @@
 use crate::editor::piano::Piano;
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
+use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::output::MAX_SLOTS;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
@@ -50,6 +51,17 @@ pub(super) enum Interaction {
     },
 }
 
+/// A change to a macro knob that the editor has to pass to the host, since the macro knobs are host
+/// parameters. The index is the macro's, from 0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum MacroEdit {
+    /// A drag starts. The host groups the changes until the drag ends.
+    Begin(usize),
+    /// The knob is at this normalized value.
+    Set(usize, f32),
+    End(usize),
+}
+
 /// Graph state that persists between frames.
 pub struct Graph {
     pub(super) nodes: Vec<FlodeNode>,
@@ -75,6 +87,8 @@ pub struct Graph {
     /// The key of the shortcut that last ran, while it is still held. Holding a key repeats its
     /// press, and a shortcut runs once per press.
     pub(super) shortcut_held: Option<KeyCode>,
+    /// Changes to macro knobs the editor has not yet passed to the host, oldest first.
+    pub(super) macro_edits: Vec<MacroEdit>,
 }
 
 /// The part of a dropdown under the cursor.
@@ -94,21 +108,36 @@ pub(super) enum Hover {
 /// the default 1024 px editor, with a 24 px margin.
 /// The default graph's envelope sits at the left edge, with the oscillator it shapes to its right.
 pub(super) const DEFAULT_ENVELOPE_X: f32 = 24.0;
+/// The space between the default graph's two stacked nodes.
+const DEFAULT_GAP: f32 = 16.0;
 pub(super) const DEFAULT_OSC_X: f32 = DEFAULT_ENVELOPE_X + NODE_WIDTH + 48.0;
 pub(super) const DEFAULT_OUTPUT_X: f32 = 1024.0 - 24.0 - NODE_WIDTH;
 
 /// The graph a new instance starts with: an oscillator, wired to the output, with an envelope
-/// shaping its amplitude. The oscillator is node 0 and the output is node 1, and the envelope is
-/// node 2.
+/// shaping its amplitude and a MIDI input feeding it notes. The oscillator is node 0 and the
+/// output is node 1, the envelope is node 2, and the MIDI input is node 3. The MIDI input is at
+/// the left edge, with the envelope under it.
 impl Default for Graph {
     fn default() -> Self {
+        let input = FlodeNode::new(NodeKind::Input, Point::new(DEFAULT_ENVELOPE_X, 80.0));
+        let envelope_y = 80.0 + input.height() + DEFAULT_GAP;
         let mut graph = Self::with(
             vec![
                 FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
                 FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
-                FlodeNode::new(NodeKind::Envelope, Point::new(DEFAULT_ENVELOPE_X, 80.0)),
+                FlodeNode::new(
+                    NodeKind::Envelope,
+                    Point::new(DEFAULT_ENVELOPE_X, envelope_y),
+                ),
+                input,
             ],
             vec![
+                Connection {
+                    from: 3,
+                    out: Port::Notes,
+                    to: 0,
+                    input: Port::Notes,
+                },
                 Connection {
                     from: 0,
                     out: Port::Audio,
@@ -166,6 +195,51 @@ impl Graph {
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
             shortcut_held: None,
+            macro_edits: Vec::new(),
+        }
+    }
+
+    /// Which macro a knob on a node is, or None for any other knob.
+    fn macro_of(&self, node: usize, id: KnobId) -> Option<usize> {
+        let is_macro_node = self.nodes.get(node)?.kind == NodeKind::Macro;
+        id.macro_index().filter(|_| is_macro_node)
+    }
+
+    /// Notes that a drag of a macro knob started. Any other knob is ignored.
+    pub(super) fn macro_begin(&mut self, node: usize, id: KnobId) {
+        if let Some(index) = self.macro_of(node, id) {
+            self.macro_edits.push(MacroEdit::Begin(index));
+        }
+    }
+
+    /// Notes the macro knob's current value, for the host. Any other knob is ignored.
+    pub(super) fn macro_set(&mut self, node: usize, id: KnobId) {
+        if let Some(index) = self.macro_of(node, id) {
+            let value = self.nodes[node].value(id);
+            self.macro_edits.push(MacroEdit::Set(index, value));
+        }
+    }
+
+    /// Notes that a drag of a macro knob ended. Any other knob is ignored.
+    pub(super) fn macro_end(&mut self, node: usize, id: KnobId) {
+        if let Some(index) = self.macro_of(node, id) {
+            self.macro_edits.push(MacroEdit::End(index));
+        }
+    }
+
+    /// Shows the host's macro values on the macro node's knobs. The knob being dragged keeps the
+    /// value under the mouse.
+    pub(super) fn show_macros(&mut self, values: [f32; MACRO_COUNT]) {
+        let dragged = match self.interaction {
+            Interaction::Knob { id, .. } => Some(id),
+            _ => None,
+        };
+        for node in self.nodes.iter_mut().filter(|n| n.kind == NodeKind::Macro) {
+            for (&id, &value) in KnobId::MACROS.iter().zip(&values) {
+                if dragged != Some(id) {
+                    node.set_value(id, value);
+                }
+            }
         }
     }
 
@@ -309,10 +383,15 @@ impl Graph {
         let mut nodes = nodes;
         show_slots(&mut nodes, &links);
         // Knob links name a node's own knobs. Wires drop out if their pins are gone.
-        let connections = links
+        let mut connections: Vec<Connection> = links
             .into_iter()
             .filter(|link| link.is_valid(&nodes))
             .collect();
+        // Oscillators used to play every note. They now play the notes wired into them, so an
+        // older save gets a MIDI input wired to each one, and keeps its glide and mono settings.
+        if saved.version < SAVE_VERSION {
+            migrate_notes(&mut nodes, &mut connections);
+        }
         let mut graph = Self::with(nodes, connections);
         graph.refresh_slots();
         graph
@@ -320,6 +399,7 @@ impl Graph {
 
     pub fn to_saved(&self) -> SavedGraph {
         SavedGraph {
+            version: SAVE_VERSION,
             nodes: self.nodes.iter().map(SavedNode::new).collect(),
             connections: Vec::new(),
             links: self.connections.clone(),
@@ -437,6 +517,12 @@ impl Graph {
             .retain(|c| !(c.to == to && c.input == input));
         self.connections.push(link);
         self.refresh_slots();
+    }
+
+    /// True if a node of `kind` may be added. A kind that is one per graph, such as the output and
+    /// the macro node, can't be added while the graph has one.
+    pub(super) fn can_add(&self, kind: NodeKind) -> bool {
+        !kind.is_unique() || !self.nodes.iter().any(|node| node.kind == kind)
     }
 
     /// Adds a node and selects it. Returns its index.

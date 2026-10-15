@@ -11,24 +11,50 @@ use nih_plug_iced::{Point, Rectangle};
 
 use super::{curve::*, draw::*, graph::*, menus::*, saved::*};
 
-/// The smallest working graph: an oscillator at node 0, wired to the output at node 1. Most tests
-/// want exactly this, so they start from it and add what they need. The default graph a new
-/// instance loads has an envelope as well, and its own tests are in `default_graph_tests`.
+/// The smallest working graph: an oscillator at node 0, wired to the output at node 1, with a MIDI
+/// input at node 2 feeding it notes. Most tests want exactly this, so they start from it and add
+/// what they need. The default graph a new instance loads has an envelope as well, and its own
+/// tests are in `default_graph_tests`.
 fn minimal_graph() -> Graph {
     let mut graph = Graph::with(
         vec![
             FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
             FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
+            FlodeNode::new(NodeKind::Input, Point::new(0.0, 80.0)),
         ],
-        vec![Connection {
-            from: 0,
-            out: Port::Audio,
-            to: 1,
-            input: Port::Slot(0),
-        }],
+        vec![
+            Connection {
+                from: 0,
+                out: Port::Audio,
+                to: 1,
+                input: Port::Slot(0),
+            },
+            Connection {
+                from: 2,
+                out: Port::Notes,
+                to: 0,
+                input: Port::Notes,
+            },
+        ],
     );
     graph.refresh_slots();
     graph
+}
+
+/// The MIDI input node of a graph, which the helper below adds if there is none.
+fn midi_input(graph: &mut Graph) -> usize {
+    match graph.nodes.iter().position(|n| n.kind == NodeKind::Input) {
+        Some(index) => index,
+        None => graph.add_node(NodeKind::Input, Point::new(0.0, 0.0)),
+    }
+}
+
+/// Adds an oscillator that plays: its notes pin is wired to the graph's MIDI input.
+fn add_oscillator(graph: &mut Graph, position: Point) -> usize {
+    let input = midi_input(graph);
+    let oscillator = graph.add_node(NodeKind::Oscillator, position);
+    graph.connect(input, Port::Notes, oscillator, Port::Notes);
+    oscillator
 }
 
 /// The oscillator settings of the stage at `index` in a slot.
@@ -118,7 +144,7 @@ mod slot_tests {
     #[test]
     fn wiring_the_empty_pin_adds_a_slot() {
         let mut graph = minimal_graph();
-        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
+        let second = add_oscillator(&mut graph, Point::new(0.0, 200.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
         let output = &graph.nodes[1];
         assert_eq!(output.used, 2);
@@ -135,11 +161,12 @@ mod slot_tests {
     #[test]
     fn wires_into_later_output_slots_survive_saving() {
         let mut graph = minimal_graph();
-        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
-        let third = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 400.0));
+        let second = add_oscillator(&mut graph, Point::new(0.0, 200.0));
+        let third = add_oscillator(&mut graph, Point::new(0.0, 400.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
         graph.connect(third, Port::Audio, 1, Port::Slot(2));
-        assert_eq!(graph.connections.len(), 3);
+        // Three audio wires, and a notes wire for each oscillator.
+        assert_eq!(graph.connections.len(), 6);
 
         let loaded = Graph::from_saved(&graph.to_saved());
         assert_eq!(loaded.connections, graph.connections);
@@ -151,7 +178,7 @@ mod slot_tests {
     #[test]
     fn two_oscillators_keep_separate_knobs() {
         let mut graph = minimal_graph();
-        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 200.0));
+        let second = add_oscillator(&mut graph, Point::new(0.0, 200.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
 
         graph.nodes[0].set_value(KnobId::Detune, KnobId::Detune.to_normalized(60.0));
@@ -184,12 +211,14 @@ mod slot_tests {
             out_max: None,
         };
         let saved = SavedGraph {
+            version: 0,
             nodes: vec![node(NodeKind::Oscillator), node(NodeKind::Output)],
             connections: vec![(0, 1)],
             links: Vec::new(),
         };
         let graph = Graph::from_saved(&saved);
-        assert_eq!(graph.connections.len(), 1);
+        // The audio wire goes to the first slot, and the upgrade adds a notes wire.
+        assert_eq!(graph.connections.len(), 2);
         assert_eq!(graph.connections[0].input, Port::Slot(0));
         assert!(graph.patch().lanes[0].is_active());
     }
@@ -244,10 +273,10 @@ mod slot_tests {
         graph.insert_into(filter, 0);
         graph.refresh_slots();
 
-        assert_eq!(graph.connections.len(), 2);
+        assert_eq!(graph.connections.len(), 3);
         assert_eq!(graph.connections[0].to, filter);
-        assert_eq!(graph.connections[1].from, filter);
-        assert_eq!(graph.connections[1].input, Port::Slot(0));
+        assert_eq!(graph.connections[2].from, filter);
+        assert_eq!(graph.connections[2].input, Port::Slot(0));
         assert!(graph.patch().lanes[0]
             .stages
             .iter()
@@ -461,6 +490,7 @@ mod envelope_migration_tests {
             out_max: None,
         };
         let saved = SavedGraph {
+            version: 0,
             nodes: vec![
                 node(NodeKind::Oscillator, 0.0),
                 node(NodeKind::Envelope, 100.0),
@@ -503,8 +533,8 @@ mod mix_tests {
     fn chain() -> (Graph, usize, usize, usize) {
         let mut graph = minimal_graph();
         graph.connections.clear();
-        let a = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 0.0));
-        let b = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        let a = add_oscillator(&mut graph, Point::new(0.0, 0.0));
+        let b = add_oscillator(&mut graph, Point::new(0.0, 0.0));
         let mix = graph.add_node(NodeKind::Mix, Point::new(0.0, 0.0));
         graph.connect(a, Port::Audio, mix, Port::AudioIn(0));
         graph.connect(b, Port::Audio, mix, Port::AudioIn(1));
@@ -580,13 +610,14 @@ mod mix_tests {
         graph.insert_into(mix, 0);
         graph.refresh_slots();
 
-        assert_eq!(graph.connections.len(), 2);
+        // The notes wire stays, and the audio wire becomes two.
+        assert_eq!(graph.connections.len(), 3);
         assert_eq!(graph.connections[0].from, 0);
         assert_eq!(graph.connections[0].to, mix);
         assert_eq!(graph.connections[0].input, Port::AudioIn(0));
-        assert_eq!(graph.connections[1].from, mix);
-        assert_eq!(graph.connections[1].out, Port::Audio);
-        assert_eq!(graph.connections[1].input, Port::Slot(0));
+        assert_eq!(graph.connections[2].from, mix);
+        assert_eq!(graph.connections[2].out, Port::Audio);
+        assert_eq!(graph.connections[2].input, Port::Slot(0));
 
         // The oscillator feeds signal A, and signal B waits for a wire.
         let lane = graph.patch().lanes[0].clone();
@@ -653,13 +684,13 @@ mod layering_tests {
     #[test]
     fn the_selected_node_draws_last() {
         let mut graph = three_nodes();
-        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
         graph.selected = Some(0);
-        assert_eq!(graph.draw_order(), vec![1, 2, 0]);
+        assert_eq!(graph.draw_order(), vec![1, 2, 3, 0]);
         graph.selected = Some(1);
-        assert_eq!(graph.draw_order(), vec![0, 2, 1]);
+        assert_eq!(graph.draw_order(), vec![0, 2, 3, 1]);
         graph.selected = None;
-        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
     }
 
     /// A node being placed is on top too, and a stale selection never indexes past the nodes.
@@ -673,7 +704,7 @@ mod layering_tests {
         assert_eq!(graph.draw_order().last(), Some(&0));
         graph.interaction = Interaction::Idle;
         graph.selected = Some(99);
-        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
     }
 
     /// Where two nodes overlap, a press goes to the one on top, which is the selected one.
@@ -856,6 +887,7 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Envelope
                 | NodeKind::Lfo
                 | NodeKind::Input
+                | NodeKind::Macro
                 | NodeKind::Map => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
             };
@@ -923,7 +955,7 @@ mod bypass_and_duplicate_tests {
     #[test]
     fn a_bypassed_mix_plays_a_and_a_muted_source_is_silent() {
         let mut graph = minimal_graph();
-        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 300.0));
+        let second = add_oscillator(&mut graph, Point::new(0.0, 300.0));
         let mix = graph.add_node(NodeKind::Mix, Point::new(300.0, 300.0));
         let wire = graph.connections.iter().position(|c| c.to == 1).unwrap();
         graph.insert_into(mix, wire);
@@ -978,9 +1010,10 @@ mod bypass_and_duplicate_tests {
         graph.nodes[0].choose(0, 2);
         graph.nodes[0].toggle_bypass();
         let wires = graph.connections.len();
+        let count = graph.nodes.len();
 
         let copy = graph.duplicate_node(0).expect("an oscillator duplicates");
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), count + 1);
         assert_eq!(graph.nodes[copy].kind, NodeKind::Oscillator);
         assert_eq!(graph.nodes[copy].plain(KnobId::Unison), 5.0);
         assert_eq!(oscillator::waveform(&graph.nodes[copy]), Waveform::Square);
@@ -1011,9 +1044,28 @@ mod bypass_and_duplicate_tests {
     #[test]
     fn an_output_node_cannot_be_duplicated() {
         let mut graph = minimal_graph();
+        let count = graph.nodes.len();
         assert_eq!(graph.duplicate_node(1), None);
-        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.nodes.len(), count);
         assert_eq!(graph.duplicate_node(9), None);
+    }
+
+    /// The macro node is one per graph too. It can't be copied or added a second time.
+    #[test]
+    fn a_macro_node_is_one_per_graph() {
+        let mut graph = minimal_graph();
+        assert!(graph.can_add(NodeKind::Macro));
+        let macros = graph.add_node(NodeKind::Macro, Point::new(0.0, 0.0));
+        assert!(!graph.can_add(NodeKind::Macro));
+        assert!(!graph.can_add(NodeKind::Output));
+        assert!(graph.can_add(NodeKind::Oscillator));
+        assert!(graph.can_add(NodeKind::Input));
+        let count = graph.nodes.len();
+        assert_eq!(graph.duplicate_node(macros), None);
+        assert_eq!(graph.nodes.len(), count);
+        // Deleting it makes room for another.
+        graph.delete_node(macros);
+        assert!(graph.can_add(NodeKind::Macro));
     }
 
     // The right-click menu.
@@ -1110,16 +1162,16 @@ mod bypass_and_duplicate_tests {
         // Duplicate leaves the copy in the placing state, following the cursor.
         let mut graph = minimal_graph();
         click_entry(&mut graph, 0);
-        assert_eq!(graph.nodes.len(), 3);
-        assert_eq!(graph.selected, Some(2));
+        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.selected, Some(3));
         assert!(matches!(
             graph.interaction,
-            Interaction::Placing { node: 2, .. }
+            Interaction::Placing { node: 3, .. }
         ));
 
         let mut graph = minimal_graph();
         click_entry(&mut graph, 2);
-        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.nodes[0].kind, NodeKind::Output);
     }
 
@@ -1184,8 +1236,8 @@ mod bypass_and_duplicate_tests {
         let mut editor = editor(&mut graph);
         let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(matches!(message, Some(Message::GraphChanged)));
-        assert_eq!(editor.graph.nodes.len(), 3);
-        assert_eq!(editor.graph.selected, Some(2));
+        assert_eq!(editor.graph.nodes.len(), 4);
+        assert_eq!(editor.graph.selected, Some(3));
     }
 
     /// The copy is placing: it sits centred under the cursor, follows it, and the next press sets
@@ -1203,15 +1255,15 @@ mod bypass_and_duplicate_tests {
         press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(matches!(
             editor.graph.interaction,
-            Interaction::Placing { node: 2, .. }
+            Interaction::Placing { node: 3, .. }
         ));
-        let at = editor.graph.nodes[2].position;
+        let at = editor.graph.nodes[3].position;
         assert_eq!((at.x, at.y), (first.x - grab.x, first.y - grab.y));
 
         // It follows the cursor.
         let second = Point::new(600.0, 250.0);
         move_cursor(&mut editor, second);
-        let at = editor.graph.nodes[2].position;
+        let at = editor.graph.nodes[3].position;
         assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
 
         // The next press sets it down, and it stays when the cursor moves on.
@@ -1222,7 +1274,7 @@ mod bypass_and_duplicate_tests {
         );
         assert!(matches!(editor.graph.interaction, Interaction::Idle));
         move_cursor(&mut editor, Point::new(100.0, 100.0));
-        let at = editor.graph.nodes[2].position;
+        let at = editor.graph.nodes[3].position;
         assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
     }
 
@@ -1236,7 +1288,7 @@ mod bypass_and_duplicate_tests {
         release(&mut editor, KeyCode::D);
         let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(message.is_none());
-        assert_eq!(editor.graph.nodes.len(), 3);
+        assert_eq!(editor.graph.nodes.len(), 4);
     }
 
     /// A plain D still plays a note, and does not copy anything.
@@ -1250,7 +1302,7 @@ mod bypass_and_duplicate_tests {
             message,
             Some(Message::Note(PianoEvent::NoteOn { .. }))
         ));
-        assert_eq!(editor.graph.nodes.len(), 2);
+        assert_eq!(editor.graph.nodes.len(), 3);
     }
 
     /// Shortcuts that include Control or Command are left to the host.
@@ -1269,16 +1321,27 @@ mod bypass_and_duplicate_tests {
 mod default_graph_tests {
     use super::*;
 
-    /// A new instance starts with an oscillator and an output, wired together, and an envelope
-    /// wired to the oscillator's shape pin.
+    /// A new instance starts with an oscillator and an output, wired together, an envelope wired
+    /// to the oscillator's shape pin, and a MIDI input wired to its notes pin.
     #[test]
-    fn the_default_graph_has_an_oscillator_an_output_and_an_envelope() {
+    fn the_default_graph_has_an_oscillator_an_output_an_envelope_and_a_midi_input() {
         let graph = Graph::default();
         let kinds: Vec<NodeKind> = graph.nodes.iter().map(|n| n.kind).collect();
         assert_eq!(
             kinds,
-            [NodeKind::Oscillator, NodeKind::Output, NodeKind::Envelope]
+            [
+                NodeKind::Oscillator,
+                NodeKind::Output,
+                NodeKind::Envelope,
+                NodeKind::Input
+            ]
         );
+        assert!(graph.connections.contains(&Connection {
+            from: 3,
+            out: Port::Notes,
+            to: 0,
+            input: Port::Notes,
+        }));
         assert!(graph.connections.contains(&Connection {
             from: 0,
             out: Port::Audio,
@@ -1291,7 +1354,7 @@ mod default_graph_tests {
             to: 0,
             input: Port::Shape,
         }));
-        assert_eq!(graph.connections.len(), 2);
+        assert_eq!(graph.connections.len(), 3);
     }
 
     /// Every wire of the default graph is valid, so none is dropped on a save and load.
@@ -1301,7 +1364,7 @@ mod default_graph_tests {
         assert!(graph.connections.iter().all(|c| c.is_valid(&graph.nodes)));
         let loaded = Graph::from_saved(&graph.to_saved());
         assert_eq!(loaded.connections, graph.connections);
-        assert_eq!(loaded.nodes.len(), 3);
+        assert_eq!(loaded.nodes.len(), 4);
     }
 
     /// The envelope reaches the patch, and the oscillator takes its amplitude from it.
@@ -1315,23 +1378,29 @@ mod default_graph_tests {
         assert_eq!(osc_params(lane, 0).envelope, Some(0));
     }
 
-    /// The nodes sit side by side without overlapping, envelope on the left, inside the default
-    /// window.
+    /// The nodes do not overlap, and all sit inside the default window above the key strip. The
+    /// MIDI input and the envelope are stacked on the left, with the oscillator to their right.
     #[test]
     fn the_default_nodes_do_not_overlap() {
         let graph = Graph::default();
         let bounds: Vec<Rectangle> = graph.nodes.iter().map(|n| n.bounds()).collect();
+        let strip_top = 712.0 - crate::editor::piano::STRIP_HEIGHT;
         for (i, a) in bounds.iter().enumerate() {
             assert!(
                 a.x >= 0.0 && a.x + a.width <= 1024.0,
                 "node {i} is off screen"
             );
+            assert!(a.y + a.height <= strip_top, "node {i} reaches the keys");
             for b in &bounds[i + 1..] {
-                let apart = a.x + a.width <= b.x || b.x + b.width <= a.x;
+                let apart = a.x + a.width <= b.x
+                    || b.x + b.width <= a.x
+                    || a.y + a.height <= b.y
+                    || b.y + b.height <= a.y;
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
         assert!(graph.nodes[2].position.x < graph.nodes[0].position.x);
+        assert!(graph.nodes[3].position.x < graph.nodes[0].position.x);
     }
 
     /// The default graph plays: a note makes sound, and it ends after release.
@@ -1741,5 +1810,238 @@ mod section_tests {
             graph.nodes[copy].sections_collapsed,
             graph.nodes[0].sections_collapsed
         );
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+
+    /// A save from before the MIDI input node: the same graph, written without a version.
+    fn old_save(graph: &Graph) -> SavedGraph {
+        let mut json = serde_json::to_value(graph.to_saved()).unwrap();
+        json.as_object_mut().unwrap().remove("version");
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn has_notes_wire(graph: &Graph, to: usize) -> bool {
+        graph
+            .connections
+            .iter()
+            .any(|c| c.out == Port::Notes && c.to == to && c.input == Port::Notes)
+    }
+
+    /// An oscillator plays the notes wired into it, so a notes wire only joins a MIDI input to an
+    /// oscillator.
+    #[test]
+    fn a_notes_wire_joins_an_input_to_an_oscillator() {
+        let mut graph = minimal_graph();
+        let filter = graph.add_node(NodeKind::Filter, Point::new(0.0, 300.0));
+        let wires = graph.connections.len();
+        graph.connect(2, Port::Notes, filter, Port::Audio);
+        graph.connect(2, Port::Notes, filter, Port::Knob(KnobId::Cutoff));
+        assert_eq!(graph.connections.len(), wires);
+        // Audio does not feed a notes pin either.
+        graph.connect(filter, Port::Audio, 0, Port::Notes);
+        assert_eq!(graph.connections.len(), wires);
+        assert!(has_notes_wire(&graph, 0));
+    }
+
+    #[test]
+    fn an_oscillator_with_no_notes_wire_is_silent_and_stays_so_after_saving() {
+        let mut graph = minimal_graph();
+        graph.disconnect_input(0, Port::Notes);
+        assert!(!graph.patch().lanes[0].is_active());
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert!(!has_notes_wire(&loaded, 0));
+        assert!(!loaded.patch().lanes[0].is_active());
+    }
+
+    #[test]
+    fn the_notes_wire_survives_saving() {
+        let graph = minimal_graph();
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.connections, graph.connections);
+        assert!(loaded.patch().lanes[0].is_active());
+    }
+
+    /// A save with no MIDI input gets one, wired to the oscillator, and it takes the glide and
+    /// mono settings the output node held, so the patch sounds the same.
+    #[test]
+    fn an_old_save_gets_a_midi_input_with_its_voice_settings() {
+        let mut graph = minimal_graph();
+        graph.delete_node(2);
+        graph.nodes[1].set_switch(0, true);
+        graph.nodes[1].set_switch(1, true);
+        graph.nodes[1].set_value(KnobId::Glide, KnobId::Glide.to_normalized(0.4));
+
+        let loaded = Graph::from_saved(&old_save(&graph));
+        let input = loaded
+            .nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Input)
+            .expect("an input is added");
+        assert!(has_notes_wire(&loaded, 0));
+        assert!(loaded.nodes[input].position.x < loaded.nodes[0].position.x);
+        let patch = loaded.patch();
+        assert!(patch.lanes[0].is_active());
+        assert!(patch.globals.mono && patch.globals.glide_always);
+        let glide = patch.globals.glide.plain(&ControlLevels::default());
+        assert!((glide - 0.4).abs() < 1e-3);
+    }
+
+    /// A save that already has an input uses it, and does not add another.
+    #[test]
+    fn an_old_save_with_an_input_reuses_it() {
+        let mut graph = minimal_graph();
+        graph.disconnect_input(0, Port::Notes);
+        let loaded = Graph::from_saved(&old_save(&graph));
+        assert_eq!(loaded.nodes.len(), 3);
+        assert!(has_notes_wire(&loaded, 0));
+    }
+
+    /// The upgrade runs once. A saved version 1 graph with an unwired oscillator stays unwired.
+    #[test]
+    fn the_upgrade_does_not_run_on_a_current_save() {
+        let mut graph = minimal_graph();
+        graph.disconnect_input(0, Port::Notes);
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.nodes.len(), 3);
+        assert!(!has_notes_wire(&loaded, 0));
+    }
+
+    /// A pre-upgrade save with an oscillator wired to a mix, two oscillators in all, wires both.
+    #[test]
+    fn the_upgrade_wires_every_oscillator() {
+        let mut graph = minimal_graph();
+        let second = add_oscillator(&mut graph, Point::new(0.0, 300.0));
+        graph.connect(second, Port::Audio, 1, Port::Slot(1));
+        graph.connections.retain(|c| c.out != Port::Notes);
+        let loaded = Graph::from_saved(&old_save(&graph));
+        assert!(has_notes_wire(&loaded, 0));
+        assert!(has_notes_wire(&loaded, second));
+        assert!(loaded.patch().lanes[1].is_active());
+    }
+}
+
+#[cfg(test)]
+mod macro_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    /// The minimal graph with a macro node at the far right, and the node's index.
+    fn graph_with_macros() -> (Graph, usize) {
+        let mut graph = minimal_graph();
+        let node = graph.add_node(NodeKind::Macro, Point::new(600.0, 100.0));
+        (graph, node)
+    }
+
+    fn mouse_event(editor: &mut NodeEditor, event: mouse::Event, at: Point) {
+        editor.update(Event::Mouse(event), bounds(), Cursor::Available(at));
+    }
+
+    /// Pressing, dragging, and releasing a macro knob tells the host: the gesture starts, the
+    /// value follows the mouse, and the gesture ends.
+    #[test]
+    fn dragging_a_macro_knob_tells_the_host() {
+        let (mut graph, node) = graph_with_macros();
+        let center = graph.nodes[node].knob_slots()[1].center;
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+
+        mouse_event(
+            &mut editor,
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            center,
+        );
+        // Dragging up 50 px raises the knob a quarter of its range.
+        let up = Point::new(center.x, center.y - 50.0);
+        mouse_event(&mut editor, mouse::Event::CursorMoved { position: up }, up);
+        mouse_event(
+            &mut editor,
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+            up,
+        );
+
+        let edits = &editor.graph.macro_edits;
+        assert_eq!(edits.first(), Some(&MacroEdit::Begin(1)));
+        assert_eq!(edits.last(), Some(&MacroEdit::End(1)));
+        let value = edits
+            .iter()
+            .rev()
+            .find_map(|edit| match edit {
+                MacroEdit::Set(1, value) => Some(*value),
+                _ => None,
+            })
+            .expect("the drag sets the value");
+        assert!((value - 0.25).abs() < 1e-3, "{value}");
+        assert!(edits
+            .iter()
+            .all(|edit| !matches!(edit, MacroEdit::Begin(i) | MacroEdit::Set(i, _) | MacroEdit::End(i) if *i != 1)));
+    }
+
+    /// A knob on any other node never tells the host anything.
+    #[test]
+    fn other_knobs_are_not_host_parameters() {
+        let (mut graph, _) = graph_with_macros();
+        let center = graph.nodes[0].knob_slots()[0].center;
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        mouse_event(
+            &mut editor,
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            center,
+        );
+        let up = Point::new(center.x, center.y - 30.0);
+        mouse_event(&mut editor, mouse::Event::CursorMoved { position: up }, up);
+        mouse_event(
+            &mut editor,
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+            up,
+        );
+        assert!(editor.graph.macro_edits.is_empty());
+    }
+
+    /// The host's values show on the macro node's knobs, and a knob under the mouse is left alone.
+    #[test]
+    fn the_hosts_values_show_on_the_knobs() {
+        let (mut graph, node) = graph_with_macros();
+        graph.show_macros([0.1, 0.2, 0.3, 0.4]);
+        for (index, id) in KnobId::MACROS.iter().enumerate() {
+            let expected = 0.1 * (index + 1) as f32;
+            assert!((graph.nodes[node].value(*id) - expected).abs() < 1e-6);
+        }
+
+        graph.interaction = Interaction::Knob {
+            node,
+            id: KnobId::Macro2,
+        };
+        graph.show_macros([0.9; 4]);
+        assert!((graph.nodes[node].value(KnobId::Macro1) - 0.9).abs() < 1e-6);
+        assert!((graph.nodes[node].value(KnobId::Macro2) - 0.2).abs() < 1e-6);
+    }
+
+    /// A macro wired to a knob drives it from the live level, and the patch carries the route.
+    #[test]
+    fn a_macro_drives_a_knob_in_the_patch() {
+        let (mut graph, node) = graph_with_macros();
+        let filter = graph.add_node(NodeKind::Filter, Point::new(300.0, 300.0));
+        graph.connect(node, Port::Macro(3), filter, Port::Knob(KnobId::Cutoff));
+        let route = graph.control_route(filter, KnobId::Cutoff).unwrap();
+        assert_eq!(route.source, Source::Macro(3));
+        assert!(graph.is_driven(filter, KnobId::Cutoff));
+
+        // The wire and the node survive a save.
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.connections, graph.connections);
     }
 }

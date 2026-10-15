@@ -167,6 +167,9 @@ impl<'a> NodeEditor<'a> {
                     if let Press::Reset = knob::press(state, current, screen) {
                         node.reset_value(slot.id);
                     }
+                    // A macro knob is a host parameter, so the host hears the whole gesture.
+                    self.graph.macro_begin(index, slot.id);
+                    self.graph.macro_set(index, slot.id);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
             }
@@ -302,8 +305,11 @@ impl<'a> NodeEditor<'a> {
     }
 
     /// Adds a node of `kind` centered on `point` and makes it follow the cursor until the next
-    /// press places it.
+    /// press places it. A kind that is one per graph is not added while the graph has one.
     pub(super) fn place(&mut self, kind: NodeKind, point: Point) {
+        if !self.graph.can_add(kind) {
+            return;
+        }
         let node = self.graph.add_node(kind, point);
         self.graph.start_placing(node, point);
     }
@@ -351,6 +357,7 @@ impl<'a> NodeEditor<'a> {
             }
             Interaction::Knob { node, id } => {
                 knob::release(&mut self.graph.nodes[node].knob_states[id as usize]);
+                self.graph.macro_end(node, id);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::MapHandle { node, end } => {
@@ -398,6 +405,7 @@ impl<'a> NodeEditor<'a> {
                 let state = &self.graph.nodes[node].knob_states[id as usize];
                 if let Some(value) = knob::drag(state, screen) {
                     self.graph.nodes[node].set_value(id, value);
+                    self.graph.macro_set(node, id);
                 }
                 (event::Status::Captured, Some(Message::GraphChanged))
             }

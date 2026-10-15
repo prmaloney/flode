@@ -18,6 +18,7 @@ pub mod flanger;
 pub mod input;
 pub mod knobs;
 pub mod lfo;
+pub mod macros;
 pub mod map;
 pub mod mix;
 pub mod oscillator;
@@ -108,6 +109,7 @@ pub enum NodeKind {
     Chorus,
     Phaser,
     Flanger,
+    Macro,
 }
 
 /// The groups the add menu sorts the node kinds into.
@@ -133,7 +135,7 @@ impl Category {
     /// The kinds in this category, in the order the menu lists them.
     pub fn kinds(self) -> &'static [NodeKind] {
         match self {
-            Category::Driver => &[NodeKind::Envelope, NodeKind::Lfo],
+            Category::Driver => &[NodeKind::Envelope, NodeKind::Lfo, NodeKind::Macro],
             Category::Util => &[
                 NodeKind::Output,
                 NodeKind::Map,
@@ -157,7 +159,7 @@ impl Category {
 impl NodeKind {
     /// Every kind. The tests walk them.
     #[cfg(test)]
-    pub const ALL: [NodeKind; 15] = [
+    pub const ALL: [NodeKind; 16] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
@@ -173,7 +175,14 @@ impl NodeKind {
         NodeKind::Chorus,
         NodeKind::Phaser,
         NodeKind::Flanger,
+        NodeKind::Macro,
     ];
+
+    /// True for a kind a graph holds at most one of. The output node decides what plays, and the
+    /// macro knobs are one fixed set of host parameters.
+    pub fn is_unique(self) -> bool {
+        matches!(self, NodeKind::Output | NodeKind::Macro)
+    }
 
     /// True for the effects that run on a slot's summed voices: distortion, compressor, reverb,
     /// delay, chorus, phaser, and flanger. Their output can feed another of them or an output
@@ -215,6 +224,7 @@ impl NodeKind {
             NodeKind::Chorus => &chorus::Chorus,
             NodeKind::Phaser => &phaser::Phaser,
             NodeKind::Flanger => &flanger::Flanger,
+            NodeKind::Macro => &macros::Macros,
         }
     }
 
@@ -236,17 +246,42 @@ pub enum Port {
     Slot(usize),
     /// A MIDI source on an input node, sent as a control signal.
     Midi(input::MidiSource),
+    /// The notes themselves, from an input node to an oscillator. The same pin kind is on both
+    /// ends, like `Audio`.
+    Notes,
+    /// Macro knob `n` on a macro node, sent as a control signal.
+    Macro(usize),
+}
+
+/// The kinds of signal a wire can carry. A wire joins two ports of the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Sound.
+    Audio,
+    /// A level from 0.0 to 1.0 that drives a knob.
+    Control,
+    /// Which notes play, and how.
+    Notes,
 }
 
 impl Port {
-    /// True for an audio input, which takes sound.
-    pub fn is_audio(self) -> bool {
-        matches!(self, Port::Audio | Port::AudioIn(_) | Port::Slot(_))
+    /// The kind of signal this port carries or takes.
+    pub fn signal(self) -> Signal {
+        match self {
+            Port::Audio | Port::AudioIn(_) | Port::Slot(_) => Signal::Audio,
+            Port::Shape | Port::Knob(_) | Port::Midi(_) | Port::Macro(_) => Signal::Control,
+            Port::Notes => Signal::Notes,
+        }
     }
 
-    /// True for a control output: a shape pin, or a MIDI source.
+    /// True for an audio input, which takes sound.
+    pub fn is_audio(self) -> bool {
+        self.signal() == Signal::Audio
+    }
+
+    /// True for a control output: a shape pin, a MIDI source, or a macro.
     pub fn is_control_out(self) -> bool {
-        matches!(self, Port::Shape | Port::Midi(_))
+        matches!(self, Port::Shape | Port::Midi(_) | Port::Macro(_))
     }
 
     /// The name drawn beside an output pin, for the ones that need one.
@@ -254,6 +289,7 @@ impl Port {
         match self {
             Port::Shape => Some("Shape"),
             Port::Midi(source) => Some(source.label()),
+            Port::Notes => Some("MIDI"),
             _ => None,
         }
     }
@@ -264,6 +300,7 @@ impl Port {
             Port::Shape => Some("Shape"),
             Port::AudioIn(0) => Some("A"),
             Port::AudioIn(1) => Some("B"),
+            Port::Notes => Some("MIDI"),
             _ => None,
         }
     }
@@ -491,10 +528,9 @@ impl FlodeNode {
         node
     }
 
-    /// True if the editor may copy this kind of node. An output node is one per patch, so it
-    /// can't be.
+    /// True if the editor may copy this kind of node. A kind that is one per graph can't be.
     pub fn can_duplicate(&self) -> bool {
-        self.kind != NodeKind::Output
+        !self.kind.is_unique()
     }
 
     /// A copy of the node at `position`, with the same knob values, dropdown choices, switches,
