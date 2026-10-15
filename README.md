@@ -53,6 +53,11 @@ Flode is not affiliated with Blender or the Blender Foundation.
 controllers driving knobs), and purple is MIDI notes. A wire only joins ports of the same kind.
 A knob with a green pin can be driven by any control wire, and it then shows the live value.
 
+**Viewers.** The oscillator, envelope, LFO and filter each draw a small picture of their shape: the
+waveform, the ADSR curve, and the filter's response from 20 Hz to 20 kHz. The picture follows the
+knobs. It also follows a wire that drives a knob, so a filter with an LFO on its cutoff shows the
+curve sweeping.
+
 **Editing.**
 
 - Click a node header to select it and drag it to move it. Drag a node onto a wire to splice it in.

@@ -49,7 +49,7 @@ pub(super) fn all() -> Vec<Preset> {
 const COLUMN_X: [f32; 5] = [24.0, 224.0, 424.0, 624.0, 840.0];
 /// Where the top node of a column sits, and the gap between stacked nodes.
 const TOP: f32 = 80.0;
-const GAP: f32 = 16.0;
+const GAP: f32 = 12.0;
 
 /// The column of the MIDI input and the amplitude envelope.
 pub(super) const CONTROLS: usize = 0;
@@ -361,7 +361,9 @@ mod tests {
         }
     }
 
-    /// Every node is inside the default window, above the key strip, and none overlaps another.
+    /// Every node is inside the default window's width, none overlaps another, and each node's
+    /// header and first row sit above the key strip. The viewers make some nodes tall enough that
+    /// the bottom of a node can run under the keys, and the canvas pans to reach it.
     #[test]
     fn every_preset_fits_the_window() {
         let strip_top = 712.0 - crate::editor::piano::STRIP_HEIGHT;
@@ -375,8 +377,11 @@ mod tests {
                     preset.name
                 );
                 assert!(
-                    a.y + a.height <= strip_top,
-                    "{}: node {i} reaches the keys",
+                    a.y + a
+                        .height
+                        .min(crate::nodes::HEADER_HEIGHT + crate::nodes::ROW_PITCH)
+                        <= strip_top,
+                    "{}: node {i} starts under the keys",
                     preset.name
                 );
                 for b in &bounds[i + 1..] {
