@@ -49,8 +49,11 @@ fn level_at(x: f32, ends: [f32; 3], sustain: f32) -> f32 {
 ///
 /// A level alone does not say which stage a voice is in, since the climb and the release pass the
 /// same levels. So the stage picks the segment and the level picks the place along it. A held
-/// note has no length, so the sustain puts the dot in the middle of the hold. A release starts
-/// from the sustain level, so a note let go earlier shows at the start of the release.
+/// note has no length, so the sustain puts the dot in the middle of the hold.
+///
+/// The drawn release starts from the sustain level. A note let go earlier releases from a higher
+/// level, so while its level is above the sustain the dot waits at the start of the release,
+/// then follows the drawn line down. That keeps the dot on the curve.
 fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 3], sustain: f32) -> (f32, f32) {
     let [attack_end, decay_end, hold_end] = ends;
     let level = level.clamp(0.0, 1.0);
@@ -74,7 +77,11 @@ fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 3], sustain: f32) -> (f32,
             hold_end + fallen.clamp(0.0, 1.0) * (1.0 - hold_end)
         }
     };
-    (x, level)
+    let y = match phase {
+        EnvPhase::Release => level.min(sustain),
+        _ => level,
+    };
+    (x, y)
 }
 
 impl NodeBehavior for Envelope {
@@ -230,6 +237,26 @@ mod tests {
                 drawn(x)
             );
         }
+    }
+
+    /// A note let go above the sustain level shows on the drawn curve, at the start of the release,
+    /// and not above it. It follows the line once its level is under the sustain.
+    #[test]
+    fn a_release_from_above_the_sustain_stays_on_the_curve() {
+        let node = shaped();
+        let trace = trace_of(&node);
+        let last = (TRACE_SAMPLES - 1) as f32;
+        let drawn = |x: f32| trace.points[(x * last).round() as usize];
+        let hold_end = trace.markers[2];
+        for level in [1.0, 0.8, 0.6, 0.5] {
+            let (x, y) = cursor_in(EnvPhase::Release, level);
+            assert!((x - hold_end).abs() < 1e-6, "{level}");
+            assert!((y - 0.5).abs() < 1e-6, "{level}");
+            assert!((drawn(x) - y).abs() < 0.03, "{level}");
+        }
+        let (x, y) = cursor_in(EnvPhase::Release, 0.25);
+        assert!(x > hold_end && y < 0.5);
+        assert!((drawn(x) - y).abs() < 0.03);
     }
 
     /// The same level is in the climb and the release, and the stage says which one.
