@@ -6,8 +6,8 @@ use crate::nodes::knobs::KnobId;
 use crate::nodes::map;
 use crate::nodes::viewer::Live;
 use crate::nodes::{
-    Category, FlodeNode, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
-    ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
+    Category, FlodeNode, NodeKind, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT,
+    NODE_WIDTH, ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
 };
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text};
@@ -667,7 +667,7 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
         })
         .collect();
     let wiring = graph.wiring();
-    Live::new(node, |id| {
+    let mut live = Live::new(node, |id| {
         if pinned.contains(&id) {
             wiring
                 .control_route(index, id)
@@ -675,7 +675,24 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
         } else {
             None
         }
-    })
+    });
+    // An envelope and an LFO also say where their signal is, for the viewer's cursor.
+    match node.kind {
+        NodeKind::Envelope => {
+            if let Some(slot) = wiring.envelope_index(index) {
+                if let Some(phase) = levels.envelope_phase[slot] {
+                    live = live.with_envelope(phase, levels.envelope[slot]);
+                }
+            }
+        }
+        NodeKind::Lfo => {
+            if let Some(slot) = wiring.lfo_index(index) {
+                live = live.with_lfo(levels.lfo_phase[slot], levels.lfo[slot]);
+            }
+        }
+        _ => {}
+    }
+    live
 }
 
 /// A node's viewer: a box with the shape the node's kind traces in it. Nothing in it is clickable.
@@ -770,6 +787,15 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
             .with_width(1.5)
             .with_line_cap(LineCap::Round),
     );
+
+    // The live signal, as the dot the map's curve also uses.
+    if let Some((x, y)) = trace.cursor {
+        let dot = Point::new(
+            bounds.x + x.clamp(0.0, 1.0) * bounds.width,
+            bounds.y + (1.0 - y.clamp(0.0, 1.0)) * bounds.height,
+        );
+        frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
+    }
 }
 
 /// A switch: a box with a check when on, and its label. The output's "Always" is dimmed while

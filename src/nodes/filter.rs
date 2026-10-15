@@ -88,6 +88,7 @@ impl Filter {
             points,
             markers: vec![position_of(cutoff)],
             fill: true,
+            cursor: None,
         }
     }
 }

@@ -123,8 +123,7 @@ impl NodeBehavior for Oscillator {
         };
         Some(Trace {
             points,
-            markers: Vec::new(),
-            fill: false,
+            ..Trace::default()
         })
     }
 }

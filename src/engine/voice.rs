@@ -102,6 +102,7 @@ impl Voice {
             lfo: env.lfo_levels,
             midi: env.midi_levels,
             macros: env.macro_levels,
+            ..ControlLevels::default()
         };
         let mut tick = Tick {
             levels: &levels,

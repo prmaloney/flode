@@ -56,7 +56,9 @@ A knob with a green pin can be driven by any control wire, and it then shows the
 **Viewers.** The oscillator, envelope, LFO and filter each draw a small picture of their shape: the
 waveform, the ADSR curve, and the filter's response from 20 Hz to 20 kHz. The picture follows the
 knobs. It also follows a wire that drives a knob, so a filter with an LFO on its cutoff shows the
-curve sweeping.
+curve sweeping. While a note plays, the envelope and LFO viewers put an orange dot on the curve
+where the signal is now. The envelope dot follows the newest note, and it rests in the middle of
+the sustain hold. A noise LFO has no dot.
 
 **Editing.**
 
@@ -147,10 +149,11 @@ effect, and the editor's input handling. The audio thread must never allocate, a
 built with `assert_process_allocs`, so a debug build panics on an allocation there. A test plays a
 patch that runs all seven effects with allocation forbidden.
 
-Two environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
+Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
 editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`) opens part of the
-interface, and `FLODE_PRESET_DIR` points the editor at another preset folder. They are read once,
-at start. See `src/editor/demo.rs`.
+interface, `FLODE_PRESET_DIR` points the editor at another preset folder, and `FLODE_NOTE` (a MIDI
+note number) holds that note down in the standalone app, so the viewers have a live signal. They are
+read once, at start. See `src/editor/demo.rs`.
 
 ### Layout
 

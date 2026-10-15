@@ -13,7 +13,7 @@ pub mod stage;
 mod tests;
 mod voice;
 
-use crate::dsp::envelope::{AdsrConfig, FADE_SECONDS};
+use crate::dsp::envelope::{AdsrConfig, EnvPhase, FADE_SECONDS};
 use crate::dsp::frame::Frame;
 use crate::dsp::gain::db_to_linear;
 use crate::dsp::rng::Rng;
@@ -64,6 +64,8 @@ pub struct Engine {
     env_configs: [AdsrConfig; ENV_SLOTS],
     /// The level of each envelope's newest voice. Knobs that no single voice owns read these.
     env_levels: [f32; MAX_ENVELOPES],
+    /// The stage of each envelope's newest voice, or None with no voice. The editor shows it.
+    env_phases: [Option<EnvPhase>; MAX_ENVELOPES],
     /// True while any envelope node is in the patch. Then the amplitude is the envelopes' job.
     envelopes_active: bool,
     age_counter: u64,
@@ -103,6 +105,7 @@ impl Engine {
             macro_levels: [0.0; MACRO_COUNT],
             env_configs: [AdsrConfig::BYPASS; ENV_SLOTS],
             env_levels: [0.0; MAX_ENVELOPES],
+            env_phases: [None; MAX_ENVELOPES],
             envelopes_active: false,
             age_counter: 0,
             master_gain: 0.0,
@@ -146,6 +149,8 @@ impl Engine {
             lfo: self.lfos.levels(),
             midi: self.midi_levels,
             macros: self.macro_levels,
+            envelope_phase: self.env_phases,
+            lfo_phase: self.lfos.phases(),
         }
     }
 
@@ -333,6 +338,7 @@ impl Engine {
         // knobs that no single voice owns read for the next sample.
         let mut newest_age = [0u64; MAX_ENVELOPES];
         let mut newest_level = [0.0f32; MAX_ENVELOPES];
+        let mut newest_phase = [None; MAX_ENVELOPES];
         let mut out = Frame::SILENT;
         for (lane, graph) in self.lanes.iter_mut().zip(&self.patch.lanes) {
             if !graph.is_active() {
@@ -357,6 +363,7 @@ impl Engine {
                     if voice.age > newest_age[index] {
                         newest_age[index] = voice.age;
                         newest_level[index] = voice.envs[index].level;
+                        newest_phase[index] = Some(voice.envs[index].phase);
                     }
                 }
                 voice.glide(self.glide_coef);
@@ -382,6 +389,7 @@ impl Engine {
             out += lane_out * gain;
         }
         self.env_levels = newest_level;
+        self.env_phases = newest_phase;
 
         self.lfos.advance(
             &self.patch.lfos,

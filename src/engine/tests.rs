@@ -445,6 +445,37 @@ fn a_note_retriggers_the_lfo_through_the_engine() {
     assert!(after < 0.01, "{after}");
 }
 
+/// The engine reports the stage of the newest voice's envelope, and nothing while no voice runs.
+#[test]
+fn the_engine_reports_the_envelope_stage() {
+    let mut patch = plain_oscillator_patch();
+    patch.envelopes[0] = Some(envelope(0.5, 0.5));
+    let mut engine = engine_on(&patch);
+    render(&mut engine, 16);
+    assert_eq!(engine.levels().envelope_phase[0], None);
+
+    engine.note_on(60, 1.0);
+    render(&mut engine, 4410);
+    assert_eq!(engine.levels().envelope_phase[0], Some(EnvPhase::Sustain));
+
+    engine.note_off(60);
+    render(&mut engine, 4410);
+    assert_eq!(engine.levels().envelope_phase[0], Some(EnvPhase::Release));
+}
+
+/// The engine reports where each LFO is in its cycle.
+#[test]
+fn the_engine_reports_the_lfo_phase() {
+    let mut patch = plain_oscillator_patch();
+    let mut lfo = crate::patch::LfoSettings::new();
+    lfo.rate = Param::fixed(KnobId::LfoRate, 1.0);
+    patch.lfos[0] = Some(lfo);
+    let mut engine = engine_on(&patch);
+    render(&mut engine, 11025);
+    let phase = engine.levels().lfo_phase[0];
+    assert!((phase - 0.25).abs() < 0.01, "{phase}");
+}
+
 /// An effect at the end of a chain still lets the voices through. The oscillator is tapped, its
 /// voices are summed for the effect, and the effect's output is what the slot plays.
 #[test]

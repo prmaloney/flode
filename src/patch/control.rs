@@ -1,6 +1,7 @@
 //! Control signals: where they come from, how they are mapped, and what they set. A control
 //! route is the one place a wire from an LFO, an envelope, or a MIDI source meets a knob.
 
+use crate::dsp::envelope::EnvPhase;
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use crate::nodes::knobs::KnobId;
 use crate::nodes::macros::MACRO_COUNT;
@@ -93,6 +94,11 @@ pub struct ControlLevels {
     pub lfo: [f32; MAX_LFOS],
     pub midi: [f32; MIDI_SOURCE_COUNT],
     pub macros: [f32; MACRO_COUNT],
+    /// The stage of the newest voice's envelope, or None while no voice runs it. The viewer on
+    /// an envelope node shows it. No knob reads it.
+    pub envelope_phase: [Option<EnvPhase>; MAX_ENVELOPES],
+    /// Where each LFO is in its cycle, from 0.0 to 1.0. The viewer on an LFO node shows it.
+    pub lfo_phase: [f32; MAX_LFOS],
 }
 
 impl ControlLevels {

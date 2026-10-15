@@ -143,6 +143,15 @@ impl IcedEditor for FlodeEditor {
         };
         demo::apply(&mut graph);
         link.publish(graph.patch());
+        // The demo hook can hold a note down from the start, so a picture shows live signals.
+        if let (Some(tx), Some(note)) = (&note_tx, demo::note()) {
+            if let Ok(mut tx) = tx.lock() {
+                let _ = tx.push(PianoEvent::NoteOn {
+                    note,
+                    velocity: 0.8,
+                });
+            }
+        }
         let editor = FlodeEditor {
             params,
             context,

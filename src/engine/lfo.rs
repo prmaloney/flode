@@ -37,6 +37,11 @@ impl Lfos {
         self.levels
     }
 
+    /// Where every LFO is in its cycle, from 0.0 to 1.0.
+    pub fn phases(&self) -> [f32; MAX_LFOS] {
+        self.phase
+    }
+
     /// Restarts every free running LFO that has Retrigger on, as a note starts. A noise LFO draws a
     /// new value too. An LFO that follows the playhead keeps its place in the song.
     pub fn retrigger(

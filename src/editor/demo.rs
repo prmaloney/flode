@@ -6,10 +6,24 @@
 //! `FLODE_PRESET` is `Category/Name`, or just `Name` for a preset with no category. The editor
 //! starts with that preset loaded.
 //!
+//! `FLODE_NOTE` is a MIDI note number to hold down from the start, in the standalone app. It
+//! gives the envelope and LFO viewers a live signal to show.
+//!
 //! `FLODE_UI` opens part of the interface. `presets` opens the preset list, `presets:Bass` opens
 //! it with the Bass submenu out, and `save` opens the save box.
 
 use super::graph::Graph;
+
+/// The MIDI note `FLODE_NOTE` asks to hold from the start, if it holds a number from 0 to 127.
+/// Only the standalone app plays it.
+pub(super) fn note() -> Option<u8> {
+    note_from(std::env::var("FLODE_NOTE").ok().as_deref())
+}
+
+/// The note a `FLODE_NOTE` value names.
+fn note_from(value: Option<&str>) -> Option<u8> {
+    value?.trim().parse::<u8>().ok().filter(|note| *note < 128)
+}
 
 /// Applies the hooks the environment asks for, if it asks for any.
 pub(super) fn apply(graph: &mut Graph) {
@@ -103,6 +117,15 @@ mod tests {
         assert!(elsewhere.nodes.len() > nodes);
         assert_eq!(elsewhere.preset_list.unwrap().library.categories.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_note_is_a_number_below_128() {
+        assert_eq!(note_from(Some("60")), Some(60));
+        assert_eq!(note_from(Some(" 0 ")), Some(0));
+        assert_eq!(note_from(Some("128")), None);
+        assert_eq!(note_from(Some("c4")), None);
+        assert_eq!(note_from(None), None);
     }
 
     #[test]

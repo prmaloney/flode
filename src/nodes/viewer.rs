@@ -5,6 +5,7 @@
 
 use super::knobs::KnobId;
 use super::FlodeNode;
+use crate::dsp::envelope::EnvPhase;
 
 /// How many points a trace is asked for. The box is about 160 px wide.
 pub const TRACE_SAMPLES: usize = 96;
@@ -20,13 +21,20 @@ pub struct Trace {
     pub markers: Vec<f32>,
     /// True to shade the area under the shape.
     pub fill: bool,
+    /// A dot on the shape that marks where the node's live signal is now, as a position across
+    /// the box and a height, both from 0.0 to 1.0. A kind sets it only while it has a signal to
+    /// show, so the dot is absent when nothing plays.
+    pub cursor: Option<(f32, f32)>,
 }
 
 /// A node's knob values as they are now. A knob a control wire drives reads the live value of
-/// that wire. Every other knob reads the node's own value.
+/// that wire. Every other knob reads the node's own value. An envelope or an LFO also carries
+/// where its signal is now, for the viewer's cursor.
 #[derive(Debug, Clone, Copy)]
 pub struct Live {
     values: [f32; KnobId::COUNT],
+    envelope: Option<(EnvPhase, f32)>,
+    lfo: Option<(f32, f32)>,
 }
 
 impl Live {
@@ -36,7 +44,33 @@ impl Live {
         for id in KnobId::ALL {
             values[id as usize] = driven(id).unwrap_or_else(|| node.value(id));
         }
-        Self { values }
+        Self {
+            values,
+            envelope: None,
+            lfo: None,
+        }
+    }
+
+    /// Adds where an envelope is: its stage and its level from 0.0 to 1.0.
+    pub fn with_envelope(mut self, phase: EnvPhase, level: f32) -> Self {
+        self.envelope = Some((phase, level));
+        self
+    }
+
+    /// Adds where an LFO is: its phase through the cycle and its level, both from 0.0 to 1.0.
+    pub fn with_lfo(mut self, phase: f32, level: f32) -> Self {
+        self.lfo = Some((phase, level));
+        self
+    }
+
+    /// The envelope's stage and level, while a voice is running it.
+    pub fn envelope(&self) -> Option<(EnvPhase, f32)> {
+        self.envelope
+    }
+
+    /// The LFO's phase and level.
+    pub fn lfo(&self) -> Option<(f32, f32)> {
+        self.lfo
     }
 
     /// The node's own values, as when nothing drives any knob.

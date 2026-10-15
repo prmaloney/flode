@@ -4,6 +4,7 @@
 
 use super::viewer::{sample, Live, Trace};
 use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use crate::dsp::envelope::EnvPhase;
 
 pub struct Envelope;
 
@@ -44,6 +45,38 @@ fn level_at(x: f32, ends: [f32; 3], sustain: f32) -> f32 {
     }
 }
 
+/// Where the live envelope sits on the trace, as a position across the box and a height.
+///
+/// A level alone does not say which stage a voice is in, since the climb and the release pass the
+/// same levels. So the stage picks the segment and the level picks the place along it. A held
+/// note has no length, so the sustain puts the dot in the middle of the hold. A release starts
+/// from the sustain level, so a note let go earlier shows at the start of the release.
+fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 3], sustain: f32) -> (f32, f32) {
+    let [attack_end, decay_end, hold_end] = ends;
+    let level = level.clamp(0.0, 1.0);
+    let x = match phase {
+        EnvPhase::Attack => level * attack_end,
+        EnvPhase::Decay => {
+            let fallen = if sustain < 1.0 {
+                (1.0 - level) / (1.0 - sustain)
+            } else {
+                1.0
+            };
+            attack_end + fallen.clamp(0.0, 1.0) * (decay_end - attack_end)
+        }
+        EnvPhase::Sustain => (decay_end + hold_end) / 2.0,
+        EnvPhase::Release => {
+            let fallen = if sustain > 0.0 {
+                1.0 - level / sustain
+            } else {
+                1.0
+            };
+            hold_end + fallen.clamp(0.0, 1.0) * (1.0 - hold_end)
+        }
+    };
+    (x, level)
+}
+
 impl NodeBehavior for Envelope {
     fn title(&self) -> &'static str {
         "Envelope"
@@ -70,6 +103,9 @@ impl NodeBehavior for Envelope {
             points: sample(samples, |x| level_at(x, ends, sustain)),
             markers: ends.to_vec(),
             fill: true,
+            cursor: live
+                .envelope()
+                .map(|(phase, level)| cursor_at(phase, level, ends, sustain)),
         })
     }
 }
@@ -156,6 +192,69 @@ mod tests {
         let mut lower = shaped();
         lower.set_value(KnobId::Sustain, 0.2);
         assert_ne!(trace_of(&base), trace_of(&lower));
+    }
+
+    /// The cursor's trace with the envelope in `phase` at `level`.
+    fn cursor_in(phase: EnvPhase, level: f32) -> (f32, f32) {
+        let node = shaped();
+        let live = Live::of(&node).with_envelope(phase, level);
+        Envelope
+            .trace(&node, &live, TRACE_SAMPLES)
+            .and_then(|trace| trace.cursor)
+            .expect("the envelope has a cursor")
+    }
+
+    #[test]
+    fn there_is_no_cursor_without_a_running_voice() {
+        assert_eq!(trace_of(&shaped()).cursor, None);
+    }
+
+    /// The dot sits on the drawn shape in every stage, so it rides the line.
+    #[test]
+    fn the_cursor_rides_the_shape() {
+        let node = shaped();
+        let trace = trace_of(&node);
+        let last = (TRACE_SAMPLES - 1) as f32;
+        let drawn = |x: f32| trace.points[(x * last).round() as usize];
+        for (phase, level) in [
+            (EnvPhase::Attack, 0.5),
+            (EnvPhase::Decay, 0.75),
+            (EnvPhase::Sustain, 0.5),
+            (EnvPhase::Release, 0.25),
+        ] {
+            let (x, y) = cursor_in(phase, level);
+            assert!((y - level).abs() < 1e-6);
+            assert!(
+                (drawn(x) - y).abs() < 0.03,
+                "{phase:?}: {} vs {y}",
+                drawn(x)
+            );
+        }
+    }
+
+    /// The same level is in the climb and the release, and the stage says which one.
+    #[test]
+    fn the_stage_tells_the_climb_from_the_release() {
+        let (climbing, _) = cursor_in(EnvPhase::Attack, 0.25);
+        let (releasing, _) = cursor_in(EnvPhase::Release, 0.25);
+        assert!(climbing < releasing);
+    }
+
+    /// The dot moves left to right through the stages in order.
+    #[test]
+    fn the_cursor_moves_forward_through_the_stages() {
+        let xs: Vec<f32> = [
+            (EnvPhase::Attack, 0.1),
+            (EnvPhase::Attack, 0.9),
+            (EnvPhase::Decay, 0.9),
+            (EnvPhase::Decay, 0.6),
+            (EnvPhase::Sustain, 0.5),
+            (EnvPhase::Release, 0.4),
+            (EnvPhase::Release, 0.1),
+        ]
+        .map(|(phase, level)| cursor_in(phase, level).0)
+        .to_vec();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "{xs:?}");
     }
 
     #[test]

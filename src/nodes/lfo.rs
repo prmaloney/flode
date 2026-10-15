@@ -59,7 +59,7 @@ impl NodeBehavior for Lfo {
 
     /// Two cycles of the chosen wave. The box shows a fixed number of cycles, so the rate knob
     /// does not change it.
-    fn trace(&self, node: &FlodeNode, _live: &Live, samples: usize) -> Option<Trace> {
+    fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
         let wave = waveform(node);
         let points = if wave == Waveform::Noise {
             noise_points(samples)
@@ -69,10 +69,16 @@ impl NodeBehavior for Lfo {
                 (wave.naive((x * CYCLES as f32).fract()) + 1.0) * 0.5
             })
         };
+        // The dot rides the first of the two cycles shown. Noise holds a random value per cycle, so
+        // its fixed picture has no place for a dot.
+        let cursor = match (wave, live.lfo()) {
+            (Waveform::Noise, _) | (_, None) => None,
+            (_, Some((phase, level))) => Some((phase.clamp(0.0, 1.0) / CYCLES as f32, level)),
+        };
         Some(Trace {
             points,
-            markers: Vec::new(),
-            fill: false,
+            cursor,
+            ..Trace::default()
         })
     }
 }
@@ -136,6 +142,47 @@ mod tests {
     #[test]
     fn saw_and_triangle_differ() {
         assert_ne!(trace_of(Waveform::Saw), trace_of(Waveform::Triangle));
+    }
+
+    /// The cursor for an LFO of `wave` at `phase` with the level the engine gives that phase.
+    fn cursor_of(wave: Waveform, phase: f32) -> Option<(f32, f32)> {
+        let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        node.choices = vec![Waveform::ALL.iter().position(|w| *w == wave).unwrap()];
+        let level = (wave.naive(phase) + 1.0) * 0.5;
+        let live = Live::of(&node).with_lfo(phase, level);
+        Lfo.trace(&node, &live, TRACE_SAMPLES)
+            .expect("an LFO has a trace")
+            .cursor
+    }
+
+    #[test]
+    fn there_is_no_cursor_without_a_live_signal() {
+        let node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        let trace = Lfo.trace(&node, &Live::of(&node), TRACE_SAMPLES).unwrap();
+        assert_eq!(trace.cursor, None);
+    }
+
+    /// The dot rides the first of the two cycles, and sits on the drawn wave.
+    #[test]
+    fn the_cursor_rides_the_first_cycle() {
+        for wave in [
+            Waveform::Sine,
+            Waveform::Saw,
+            Waveform::Triangle,
+            Waveform::Square,
+        ] {
+            let (x, y) = cursor_of(wave, 0.3).expect("a cursor");
+            assert!((x - 0.15).abs() < 1e-6, "{wave:?}");
+            let points = trace_of(wave);
+            let drawn = points[(x * (TRACE_SAMPLES - 1) as f32).round() as usize];
+            assert!((drawn - y).abs() < 0.1, "{wave:?}: {drawn} vs {y}");
+        }
+    }
+
+    /// A noise LFO holds a random value, which its fixed picture cannot show.
+    #[test]
+    fn noise_has_no_cursor() {
+        assert_eq!(cursor_of(Waveform::Noise, 0.3), None);
     }
 
     #[test]
