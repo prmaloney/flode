@@ -18,6 +18,7 @@ mod nodes;
 mod piano;
 mod routing;
 
+use dsp::envelope::{Adsr, AdsrConfig, FADE_SECONDS};
 use dsp::noise::{NoiseState, NoiseType};
 use dsp::rng::Rng;
 use dsp::warp::{warp_phase, warp_value, WarpMode};
@@ -45,19 +46,9 @@ const VOICE_MIX: f32 = 0.25;
 /// Room for queued computer-keyboard notes. A full queue drops new notes.
 const NOTE_QUEUE_LEN: usize = 256;
 /// The release used when no envelope node is in the chain. It avoids clicks on note off.
-const RELEASE_SECONDS: f32 = 0.01;
 /// How long gains, the cutoff, and the resonance take to settle after a knob moves. Knob values
 /// change once per block, so without this they would step and click.
 const SMOOTH_SECONDS: f32 = 0.01;
-
-/// Where a voice is in its amplitude envelope.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Stage {
-    Attack,
-    Decay,
-    Sustain,
-    Release,
-}
 
 /// The oscillator state for one of a voice's sources: its own source, or one branch of a mix.
 /// Index 0 is the lane's source when there is no mix, or branch A's when there is. Index 1 is
@@ -86,64 +77,9 @@ struct Voice {
     age: u64,
 }
 
-/// One envelope generator: an attack, decay, sustain, and release, run per voice.
-#[derive(Clone, Copy)]
-struct Adsr {
-    stage: Stage,
-    /// The current level, from 0.0 to 1.0.
-    level: f32,
-    /// Level lost per sample while releasing.
-    release_step: f32,
-}
-
-impl Adsr {
-    const START: Adsr = Adsr {
-        stage: Stage::Attack,
-        level: 0.0,
-        release_step: 0.0,
-    };
-
-    /// Moves the envelope on by one sample.
-    fn advance(&mut self, env: &EnvConfig) {
-        match self.stage {
-            Stage::Attack => {
-                self.level += env.attack_step;
-                if self.level >= 1.0 {
-                    self.level = 1.0;
-                    self.stage = Stage::Decay;
-                }
-            }
-            Stage::Decay => {
-                self.level -= env.decay_step;
-                if self.level <= env.sustain {
-                    self.level = env.sustain;
-                    self.stage = Stage::Sustain;
-                }
-            }
-            Stage::Sustain => self.level = env.sustain,
-            // A release stops at zero. Otherwise a copy that finished early keeps falling below zero
-            // while the voice waits on a longer envelope, and a negative amplitude flips the sound.
-            Stage::Release => self.level = (self.level - self.release_step).max(0.0),
-        }
-    }
-
-    /// Starts the release from the current level, falling to zero over `seconds`.
-    fn release(&mut self, seconds: f32, sample_rate: f32) {
-        if self.stage != Stage::Release {
-            self.stage = Stage::Release;
-            let samples = (seconds * sample_rate).max(1.0);
-            self.release_step = self.level / samples;
-        }
-    }
-
-    fn finished(&self) -> bool {
-        self.stage == Stage::Release && self.level <= 0.0
-    }
-}
-
 impl Voice {
     /// Moves every envelope copy on by one sample, each with its own times.
-    fn advance_all(&mut self, configs: &[EnvConfig; ENV_SLOTS]) {
+    fn advance_all(&mut self, configs: &[AdsrConfig; ENV_SLOTS]) {
         for (env, config) in self.envs.iter_mut().zip(configs) {
             env.advance(config);
         }
@@ -156,7 +92,7 @@ impl Voice {
 
     /// True once every envelope has finished its release.
     fn releasing(&self) -> bool {
-        self.envs.iter().all(|env| env.stage == Stage::Release)
+        self.envs.iter().all(|env| env.releasing())
     }
 
     /// True once every envelope copy has run out. A voice lives until its longest release ends,
@@ -347,36 +283,6 @@ impl LaneSettings {
     }
 }
 
-/// Per-sample envelope steps, recomputed once per block from the ADSR parameters.
-#[derive(Clone, Copy)]
-struct EnvConfig {
-    attack_step: f32,
-    decay_step: f32,
-    sustain: f32,
-    release_seconds: f32,
-}
-
-impl EnvConfig {
-    /// No envelope in the chain: full level while held, with the short fade on release.
-    const BYPASS: EnvConfig = EnvConfig {
-        attack_step: 1.0,
-        decay_step: 0.0,
-        sustain: 1.0,
-        release_seconds: RELEASE_SECONDS,
-    };
-
-    fn from_values(attack: f32, decay: f32, sustain: f32, release: f32, sample_rate: f32) -> Self {
-        let attack_samples = (attack * sample_rate).max(1.0);
-        let decay_samples = (decay * sample_rate).max(1.0);
-        Self {
-            attack_step: 1.0 / attack_samples,
-            decay_step: (1.0 - sustain) / decay_samples,
-            sustain,
-            release_seconds: release,
-        }
-    }
-}
-
 pub struct Flode {
     params: Arc<FlodeParams>,
     sample_rate: f32,
@@ -419,7 +325,7 @@ pub struct Flode {
     /// State of the random number generator for starting phases.
     rng: Rng,
     /// Each envelope node's times for the block, with the bypass copy last.
-    env_configs: [EnvConfig; ENV_SLOTS],
+    env_configs: [AdsrConfig; ENV_SLOTS],
     /// The level of each envelope's newest voice. Lane-wide knobs read these.
     env_levels: [f32; MAX_ENVELOPES],
     /// True while any envelope node is in the patch. Then the amplitude is the envelopes' job.
@@ -488,7 +394,7 @@ impl Flode {
         if self.mono {
             for voice in self.lanes[lane].voices.iter_mut().flatten() {
                 for env in voice.envs.iter_mut() {
-                    env.release(RELEASE_SECONDS, self.sample_rate);
+                    env.release(FADE_SECONDS, self.sample_rate);
                 }
             }
         }
@@ -588,9 +494,9 @@ impl Flode {
             self.env_configs[..MAX_ENVELOPES]
                 .iter()
                 .map(|config| config.release_seconds)
-                .fold(RELEASE_SECONDS, f32::max)
+                .fold(FADE_SECONDS, f32::max)
         } else {
-            RELEASE_SECONDS
+            FADE_SECONDS
         };
         for lane in self.lanes.iter_mut() {
             for voice in lane.voices.iter_mut().flatten() {
@@ -676,7 +582,7 @@ impl Default for Flode {
             held: [(0, 0.0); 128],
             held_len: 0,
             rng: Rng::default(),
-            env_configs: [EnvConfig::BYPASS; ENV_SLOTS],
+            env_configs: [AdsrConfig::BYPASS; ENV_SLOTS],
             env_levels: [0.0; MAX_ENVELOPES],
             envelopes_active: false,
             note_tx: Arc::new(Mutex::new(note_tx)),
@@ -803,9 +709,9 @@ impl Plugin for Flode {
                 .copied()
                 .unwrap_or(EnvelopeSettings::OFF);
             if !settings.active {
-                return EnvConfig::BYPASS;
+                return AdsrConfig::BYPASS;
             }
-            EnvConfig::from_values(
+            AdsrConfig::from_values(
                 settings.attack.plain(KnobId::Attack, &levels),
                 settings.decay.plain(KnobId::Decay, &levels),
                 settings.sustain.plain(KnobId::Sustain, &levels),
@@ -1305,6 +1211,7 @@ mod always_glide_tests {
 #[cfg(test)]
 mod release_tests {
     use super::*;
+    use dsp::envelope::EnvPhase;
 
     /// A note with an envelope releases over the envelope's release time after its note off.
     #[test]
@@ -1316,7 +1223,7 @@ mod release_tests {
             envelope: Some(0),
             ..LaneChain::SILENT
         };
-        flode.env_configs[0] = EnvConfig::from_values(0.001, 0.001, 1.0, 0.5, 44100.0);
+        flode.env_configs[0] = AdsrConfig::from_values(0.001, 0.001, 1.0, 0.5, 44100.0);
         flode.note_on(60, 1.0);
         for _ in 0..2000 {
             for voice in flode.lanes[0].voices.iter_mut().flatten() {
@@ -1325,7 +1232,7 @@ mod release_tests {
         }
         flode.note_off(60);
         let voice = flode.lanes[0].voices.iter().flatten().next().unwrap();
-        assert_eq!(voice.envs[0].stage, Stage::Release);
+        assert_eq!(voice.envs[0].phase, EnvPhase::Release);
         for _ in 0..(0.25 * 44100.0) as usize {
             for voice in flode.lanes[0].voices.iter_mut().flatten() {
                 voice.advance_all(&flode.env_configs);
@@ -1347,21 +1254,6 @@ mod release_tests {
         assert!(flode.lanes[0].voices.iter().flatten().all(|v| v.finished()));
     }
 
-    /// A release never takes an envelope below zero, even while the voice waits on a longer one.
-    #[test]
-    fn a_finished_release_stays_at_zero() {
-        let mut env = Adsr {
-            stage: Stage::Release,
-            level: 0.1,
-            release_step: 0.01,
-        };
-        let config = EnvConfig::BYPASS;
-        for _ in 0..100 {
-            env.advance(&config);
-        }
-        assert_eq!(env.level, 0.0);
-    }
-
     /// With an envelope driving the sound, a note off keeps the voice alive for the envelope's
     /// release, rather than cutting it in the short bypass fade.
     #[test]
@@ -1369,7 +1261,7 @@ mod release_tests {
         let mut flode = Flode::default();
         flode.sample_rate = 44100.0;
         flode.envelopes_active = true;
-        flode.env_configs[0] = EnvConfig::from_values(0.001, 0.001, 0.5, 0.5, 44100.0);
+        flode.env_configs[0] = AdsrConfig::from_values(0.001, 0.001, 0.5, 0.5, 44100.0);
         flode.lane_chains[0] = LaneChain {
             active: true,
             ..LaneChain::SILENT
