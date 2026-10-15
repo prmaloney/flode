@@ -158,22 +158,24 @@ impl Default for Patch {
 mod clone_tests {
     use super::*;
 
-    /// The audio thread copies the patch every block on a stack of about 2 MB, shared with the
-    /// whole process call. Copying in place needs almost none of it, so a thread with a small
-    /// stack can do it. A copy that builds a temporary patch first would overflow here.
+    /// The audio thread copies the patch every block, on a stack of about 2 MB that the rest of
+    /// the process call shares. A patch is about 73 KB. The copy has to go straight into the
+    /// target, since a temporary patch for it to be built in would overflow a stack this small.
+    /// The patches sit on the heap here, so only the copy itself uses the thread's stack.
     #[test]
     fn copying_a_patch_into_another_needs_little_stack() {
-        let source = Patch::silent();
-        let copied = std::thread::Builder::new()
-            .stack_size(64 * 1024)
+        let source = Box::new(Patch::silent());
+        let mut target = Box::new(Patch::silent());
+        target.lanes[0].gain = Param::fixed(crate::nodes::knobs::KnobId::Slot1, -6.0);
+        let target = std::thread::Builder::new()
+            .stack_size(96 * 1024)
             .spawn(move || {
-                let mut target = Patch::silent();
                 target.clone_from(&source);
-                target == source
+                (target, source)
             })
             .unwrap()
             .join()
             .unwrap();
-        assert!(copied);
+        assert_eq!(target.0, target.1);
     }
 }
