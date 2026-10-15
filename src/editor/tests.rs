@@ -608,3 +608,145 @@ mod lfo_retrigger_tests {
         assert!(loaded.patch().lfos[0].unwrap().retrigger);
     }
 }
+
+#[cfg(test)]
+mod layering_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::editor::piano;
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn three_nodes() -> Graph {
+        let mut graph = Graph::default();
+        graph.add_node(NodeKind::Filter, Point::new(0.0, 300.0));
+        graph
+    }
+
+    /// Nodes draw in their own order, and the selected node draws last, so it is on top.
+    #[test]
+    fn the_selected_node_draws_last() {
+        let mut graph = three_nodes();
+        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+        graph.selected = Some(0);
+        assert_eq!(graph.draw_order(), vec![1, 2, 0]);
+        graph.selected = Some(1);
+        assert_eq!(graph.draw_order(), vec![0, 2, 1]);
+        graph.selected = None;
+        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+    }
+
+    /// A node being placed is on top too, and a stale selection never indexes past the nodes.
+    #[test]
+    fn a_node_being_placed_draws_on_top() {
+        let mut graph = three_nodes();
+        graph.interaction = Interaction::Placing {
+            node: 0,
+            grab: nih_plug_iced::Vector::new(0.0, 0.0),
+        };
+        assert_eq!(graph.draw_order().last(), Some(&0));
+        graph.interaction = Interaction::Idle;
+        graph.selected = Some(99);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2]);
+    }
+
+    /// Where two nodes overlap, a press goes to the one on top, which is the selected one.
+    #[test]
+    fn a_press_goes_to_the_node_on_top() {
+        let mut graph = Graph::default();
+        let a = graph.add_node(NodeKind::Reverb, Point::new(500.0, 100.0));
+        let b = graph.add_node(NodeKind::Reverb, Point::new(520.0, 120.0));
+        let overlap = Point::new(560.0, 160.0);
+        // By default the later node is on top.
+        assert_eq!(graph.node_at(overlap), Some(b));
+        // Selecting the earlier one brings it to the front.
+        graph.selected = Some(a);
+        assert_eq!(graph.node_at(overlap), Some(a));
+    }
+
+    /// Text is hidden when any part of it is under a covering rectangle, and shown otherwise.
+    #[test]
+    fn text_is_hidden_only_where_it_overlaps_a_cover() {
+        use nih_plug_iced::widget::canvas::Text;
+        let label = Text {
+            content: "Threshold".to_string(),
+            position: Point::new(100.0, 100.0),
+            size: 12.0,
+            ..Text::default()
+        };
+        let area = text_area(&label);
+        assert!(area.width > 40.0 && area.width < 90.0, "{}", area.width);
+        let cover_at = |x: f32| Rectangle {
+            x,
+            y: 90.0,
+            width: 50.0,
+            height: 40.0,
+        };
+        // The cover starts after the label's first letters, so the start point is clear of it.
+        assert!(overlaps(&cover_at(area.x + 20.0), &area));
+        assert!(!overlaps(&cover_at(area.x + area.width + 5.0), &area));
+        assert!(!overlaps(&cover_at(area.x - 60.0), &area));
+    }
+
+    /// With a dropdown list open over the key strip, a press on a row picks that row. It does not
+    /// play the key under it.
+    #[test]
+    fn a_dropdown_row_over_the_keys_is_picked_not_played() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        };
+        let strip = piano::strip_bounds(bounds);
+        let mut graph = Graph::default();
+        // Move the oscillator so the last row of its Wave list lands 30 px into the strip.
+        graph.nodes[0].position = Point::new(100.0, 0.0);
+        let dropdown = graph.nodes[0].dropdowns().remove(0);
+        let rows = dropdown.labels.len();
+        let list = dropdown_list_bounds(dropdown.bounds, rows);
+        let shift = strip.y + 30.0 - (list.y + list.height - 6.0);
+        graph.nodes[0].position = Point::new(100.0, shift);
+        let dropdown = graph.nodes[0].dropdowns().remove(0);
+        graph.dropdown_menu = Some((0, dropdown.which));
+
+        let list = dropdown_list_bounds(dropdown.bounds, rows);
+        let last_row = Point::new(list.x + 10.0, list.y + list.height - 6.0);
+        assert!(strip.contains(last_row), "the row is not over the strip");
+        assert_eq!(list_row_at(list, last_row, rows), Some(rows - 1));
+
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let (_, message) = editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            Cursor::Available(last_row),
+        );
+        assert!(
+            matches!(message, Some(Message::GraphChanged)),
+            "{message:?}"
+        );
+        assert!(graph.mouse_note.is_none());
+        assert!(graph.dropdown_menu.is_none());
+        assert_eq!(graph.nodes[0].choice(dropdown.which), rows - 1);
+    }
+
+    /// With no list open, a press on the strip still plays a key.
+    #[test]
+    fn a_press_on_the_keys_still_plays_a_note() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        };
+        let strip = piano::strip_bounds(bounds);
+        let mut graph = Graph::default();
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let (_, message) = editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            Cursor::Available(Point::new(500.0, strip.y + strip.height - 4.0)),
+        );
+        assert!(matches!(message, Some(Message::Note(_))), "{message:?}");
+    }
+}

@@ -70,8 +70,18 @@ pub(super) fn draw_editor(
             }
         }
 
-        for index in 0..graph.nodes.len() {
-            draw_node(frame, index, graph, levels, &overlays);
+        // Iced draws all text above all shapes in a frame, so a node drawn later would still
+        // have the text of the nodes under it showing through. Each node's text is hidden inside
+        // the nodes drawn after it, which also puts the selected node, drawn last, on top.
+        let order = graph.draw_order();
+        for (position, &index) in order.iter().enumerate() {
+            let mut covered = overlays.clone();
+            covered.extend(
+                order[position + 1..]
+                    .iter()
+                    .map(|&above| graph.nodes[above].bounds()),
+            );
+            draw_node(frame, index, graph, levels, &covered);
         }
 
         if let Some(index) = graph.link_target {
@@ -412,10 +422,42 @@ pub(super) fn draw_pin_dot(frame: &mut Frame, point: Point, port: Port) {
 
 /// Draws node text unless its position is inside an overlay that covers the node.
 pub(super) fn draw_text(frame: &mut Frame, covered: &[Rectangle], zoom: f32, mut text: Text) {
+    let area = text_area(&text);
     text.size *= zoom;
-    if !covered.iter().any(|rect| rect.contains(text.position)) {
+    if !covered.iter().any(|rect| overlaps(rect, &area)) {
         frame.fill_text(text);
     }
+}
+
+/// The rectangle a piece of text takes, roughly, in the units of its position and size. The font
+/// is proportional, so the width is an estimate from the character count. A label that touches a
+/// covering rectangle is hidden whole, so no half of it shows through.
+pub(super) fn text_area(text: &Text) -> Rectangle {
+    const CHARACTER_WIDTH: f32 = 0.55;
+    const LINE_HEIGHT: f32 = 1.2;
+    let width = text.content.chars().count() as f32 * text.size * CHARACTER_WIDTH;
+    let height = text.size * LINE_HEIGHT;
+    let x = match text.horizontal_alignment {
+        alignment::Horizontal::Left => text.position.x,
+        alignment::Horizontal::Center => text.position.x - width / 2.0,
+        alignment::Horizontal::Right => text.position.x - width,
+    };
+    let y = match text.vertical_alignment {
+        alignment::Vertical::Top => text.position.y,
+        alignment::Vertical::Center => text.position.y - height / 2.0,
+        alignment::Vertical::Bottom => text.position.y - height,
+    };
+    Rectangle {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// True if the two rectangles share any area.
+pub(super) fn overlaps(a: &Rectangle, b: &Rectangle) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
 /// The transfer curve of a map: the mapping line, its two handles, and a dot where the live input

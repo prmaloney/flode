@@ -128,7 +128,7 @@ impl<'a> NodeEditor<'a> {
         }
 
         // Walk nodes from the last drawn (top) to the first.
-        for index in (0..self.graph.nodes.len()).rev() {
+        for index in self.graph.draw_order().into_iter().rev() {
             let node = &self.graph.nodes[index];
             if let Some(end) = map_handle_at(node, point) {
                 self.graph.selected = Some(index);
@@ -196,6 +196,35 @@ impl<'a> NodeEditor<'a> {
         // Empty canvas clears the selection.
         self.graph.selected = None;
         (event::Status::Captured, Some(Message::GraphChanged))
+    }
+
+    /// True if an open dropdown list, node menu, or category list covers the cursor. These are
+    /// drawn over everything else, so a press on one belongs to it. `point` is in editor
+    /// coordinates, and `screen` is the cursor's screen position.
+    pub(super) fn overlay_at(&self, point: Point, screen: Point, bounds: Rectangle) -> bool {
+        if let Some((index, which)) = self.graph.dropdown_menu {
+            let open = self.graph.nodes[index]
+                .dropdowns()
+                .into_iter()
+                .find(|d| d.which == which);
+            if let Some(dropdown) = open {
+                let list = dropdown_list_bounds(dropdown.bounds, dropdown.labels.len());
+                if list.contains(point) {
+                    return true;
+                }
+            }
+        }
+        if let Some(menu) = self.graph.menu {
+            if menu_bounds(menu).contains(point) {
+                return true;
+            }
+        }
+        if let Some(category) = self.graph.category_menu {
+            if category_row_at(bounds, category, screen).is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Adds a node of `kind` centered on `point` and makes it follow the cursor until the next
@@ -340,10 +369,14 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         let screen = self.graph.last_screen;
         let point = self.graph.view.to_world(screen);
 
-        // The key strip takes the mouse before the graph does. A key plays while the mouse holds it.
+        // The key strip takes the mouse before the graph does, except under an open list or menu,
+        // which is drawn over the strip and has to get the press. A key plays while the mouse
+        // holds it.
         let strip = piano::strip_bounds(bounds);
         match mouse_event {
-            mouse::Event::ButtonPressed(mouse::Button::Left) if strip.contains(screen) => {
+            mouse::Event::ButtonPressed(mouse::Button::Left)
+                if strip.contains(screen) && !self.overlay_at(point, screen, bounds) =>
+            {
                 let note = piano::key_at(strip, screen);
                 self.graph.mouse_note = note;
                 return match note {

@@ -193,9 +193,26 @@ impl Graph {
 
     /// Returns the top-most node under `point`, if any.
     pub(super) fn node_at(&self, point: Point) -> Option<usize> {
-        (0..self.nodes.len())
+        self.draw_order()
+            .into_iter()
             .rev()
             .find(|&index| self.nodes[index].bounds().contains(point))
+    }
+
+    /// The nodes from the one drawn first (at the back) to the one drawn last (on top). Nodes
+    /// keep their own order, except that the selected node, or the one being placed, goes last,
+    /// so it sits above any node it overlaps.
+    pub(super) fn draw_order(&self) -> Vec<usize> {
+        let top = match self.interaction {
+            Interaction::Placing { node, .. } => Some(node),
+            _ => self.selected,
+        }
+        .filter(|&index| index < self.nodes.len());
+        let mut order: Vec<usize> = (0..self.nodes.len())
+            .filter(|&index| Some(index) != top)
+            .collect();
+        order.extend(top);
+        order
     }
 
     /// The graph's wires as the compiler reads them.
