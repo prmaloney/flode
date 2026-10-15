@@ -1936,6 +1936,23 @@ mod section_tests {
 #[cfg(test)]
 mod preset_ui_tests {
     use super::*;
+
+    /// Each row of the preset list lights on its own line, and a submenu row is not on the list.
+    #[test]
+    fn a_preset_row_knows_its_line_in_the_list() {
+        assert_eq!(PresetRow::SaveAs.list_line(3), Some(0));
+        assert_eq!(PresetRow::Init.list_line(3), Some(1));
+        assert_eq!(
+            PresetRow::Category(2).list_line(3),
+            Some(PRESET_ACTION_ROWS + 2)
+        );
+        assert_eq!(
+            PresetRow::Loose(1).list_line(3),
+            Some(PRESET_ACTION_ROWS + 3 + 1)
+        );
+        assert_eq!(PresetRow::Sub(0, 1).list_line(3), None);
+    }
+
     use crate::editor::canvas::{Message, NodeEditor};
     use crate::editor::piano::PianoEvent;
     use crate::editor::style::MENU_ITEM_HEIGHT;

@@ -203,7 +203,14 @@ pub(super) fn draw_editor(
 
         if let Some(menu) = graph.menu {
             if let Some(node) = graph.nodes.get(menu.node) {
-                draw_menu(frame, menu, node, view.zoom);
+                // The menu is in editor coordinates, so the cursor is too.
+                let hovered_row = if graph.cursor_in {
+                    menu_item_at(menu, view.to_world(graph.last_screen))
+                        .and_then(|item| menu.items.iter().position(|&i| i == item))
+                } else {
+                    None
+                };
+                draw_menu(frame, menu, node, hovered_row, view.zoom);
             }
         }
     });
@@ -1182,6 +1189,20 @@ pub(super) fn draw_pill(
     }
 }
 
+/// Lights row `row` of a list that starts at `list`, the way a hovered row of a dropdown is lit.
+fn light_row(frame: &mut Frame, list: Rectangle, row: usize) {
+    let lit = Rectangle {
+        x: list.x + 4.0,
+        y: list.y + row as f32 * MENU_ITEM_HEIGHT,
+        width: list.width - 8.0,
+        height: MENU_ITEM_HEIGHT,
+    };
+    frame.fill(
+        &rounded_rect(lit, DROPDOWN_CORNER_RADIUS),
+        LIST_ROW_HOVER_COLOR,
+    );
+}
+
 /// The text of one row of a list that starts at `list`.
 fn list_row_text(frame: &mut Frame, list: Rectangle, row: usize, content: String, color: Color) {
     frame.fill_text(Text {
@@ -1227,6 +1248,15 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
     draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
     let (categories, loose) = preset_rows_shown(bounds, library);
+
+    // The row under the cursor lights. A row of the open submenu is lit by the submenu's own draw.
+    if graph.cursor_in {
+        let row = preset_row_at(bounds, menu, graph.last_screen)
+            .and_then(|row| row.list_line(categories));
+        if let Some(row) = row {
+            light_row(frame, list, row);
+        }
+    }
 
     list_row_text(frame, list, 0, "Save as...".to_string(), TEXT_COLOR);
     list_row_text(frame, list, 1, "Init".to_string(), TEXT_COLOR);
@@ -1303,6 +1333,11 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
     let sub = submenu_bounds(bounds, &menu.library, open);
     draw_shadow(frame, sub, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(sub, MENU_CORNER_RADIUS), MENU_COLOR);
+    if graph.cursor_in {
+        if let Some(PresetRow::Sub(_, row)) = preset_row_at(bounds, menu, graph.last_screen) {
+            light_row(frame, sub, row);
+        }
+    }
     let shown = submenu_rows_shown(bounds, &menu.library, open);
     for (index, name) in category.presets.iter().take(shown).enumerate() {
         let current = graph.preset_name.as_deref() == Some(name.as_str())
@@ -1468,6 +1503,15 @@ pub(super) fn draw_category_list(
     let list = category_list_bounds(bounds, category);
     draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
+    // A row lights under the cursor, unless it is a kind the graph cannot take another of.
+    if graph.cursor_in {
+        let hovered = category_row_at(bounds, category, graph.last_screen)
+            .filter(|&kind| graph.can_add(kind))
+            .and_then(|kind| category.kinds().iter().position(|&k| k == kind));
+        if let Some(row) = hovered {
+            light_row(frame, list, row);
+        }
+    }
 
     let labels: Vec<&str> = if category.kinds().is_empty() {
         vec!["Empty for now"]
@@ -1499,10 +1543,19 @@ pub(super) fn draw_category_list(
 }
 
 /// The right-click menu: one row for each entry the node's kind offers.
-pub(super) fn draw_menu(frame: &mut Frame, menu: ContextMenu, node: &FlodeNode, zoom: f32) {
+pub(super) fn draw_menu(
+    frame: &mut Frame,
+    menu: ContextMenu,
+    node: &FlodeNode,
+    hovered_row: Option<usize>,
+    zoom: f32,
+) {
     let bounds = menu_bounds(menu);
     draw_shadow(frame, bounds, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(bounds, MENU_CORNER_RADIUS), MENU_COLOR);
+    if let Some(row) = hovered_row {
+        light_row(frame, bounds, row);
+    }
     for (row, item) in menu.items.iter().enumerate() {
         frame.fill_text(Text {
             content: item.label(node).to_string(),

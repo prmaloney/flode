@@ -42,6 +42,20 @@ pub(super) enum PresetRow {
     Sub(usize, usize),
 }
 
+impl PresetRow {
+    /// The line of the preset list this row is on, counting from the top, when the list shows
+    /// `categories` categories. A row in a submenu is on a line of the submenu, not the list.
+    pub(super) fn list_line(self, categories: usize) -> Option<usize> {
+        match self {
+            PresetRow::SaveAs => Some(0),
+            PresetRow::Init => Some(1),
+            PresetRow::Category(index) => Some(PRESET_ACTION_ROWS + index),
+            PresetRow::Loose(index) => Some(PRESET_ACTION_ROWS + categories + index),
+            PresetRow::Sub(..) => None,
+        }
+    }
+}
+
 /// The widest a preset name is drawn on the pill, in characters.
 pub(super) const PILL_NAME_CHARS: usize = 10;
 
