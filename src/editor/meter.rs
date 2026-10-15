@@ -3,6 +3,7 @@
 //! always in view. The bars show peak level on a dB scale and fall back slowly, so a short peak
 //! is still readable.
 
+use super::depth::{draw_shadow, FLOAT_SHADOW};
 use super::draw::rounded_rect;
 use super::style::{PILL_COLOR, PILL_HEIGHT, PILL_TOP, TEXT_COLOR};
 use nih_plug_iced::widget::canvas::{Frame, Path, Text};
@@ -75,6 +76,7 @@ impl Ballistics {
 /// Draws the meter. `levels` are the held peaks as linear amplitude.
 pub(super) fn draw(frame: &mut Frame, bounds: Rectangle, levels: [f32; 2]) {
     let panel = meter_bounds(bounds);
+    draw_shadow(frame, panel, PILL_HEIGHT / 2.0, FLOAT_SHADOW);
     frame.fill(&rounded_rect(panel, PILL_HEIGHT / 2.0), PILL_COLOR);
 
     let left = panel.x + LABEL_WIDTH;

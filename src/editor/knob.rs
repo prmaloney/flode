@@ -22,8 +22,8 @@ const POINTER_OUTER: f32 = 0.30;
 const ARC_WIDTH: f32 = 0.05;
 const POINTER_WIDTH: f32 = 0.03;
 
-const BODY_COLOR: Color = Color::from_rgb(0.22, 0.22, 0.24);
-const TRACK_COLOR: Color = Color::from_rgb(0.36, 0.36, 0.39);
+const BODY_COLOR: Color = Color::from_rgb(0.205, 0.21, 0.255);
+const TRACK_COLOR: Color = Color::from_rgb(0.35, 0.36, 0.42);
 const FILL_COLOR: Color = Color::from_rgb(0.19, 0.50, 0.90);
 const POINTER_COLOR: Color = Color::WHITE;
 /// A knob driven by a control wire is greyed out, and the dot shows the live signal.

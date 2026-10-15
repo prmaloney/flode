@@ -11,6 +11,7 @@
 pub mod canvas;
 mod curve;
 mod demo;
+mod depth;
 mod draw;
 #[cfg(test)]
 mod factory;
@@ -236,11 +237,6 @@ impl IcedEditor for FlodeEditor {
     }
 
     fn background_color(&self) -> nih_plug_iced::Color {
-        nih_plug_iced::Color {
-            r: 0.15,
-            g: 0.15,
-            b: 0.15,
-            a: 1.0,
-        }
+        style::BACKGROUND_COLOR
     }
 }

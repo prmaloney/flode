@@ -159,8 +159,8 @@ const BUTTON_WIDTH: f32 = 44.0;
 const BUTTON_HEIGHT: f32 = 24.0;
 const BUTTON_GAP: f32 = 4.0;
 
-const STRIP_COLOR: Color = Color::from_rgb(0.09, 0.09, 0.11);
-const CONTROLS_COLOR: Color = Color::from_rgb(0.14, 0.14, 0.17);
+const STRIP_COLOR: Color = Color::from_rgb(0.085, 0.09, 0.115);
+const CONTROLS_COLOR: Color = Color::from_rgb(0.13, 0.135, 0.17);
 const WHITE_KEY_COLOR: Color = Color::from_rgb(0.90, 0.90, 0.92);
 const BLACK_KEY_COLOR: Color = Color::from_rgb(0.12, 0.12, 0.14);
 const BLACK_KEY_SHINE_COLOR: Color = Color::from_rgb(0.24, 0.24, 0.28);

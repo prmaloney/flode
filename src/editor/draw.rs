@@ -13,6 +13,7 @@ use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text};
 use nih_plug_iced::{alignment, Color, Point, Rectangle};
 
+use super::depth::{self, draw_shadow, FLOAT_SHADOW, LIFTED_SHADOW, NODE_SHADOW};
 use super::{curve::*, graph::*, menus::*, style::*};
 
 /// Draws one frame of the editor: the wires, the nodes, then the pill, key strip, and open
@@ -70,6 +71,15 @@ pub(super) fn draw_editor(
         frame.translate(offset);
         frame.scale(view.zoom);
 
+        // The dot grid is behind everything. It covers the part of the editor in view.
+        let screen = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: bounds.width,
+            height: bounds.height,
+        };
+        depth::draw_grid(frame, view.rect_to_world(screen), view.zoom);
+
         // Ordinary wires go under the nodes. The wire a dragged node would splice into, and the
         // wire being dragged, go over them so they stay visible.
         for (index, connection) in graph.connections.iter().enumerate() {
@@ -117,8 +127,26 @@ pub(super) fn draw_editor(
         }
     });
 
-    // The pill stays fixed on screen. It is drawn after the nodes, so it covers them.
-    draw_pill(&mut frame, bounds, graph.preset_name.as_deref());
+    // The pill stays fixed on screen. It is drawn after the nodes, so it covers them. Its buttons
+    // light when the cursor is over them, and while their list is open.
+    let hovered_item = if graph.cursor_in {
+        pill_button_at(bounds, graph.last_screen)
+    } else {
+        None
+    };
+    let item_place = |item: PillItem| PILL_ITEMS.iter().position(|candidate| *candidate == item);
+    let open_item = match (graph.category_menu, &graph.preset_list) {
+        (Some(category), _) => item_place(PillItem::Category(category)),
+        (None, Some(_)) => item_place(PillItem::Presets),
+        (None, None) => None,
+    };
+    draw_pill(
+        &mut frame,
+        bounds,
+        graph.preset_name.as_deref(),
+        hovered_item.and_then(item_place),
+        open_item,
+    );
     draw_status(&mut frame, bounds, graph);
     super::meter::draw(&mut frame, bounds, output);
 
@@ -136,7 +164,11 @@ pub(super) fn draw_editor(
             sounding: active_notes,
             pressed: graph.mouse_note,
             computer_keys: graph.computer_keys,
-            hover: piano::octave_button_at(strip, graph.last_screen),
+            hover: if graph.cursor_in {
+                piano::octave_button_at(strip, graph.last_screen)
+            } else {
+                None
+            },
             labels,
         },
     );
@@ -229,6 +261,16 @@ pub(super) fn draw_curve(frame: &mut Frame, curve: &[Point; 4], color: Color, wi
         builder.move_to(p0);
         builder.bezier_curve_to(p1, p2, p3);
     });
+    // A faint, wider copy of the wire's own color under it gives it a soft halo.
+    for (extra, alpha) in WIRE_GLOW {
+        frame.stroke(
+            &path,
+            Stroke::default()
+                .with_color(Color { a: alpha, ..color })
+                .with_width(width + extra)
+                .with_line_cap(LineCap::Round),
+        );
+    }
     frame.stroke(
         &path,
         Stroke::default()
@@ -237,6 +279,10 @@ pub(super) fn draw_curve(frame: &mut Frame, curve: &[Point; 4], color: Color, wi
             .with_line_cap(LineCap::Round),
     );
 }
+
+/// The halo around a wire: how much wider than the wire each layer is, and its opacity. The
+/// widest layer is the faintest.
+const WIRE_GLOW: [(f32, f32); 2] = [(6.0, 0.04), (3.0, 0.08)];
 
 pub(super) fn draw_node(
     frame: &mut Frame,
@@ -255,6 +301,13 @@ pub(super) fn draw_node(
     } else {
         (NODE_BODY_COLOR, NODE_HEADER_COLOR)
     };
+    // The selected node sits higher, so its shadow is bigger.
+    let shadow = if graph.selected == Some(index) {
+        LIFTED_SHADOW
+    } else {
+        NODE_SHADOW
+    };
+    draw_shadow(frame, bounds, CORNER_RADIUS, shadow);
     frame.fill(&rounded_rect(bounds, CORNER_RADIUS), body_color);
 
     // The header is a rounded rectangle with its bottom corners squared off.
@@ -266,6 +319,30 @@ pub(super) fn draw_node(
             nih_plug_iced::Size::new(header.width, CORNER_RADIUS),
         ),
         header_color,
+    );
+
+    // A faint edge all round, and a brighter line along the top of the header, so the node
+    // catches a little light.
+    frame.stroke(
+        &rounded_rect(bounds, CORNER_RADIUS),
+        Stroke::default()
+            .with_color(Color {
+                a: 0.06,
+                ..Color::WHITE
+            })
+            .with_width(1.0),
+    );
+    frame.stroke(
+        &Path::line(
+            Point::new(header.x + CORNER_RADIUS, header.y + 0.5),
+            Point::new(header.x + header.width - CORNER_RADIUS, header.y + 0.5),
+        ),
+        Stroke::default()
+            .with_color(Color {
+                a: 0.12,
+                ..Color::WHITE
+            })
+            .with_width(1.0),
     );
 
     draw_text(
@@ -939,6 +1016,7 @@ pub(super) fn draw_list(
     hovered_row: Option<usize>,
     zoom: f32,
 ) {
+    draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
 
     for (row, label) in labels.iter().enumerate() {
@@ -991,20 +1069,62 @@ pub(super) fn draw_selection(frame: &mut Frame, node: &FlodeNode) {
         width: bounds.width + 2.0 * SELECTION_WIDTH,
         height: bounds.height + 2.0 * SELECTION_WIDTH,
     };
+    // A soft glow in the accent color, widest and faintest first, then the outline itself.
+    let outline_path = rounded_rect(outline, CORNER_RADIUS + SELECTION_WIDTH);
+    for (extra, alpha) in SELECTION_GLOW {
+        frame.stroke(
+            &outline_path,
+            Stroke::default()
+                .with_color(Color {
+                    a: alpha,
+                    ..SELECTION_COLOR
+                })
+                .with_width(SELECTION_WIDTH + extra),
+        );
+    }
     frame.stroke(
-        &rounded_rect(outline, CORNER_RADIUS + SELECTION_WIDTH),
+        &outline_path,
         Stroke::default()
             .with_color(SELECTION_COLOR)
             .with_width(SELECTION_WIDTH),
     );
 }
 
+/// The glow around the selected node: how much wider than the outline each layer is, and its
+/// opacity.
+const SELECTION_GLOW: [(f32, f32); 3] = [(9.0, 0.04), (5.5, 0.07), (2.5, 0.12)];
+
 /// The pill of add buttons at the top of the editor.
-pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle, preset_name: Option<&str>) {
+///
+/// `hovered` is the button under the cursor and `open` is the one whose list is open, each by its
+/// place in `PILL_ITEMS`. Both are lit, and their chevron goes from dim to white.
+pub(super) fn draw_pill(
+    frame: &mut Frame,
+    bounds: Rectangle,
+    preset_name: Option<&str>,
+    hovered: Option<usize>,
+    open: Option<usize>,
+) {
     let pill = pill_bounds(bounds);
+    draw_shadow(frame, pill, PILL_HEIGHT / 2.0, FLOAT_SHADOW);
     frame.fill(&rounded_rect(pill, PILL_HEIGHT / 2.0), PILL_COLOR);
 
     let segment = pill.width / PILL_ITEMS.len() as f32;
+    for (index, color) in [
+        (open, DROPDOWN_HOVER_COLOR),
+        (hovered, LIST_ROW_HOVER_COLOR),
+    ]
+    .into_iter()
+    .filter_map(|(item, color)| item.map(|item| (item, color)))
+    {
+        let lit = Rectangle {
+            x: pill.x + index as f32 * segment + PILL_LIGHT_INSET,
+            y: pill.y + PILL_LIGHT_INSET,
+            width: segment - 2.0 * PILL_LIGHT_INSET,
+            height: pill.height - 2.0 * PILL_LIGHT_INSET,
+        };
+        frame.fill(&rounded_rect(lit, lit.height / 2.0), color);
+    }
     for divider in 1..PILL_ITEMS.len() {
         let x = pill.x + divider as f32 * segment;
         frame.stroke(
@@ -1050,10 +1170,11 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle, preset_name: Optio
                 builder.line_to(Point::new(chevron_x, center_y + 2.0));
                 builder.line_to(Point::new(chevron_x + 3.0, center_y - 2.0));
             });
+            let lit = hovered == Some(index) || open == Some(index);
             frame.stroke(
                 &chevron,
                 Stroke::default()
-                    .with_color(TEXT_COLOR)
+                    .with_color(if lit { TEXT_COLOR } else { DIM_TEXT_COLOR })
                     .with_width(1.5)
                     .with_line_cap(LineCap::Round),
             );
@@ -1103,6 +1224,7 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
     };
     let library = &menu.library;
     let list = preset_list_bounds(bounds, library);
+    draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
     let (categories, loose) = preset_rows_shown(bounds, library);
 
@@ -1179,6 +1301,7 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
         return;
     };
     let sub = submenu_bounds(bounds, &menu.library, open);
+    draw_shadow(frame, sub, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(sub, MENU_CORNER_RADIUS), MENU_COLOR);
     let shown = submenu_rows_shown(bounds, &menu.library, open);
     for (index, name) in category.presets.iter().take(shown).enumerate() {
@@ -1211,6 +1334,7 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
 pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, entry: &NameEntry) {
     let area = name_box_bounds(bounds, &entry.categories);
     let layout = name_box_layout(&entry.categories);
+    draw_shadow(frame, area, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
     let label = |frame: &mut Frame, content: &str, x: f32, y: f32, size: f32, color: Color| {
         frame.fill_text(Text {
@@ -1342,6 +1466,7 @@ pub(super) fn draw_category_list(
     graph: &Graph,
 ) {
     let list = category_list_bounds(bounds, category);
+    draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
 
     let labels: Vec<&str> = if category.kinds().is_empty() {
@@ -1376,6 +1501,7 @@ pub(super) fn draw_category_list(
 /// The right-click menu: one row for each entry the node's kind offers.
 pub(super) fn draw_menu(frame: &mut Frame, menu: ContextMenu, node: &FlodeNode, zoom: f32) {
     let bounds = menu_bounds(menu);
+    draw_shadow(frame, bounds, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(bounds, MENU_CORNER_RADIUS), MENU_COLOR);
     for (row, item) in menu.items.iter().enumerate() {
         frame.fill_text(Text {

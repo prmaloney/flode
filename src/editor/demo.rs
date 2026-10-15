@@ -10,7 +10,8 @@
 //! gives the envelope and LFO viewers a live signal to show.
 //!
 //! `FLODE_UI` opens part of the interface. `presets` opens the preset list, `presets:Bass` opens
-//! it with the Bass submenu out, and `save` opens the save box.
+//! it with the Bass submenu out, `save` opens the save box, and `select:2` selects the node at
+//! index 2.
 
 use super::graph::Graph;
 
@@ -60,6 +61,12 @@ pub(super) fn apply_with(
             }
         }
         Some(("save", _)) => graph.start_name_entry(),
+        Some(("select", index)) => {
+            graph.selected = index
+                .parse()
+                .ok()
+                .filter(|&index| index < graph.nodes.len());
+        }
         _ => {}
     }
     // The line about what loaded would only get in the way of a picture.
@@ -117,6 +124,15 @@ mod tests {
         assert!(elsewhere.nodes.len() > nodes);
         assert_eq!(elsewhere.preset_list.unwrap().library.categories.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_node_can_be_selected() {
+        let mut graph = Graph::default();
+        apply_with(&mut graph, None, None, Some("select:1"));
+        assert_eq!(graph.selected, Some(1));
+        apply_with(&mut graph, None, None, Some("select:99"));
+        assert_eq!(graph.selected, None);
     }
 
     #[test]
