@@ -11,6 +11,8 @@
 pub mod canvas;
 mod curve;
 mod draw;
+#[cfg(test)]
+mod factory;
 pub mod graph;
 pub mod knob;
 mod menus;
