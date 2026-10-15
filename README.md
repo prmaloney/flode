@@ -7,6 +7,26 @@ builds as a VST3, a CLAP plugin, and a standalone app. It is written in Rust wit
 
 ![Dusk Pad, a patch with macro knobs driving a filter and a reverb](docs/images/dusk-pad.png)
 
+## Where the idea comes from
+
+Flode borrows its way of working from the node editors in [Blender](https://www.blender.org): the
+shader editor, geometry nodes, and the compositor. In those, you describe a result by wiring small
+pieces together instead of filling in one big panel, and you can see how everything connects. A
+synth suits that well, since a patch is already a signal path.
+
+A few habits carried over directly:
+
+- Sockets are colored by what they carry, and a wire only joins sockets of the same kind. Grey is
+  audio, green is control, and purple is MIDI notes.
+- A node can fold down to its sockets, packed close together, so a big patch stays on one screen.
+- Dropping a node onto a wire splices it into that wire.
+- `M` mutes a node, `Shift+D` duplicates it and lets you place the copy, and the right-click menu
+  has the same actions.
+- The Map node plays the role of Blender's Map Range and color ramp, rescaling one signal into
+  another's range.
+
+Flode is not affiliated with Blender or the Blender Foundation.
+
 ## What is in it
 
 **Nodes**
