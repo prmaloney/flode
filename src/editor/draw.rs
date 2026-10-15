@@ -2,7 +2,9 @@
 
 use crate::editor::knob::{self};
 use crate::editor::piano::{self};
+use crate::nodes::knobs::KnobId;
 use crate::nodes::map;
+use crate::nodes::viewer::Live;
 use crate::nodes::{
     Category, FlodeNode, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,
     ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
@@ -429,6 +431,10 @@ pub(super) fn draw_node(
         draw_map_curve(frame, index, graph, levels);
     }
 
+    if node.has_viewer() {
+        draw_viewer(frame, index, graph, levels);
+    }
+
     for slot in node.knob_slots() {
         let route = if slot.pinned {
             graph.control_route(index, slot.id)
@@ -646,6 +652,124 @@ pub(super) fn draw_map_curve(
         );
         frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
     }
+}
+
+/// The knob values a node's viewer reads: the node's own, except for a knob a control wire drives,
+/// which reads that wire's live level. This is what makes the shape move with a knob or its wire.
+pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) -> Live {
+    let node = &graph.nodes[index];
+    let pinned: Vec<KnobId> = node
+        .rows()
+        .iter()
+        .filter_map(|row| match row.input {
+            Some(Port::Knob(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    let wiring = graph.wiring();
+    Live::new(node, |id| {
+        if pinned.contains(&id) {
+            wiring
+                .control_route(index, id)
+                .map(|route| route.apply(levels))
+        } else {
+            None
+        }
+    })
+}
+
+/// A node's viewer: a box with the shape the node's kind traces in it. Nothing in it is clickable.
+pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels: ControlLevels) {
+    let node = &graph.nodes[index];
+    let Some(bounds) = node.viewer_bounds() else {
+        return;
+    };
+    frame.fill(
+        &rounded_rect(bounds, DROPDOWN_CORNER_RADIUS),
+        DROPDOWN_COLOR,
+    );
+
+    // A faint midline, so a shape around zero reads as one.
+    let mid = bounds.y + bounds.height / 2.0;
+    frame.stroke(
+        &Path::line(
+            Point::new(bounds.x, mid),
+            Point::new(bounds.x + bounds.width, mid),
+        ),
+        Stroke::default()
+            .with_color(Color {
+                a: 0.12,
+                ..TEXT_COLOR
+            })
+            .with_width(1.0),
+    );
+
+    let Some(trace) = node.trace(&live_knobs(graph, index, &levels)) else {
+        return;
+    };
+    let at = |i: usize, y: f32| {
+        let x = i as f32 / trace.points.len().saturating_sub(1).max(1) as f32;
+        Point::new(
+            bounds.x + x * bounds.width,
+            bounds.y + (1.0 - y) * bounds.height,
+        )
+    };
+
+    for marker in &trace.markers {
+        let x = bounds.x + marker.clamp(0.0, 1.0) * bounds.width;
+        frame.stroke(
+            &Path::line(
+                Point::new(x, bounds.y),
+                Point::new(x, bounds.y + bounds.height),
+            ),
+            Stroke::default()
+                .with_color(Color {
+                    a: 0.25,
+                    ..TEXT_COLOR
+                })
+                .with_width(1.0),
+        );
+    }
+
+    if trace.points.len() < 2 {
+        return;
+    }
+    if trace.fill {
+        let area = Path::new(|builder| {
+            builder.move_to(Point::new(bounds.x, bounds.y + bounds.height));
+            for (i, y) in trace.points.iter().enumerate() {
+                builder.line_to(at(i, *y));
+            }
+            builder.line_to(Point::new(
+                bounds.x + bounds.width,
+                bounds.y + bounds.height,
+            ));
+            builder.close();
+        });
+        frame.fill(
+            &area,
+            Color {
+                a: 0.15,
+                ..TEXT_COLOR
+            },
+        );
+    }
+    let line = Path::new(|builder| {
+        for (i, y) in trace.points.iter().enumerate() {
+            if i == 0 {
+                builder.move_to(at(i, *y));
+            } else {
+                builder.line_to(at(i, *y));
+            }
+        }
+    });
+    frame.stroke(
+        &line,
+        Stroke::default()
+            .with_color(TEXT_COLOR)
+            .with_width(1.5)
+            .with_line_cap(LineCap::Round),
+    );
 }
 
 /// A switch: a box with a check when on, and its label. The output's "Always" is dimmed while

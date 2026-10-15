@@ -1383,7 +1383,7 @@ mod default_graph_tests {
     }
 
     /// The nodes do not overlap, and all sit inside the default window above the key strip. The
-    /// MIDI input and the envelope are stacked on the left, with the oscillator to their right.
+    /// MIDI input, envelope, and oscillator run left to right, then the output.
     #[test]
     fn the_default_nodes_do_not_overlap() {
         let graph = Graph::default();

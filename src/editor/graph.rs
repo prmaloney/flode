@@ -201,30 +201,26 @@ pub(super) enum Hover {
 
 /// Where the starting nodes sit: the oscillator at the far left and the output at the far right of
 /// the default 1024 px editor, with a 24 px margin.
-/// The default graph's envelope sits at the left edge, with the oscillator it shapes to its right.
-pub(super) const DEFAULT_ENVELOPE_X: f32 = 24.0;
-/// The space between the default graph's two stacked nodes.
-const DEFAULT_GAP: f32 = 16.0;
+/// The default graph runs left to right: the MIDI input at the left edge, then the envelope, then
+/// the oscillator the envelope shapes. Nothing is stacked, since the envelope and oscillator are
+/// tall once they show a viewer.
+pub(super) const DEFAULT_INPUT_X: f32 = 24.0;
+pub(super) const DEFAULT_ENVELOPE_X: f32 = DEFAULT_INPUT_X + NODE_WIDTH + 48.0;
 pub(super) const DEFAULT_OSC_X: f32 = DEFAULT_ENVELOPE_X + NODE_WIDTH + 48.0;
 pub(super) const DEFAULT_OUTPUT_X: f32 = 1024.0 - 24.0 - NODE_WIDTH;
 
 /// The graph a new instance starts with: an oscillator, wired to the output, with an envelope
 /// shaping its amplitude and a MIDI input feeding it notes. The oscillator is node 0 and the
 /// output is node 1, the envelope is node 2, and the MIDI input is node 3. The MIDI input is at
-/// the left edge, with the envelope under it.
+/// the left edge, with the envelope to its right.
 impl Default for Graph {
     fn default() -> Self {
-        let input = FlodeNode::new(NodeKind::Input, Point::new(DEFAULT_ENVELOPE_X, 80.0));
-        let envelope_y = 80.0 + input.height() + DEFAULT_GAP;
         let mut graph = Self::with(
             vec![
                 FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
                 FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
-                FlodeNode::new(
-                    NodeKind::Envelope,
-                    Point::new(DEFAULT_ENVELOPE_X, envelope_y),
-                ),
-                input,
+                FlodeNode::new(NodeKind::Envelope, Point::new(DEFAULT_ENVELOPE_X, 80.0)),
+                FlodeNode::new(NodeKind::Input, Point::new(DEFAULT_INPUT_X, 80.0)),
             ],
             vec![
                 Connection {

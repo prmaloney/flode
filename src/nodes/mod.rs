@@ -25,10 +25,12 @@ pub mod oscillator;
 pub mod output;
 pub mod phaser;
 pub mod reverb;
+pub mod viewer;
 
 use crate::editor::knob;
 use nih_plug_iced::{Point, Rectangle};
 use serde::{Deserialize, Serialize};
+use viewer::{Live, Trace, TRACE_SAMPLES};
 
 pub use knobs::KnobId;
 
@@ -52,6 +54,12 @@ pub const DROPDOWN_INSET: f32 = 12.0;
 pub const SWITCH_ROW_HEIGHT: f32 = 22.0;
 /// The transfer curve of a map node: a box about as wide as the node's body.
 pub const CURVE_HEIGHT: f32 = 96.0;
+/// The viewer on a node: a box that draws a shape. It is shorter than the curve, since nothing in
+/// it is dragged.
+pub const VIEWER_HEIGHT: f32 = 56.0;
+/// The space a viewer row takes in the stack: the box and a margin above and below it. Rows after
+/// it start below this.
+pub const VIEWER_ROW: f32 = VIEWER_HEIGHT + 8.0;
 
 /// The header row of a section: its arrow and title.
 pub const SECTION_HEIGHT: f32 = 22.0;
@@ -328,6 +336,9 @@ pub enum Control {
     Switch(usize),
     /// The transfer curve of a map.
     Curve,
+    /// A box that draws the node's shape, such as its waveform. It cannot be edited. The kind's
+    /// `trace` says what it shows.
+    Viewer,
     /// The header of section number `n`. The rows after it, up to the next header, fold with it.
     Section(usize),
 }
@@ -440,6 +451,12 @@ pub trait NodeBehavior: Sync {
     /// own state, such as the oscillator's noise type under the noise waveform.
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {
         Vec::new()
+    }
+
+    /// What the node's viewer draws, with `samples` points. A kind with a `Control::Viewer` row
+    /// overrides this. Read knobs through `live`, not the node, so a driven knob moves the shape.
+    fn trace(&self, _node: &FlodeNode, _live: &Live, _samples: usize) -> Option<Trace> {
+        None
     }
 }
 
@@ -621,14 +638,18 @@ impl FlodeNode {
     /// under the section's header. A node folded as a whole does the same for every row, with no
     /// section headers, so a collapsed node is its header over a short stack of pins.
     pub fn row_places(&self) -> Vec<RowPlace> {
+        self.places_of(&self.rows())
+    }
+
+    /// `row_places` for a given list of rows, in place of the kind's own.
+    fn places_of(&self, rows: &[Row]) -> Vec<RowPlace> {
         let mut top = if self.collapsed {
             HEADER_HEIGHT + COLLAPSED_PADDING
         } else {
             HEADER_HEIGHT
         };
         let mut section = None;
-        self.rows()
-            .iter()
+        rows.iter()
             .map(|row| {
                 if let Some(Control::Section(n)) = row.control {
                     section = Some(n);
@@ -647,8 +668,14 @@ impl FlodeNode {
                 }
                 let folded = self.collapsed || section.is_some_and(|n| self.section_collapsed(n));
                 if !folded {
-                    let y = top + ROW_PITCH / 2.0;
-                    top += ROW_PITCH;
+                    // A viewer is taller than a row, and the rows below it start under it.
+                    let pitch = if row.control == Some(Control::Viewer) {
+                        VIEWER_ROW
+                    } else {
+                        ROW_PITCH
+                    };
+                    let y = top + pitch / 2.0;
+                    top += pitch;
                     RowPlace {
                         y,
                         shape: RowShape::Full,
@@ -804,17 +831,22 @@ impl FlodeNode {
     /// Full height of the node. Each row's control takes the space of its row, so the height runs
     /// to the lowest one. A node folded as a whole is its header and its packed pins.
     pub fn height(&self) -> f32 {
-        let rows = self.rows();
+        self.height_of(&self.rows())
+    }
+
+    /// `height` for a given list of rows, in place of the kind's own.
+    fn height_of(&self, rows: &[Row]) -> f32 {
         let bottom = self
-            .row_places()
+            .places_of(rows)
             .iter()
-            .zip(&rows)
+            .zip(rows)
             .map(|(place, row)| match place.shape {
                 RowShape::Hidden => 0.0,
                 RowShape::Packed => place.y + PACKED_PITCH / 2.0,
                 RowShape::SectionHeader(_) => place.y + SECTION_HEIGHT / 2.0,
                 RowShape::Full => match row.control {
                     Some(Control::Curve) => place.y - ROW_PITCH / 2.0 + CURVE_HEIGHT,
+                    Some(Control::Viewer) => place.y + VIEWER_ROW / 2.0,
                     Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
                         place.y + SWITCH_ROW_HEIGHT / 2.0
                     }
@@ -825,7 +857,7 @@ impl FlodeNode {
         if self.collapsed {
             // A collapsed node with no pins is only its header.
             let packed = self
-                .row_places()
+                .places_of(rows)
                 .iter()
                 .any(|place| place.shape == RowShape::Packed);
             return if packed {
@@ -869,6 +901,40 @@ impl FlodeNode {
             width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
             height: CURVE_HEIGHT,
         }
+    }
+
+    /// True if this node draws a viewer and it is on show. A folded section or a collapsed node
+    /// hides it.
+    pub fn has_viewer(&self) -> bool {
+        self.viewer_bounds().is_some()
+    }
+
+    /// The viewer's box, centered on its row. None if the node has no viewer, or it is folded
+    /// away.
+    pub fn viewer_bounds(&self) -> Option<Rectangle> {
+        self.viewer_bounds_of(&self.rows())
+    }
+
+    /// `viewer_bounds` for a given list of rows, in place of the kind's own.
+    fn viewer_bounds_of(&self, rows: &[Row]) -> Option<Rectangle> {
+        let index = rows
+            .iter()
+            .position(|row| row.control == Some(Control::Viewer))?;
+        let place = self.places_of(rows).get(index).copied()?;
+        if place.shape != RowShape::Full {
+            return None;
+        }
+        Some(Rectangle {
+            x: self.position.x + DROPDOWN_INSET,
+            y: self.position.y + place.y - VIEWER_HEIGHT / 2.0,
+            width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
+            height: VIEWER_HEIGHT,
+        })
+    }
+
+    /// What the node's viewer draws right now, from knob values in `live`.
+    pub fn trace(&self, live: &Live) -> Option<Trace> {
+        self.kind.behavior().trace(self, live, TRACE_SAMPLES)
     }
 
     /// The row of switch `index`, on the row that holds it. A switch in a folded section, or in a
