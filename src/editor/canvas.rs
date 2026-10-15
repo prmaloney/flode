@@ -88,9 +88,13 @@ impl<'a> NodeEditor<'a> {
             }
         }
 
-        // The save box takes every press. One outside the box cancels it.
-        if self.graph.name_entry.is_some() {
-            if !name_box_bounds(bounds).contains(screen) {
+        // The save box takes every press. A chip picks its category, and one outside the box
+        // cancels it.
+        if let Some(entry) = self.graph.name_entry.as_mut() {
+            if let Some(index) = category_chip_at(bounds, &entry.categories, screen) {
+                entry.category = entry.categories[index].clone();
+                entry.field = EntryField::Category;
+            } else if !name_box_bounds(bounds, &entry.categories).contains(screen) {
                 self.graph.name_entry = None;
             }
             return (event::Status::Captured, Some(Message::GraphChanged));
@@ -399,10 +403,21 @@ impl<'a> NodeEditor<'a> {
                             entry.active_mut().pop();
                         }
                     }
-                    // Tab, and the arrow keys, move between the name and the category.
-                    keyboard::KeyCode::Tab | keyboard::KeyCode::Up | keyboard::KeyCode::Down => {
+                    // Tab moves between the name and the category. The arrow keys step through
+                    // the existing categories, so one can be picked without typing it.
+                    keyboard::KeyCode::Tab => {
                         if let Some(entry) = self.graph.name_entry.as_mut() {
                             entry.switch_field();
+                        }
+                    }
+                    keyboard::KeyCode::Down | keyboard::KeyCode::Up => {
+                        if let Some(entry) = self.graph.name_entry.as_mut() {
+                            let step = if *key_code == keyboard::KeyCode::Down {
+                                1
+                            } else {
+                                -1
+                            };
+                            entry.cycle_category(step);
                         }
                     }
                     keyboard::KeyCode::Escape => self.graph.name_entry = None,

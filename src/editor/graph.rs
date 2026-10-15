@@ -80,15 +80,51 @@ pub(super) enum EntryField {
     Category,
 }
 
-/// The save box: a name, a category, and the field being typed in.
+/// The save box: a name, a category, and the field being typed in. It also holds the categories
+/// that already exist, so one can be picked instead of typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NameEntry {
     pub(super) name: String,
     pub(super) category: String,
     pub(super) field: EntryField,
+    /// The existing categories, in the order the list shows them.
+    pub(super) categories: Vec<String>,
 }
 
 impl NameEntry {
+    /// The existing category that the typed one names, ignoring case and spaces at the ends.
+    pub(super) fn existing_category(&self) -> Option<&String> {
+        let typed = self.category.trim().to_lowercase();
+        self.categories
+            .iter()
+            .find(|name| name.to_lowercase() == typed)
+    }
+
+    /// True if the typed category is not one that exists yet, so saving would make a folder.
+    pub(super) fn is_new_category(&self) -> bool {
+        !self.category.trim().is_empty() && self.existing_category().is_none()
+    }
+
+    /// Picks the existing category `step` places along from the typed one, wrapping around. From
+    /// no category, stepping on goes to the first and stepping back goes to the last. The typing
+    /// moves to the category field.
+    pub(super) fn cycle_category(&mut self, step: i32) {
+        self.field = EntryField::Category;
+        let count = self.categories.len() as i32;
+        if count == 0 {
+            return;
+        }
+        let at = self
+            .existing_category()
+            .and_then(|found| self.categories.iter().position(|name| name == found));
+        let next = match at {
+            Some(at) => (at as i32 + step).rem_euclid(count),
+            None if step >= 0 => 0,
+            None => count - 1,
+        };
+        self.category = self.categories[next as usize].clone();
+    }
+
     /// The text of the field being typed in.
     pub(super) fn active_mut(&mut self) -> &mut String {
         match self.field {
@@ -287,10 +323,20 @@ impl Graph {
     /// replaces it.
     pub(super) fn start_name_entry(&mut self) {
         self.preset_list = None;
+        let categories = self
+            .preset_dir
+            .as_deref()
+            .map(presets::library_in)
+            .unwrap_or_default()
+            .categories
+            .into_iter()
+            .map(|category| category.name)
+            .collect();
         self.name_entry = Some(NameEntry {
             name: self.preset_name.clone().unwrap_or_default(),
             category: self.preset_category.clone(),
             field: EntryField::Name,
+            categories,
         });
     }
 
@@ -303,7 +349,10 @@ impl Graph {
             self.say("Type a name first");
             return;
         };
-        let Some(category) = presets::clean_category(&entry.category) else {
+        // A category that matches an existing one apart from its case is that one, so a slip of
+        // the shift key does not make a second folder.
+        let typed = entry.existing_category().unwrap_or(&entry.category);
+        let Some(category) = presets::clean_category(typed) else {
             self.say("That category is not usable");
             return;
         };

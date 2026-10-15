@@ -2100,7 +2100,7 @@ mod preset_ui_tests {
             (name(&editor).name.as_str(), name(&editor).category.as_str()),
             ("amab", "Bass")
         );
-        press_key(&mut editor, KeyCode::Up);
+        press_key(&mut editor, KeyCode::Tab);
         assert_eq!(name(&editor).field, EntryField::Name);
 
         // Enter with a blank name keeps the box open.
@@ -2175,7 +2175,7 @@ mod preset_ui_tests {
 
         // A press inside the box leaves it open.
         editor.graph.start_name_entry();
-        let inside = name_box_bounds(bounds());
+        let inside = name_box_bounds(bounds(), &[]);
         click(&mut editor, Point::new(inside.x + 10.0, inside.y + 10.0));
         assert!(editor.graph.name_entry.is_some());
     }
@@ -2357,6 +2357,142 @@ mod preset_ui_tests {
         assert!(editor.graph.nodes.iter().any(|n| n.kind == NodeKind::Delay));
         assert_eq!(editor.graph.preset_name.as_deref(), Some("Plain"));
         assert_eq!(editor.graph.preset_category, "");
+    }
+
+    /// The save box with these categories to pick from.
+    fn entry_with(categories: &[&str]) -> NameEntry {
+        NameEntry {
+            name: "Sound".to_string(),
+            category: String::new(),
+            field: EntryField::Name,
+            categories: categories.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    /// A typed category is matched to an existing one without regard to case, and one that
+    /// matches nothing is tagged new, so a typo like "baas" shows before it makes a folder.
+    #[test]
+    fn a_typed_category_is_matched_or_marked_new() {
+        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
+        assert!(!entry.is_new_category());
+        for (typed, new) in [
+            ("Bass", false),
+            (" bass ", false),
+            ("LEAD", false),
+            ("baas", true),
+        ] {
+            entry.category = typed.to_string();
+            assert_eq!(entry.is_new_category(), new, "{typed}");
+        }
+        entry.category = "pad".to_string();
+        assert_eq!(entry.existing_category().map(String::as_str), Some("Pad"));
+    }
+
+    /// Up and down step through the existing categories and wrap, and move the typing to the
+    /// category field.
+    #[test]
+    fn the_arrow_keys_step_through_the_categories() {
+        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
+        entry.cycle_category(1);
+        assert_eq!(entry.category, "Bass");
+        assert_eq!(entry.field, EntryField::Category);
+        entry.cycle_category(1);
+        entry.cycle_category(1);
+        assert_eq!(entry.category, "Pad");
+        entry.cycle_category(1);
+        assert_eq!(entry.category, "Bass");
+        entry.cycle_category(-1);
+        assert_eq!(entry.category, "Pad");
+
+        // From nothing, up goes to the last. A typed category that matches one starts from it.
+        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
+        entry.cycle_category(-1);
+        assert_eq!(entry.category, "Pad");
+        entry.category = "lead".to_string();
+        entry.cycle_category(1);
+        assert_eq!(entry.category, "Pad");
+        // With no categories there is nothing to pick, and the typed text stays.
+        let mut empty = entry_with(&[]);
+        empty.category = "Mine".to_string();
+        empty.cycle_category(1);
+        assert_eq!(empty.category, "Mine");
+    }
+
+    /// Saving with a category that differs from an existing one only in case files the preset
+    /// under the existing one.
+    #[test]
+    fn a_case_slip_files_under_the_existing_category() {
+        let dir = TempDir::new("case");
+        let mut seed = graph_in(&dir);
+        save_through_the_ui(&mut seed, "First", "Bass", [0.0; 4]);
+
+        let mut graph = graph_in(&dir);
+        save_through_the_ui(&mut graph, "Second", "bass", [0.0; 4]);
+        let library = library_of(&dir);
+        assert_eq!(library.categories.len(), 1);
+        assert_eq!(library.categories[0].name, "Bass");
+        assert_eq!(library.categories[0].presets, ["First", "Second"]);
+    }
+
+    /// The save box starts with the categories that exist, and a click on a chip picks one.
+    #[test]
+    fn a_chip_picks_an_existing_category() {
+        let dir = TempDir::new("chips");
+        let mut seed = graph_in(&dir);
+        save_through_the_ui(&mut seed, "A", "Bass", [0.0; 4]);
+        save_through_the_ui(&mut seed, "B", "Pad", [0.0; 4]);
+
+        let mut graph = graph_in(&dir);
+        graph.start_name_entry();
+        graph.name_entry.as_mut().unwrap().name = "Sound".to_string();
+        assert_eq!(
+            graph.name_entry.as_ref().unwrap().categories,
+            ["Bass", "Pad"]
+        );
+        let categories = graph.name_entry.as_ref().unwrap().categories.clone();
+        let area = name_box_bounds(bounds(), &categories);
+        let layout = name_box_layout(&categories);
+        assert_eq!(layout.chips.len(), 2);
+        let (_, pad) = layout.chips[1];
+        let middle = Point::new(
+            area.x + pad.x + pad.width / 2.0,
+            area.y + pad.y + pad.height / 2.0,
+        );
+
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, middle);
+        let entry = editor.graph.name_entry.clone().expect("the box stays open");
+        assert_eq!(entry.category, "Pad");
+        assert_eq!(entry.field, EntryField::Category);
+        assert!(!entry.is_new_category());
+        // Enter files the preset under it.
+        press_key(&mut editor, KeyCode::Enter);
+        assert_eq!(
+            editor.graph.pending_save,
+            Some(("Sound".to_string(), "Pad".to_string()))
+        );
+    }
+
+    /// The chips wrap inside the box, there are at most three rows, and every chip is clickable
+    /// inside the box's bounds.
+    #[test]
+    fn the_chips_wrap_inside_the_box() {
+        let names: Vec<String> = (0..40).map(|n| format!("Category {n}")).collect();
+        let layout = name_box_layout(&names);
+        assert!(!layout.chips.is_empty() && layout.chips.len() < names.len());
+        let rows: std::collections::BTreeSet<i32> =
+            layout.chips.iter().map(|(_, chip)| chip.y as i32).collect();
+        assert_eq!(rows.len(), 3);
+        for (_, chip) in &layout.chips {
+            assert!(chip.x >= 0.0 && chip.x + chip.width <= 360.0);
+            assert!(chip.y + chip.height <= layout.hint_y);
+        }
+        assert!(layout.height > layout.hint_y);
+        // The box is the same size as before when there is nothing to pick from.
+        assert_eq!(name_box_layout(&[]).height, 136.0);
+        // The box still sits above the keys.
+        let area = name_box_bounds(bounds(), &names);
+        assert!(area.y + area.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
     }
 
     /// A category that is not usable keeps the box open and says so.

@@ -151,14 +151,103 @@ pub(super) fn preset_row_at(
     }
 }
 
-/// The box where a preset's name is typed. It sits under the pill, in the middle.
-pub(super) fn name_box_bounds(bounds: Rectangle) -> Rectangle {
+/// The most rows of category chips the save box shows. Categories past that are not drawn, but
+/// the arrow keys still reach them.
+const MAX_CHIP_ROWS: usize = 3;
+
+/// How the save box is laid out inside: where each existing category's chip sits, and where the
+/// hint line and the bottom edge are. Everything is measured from the box's top left corner.
+pub(super) struct NameBoxLayout {
+    /// For each chip drawn: the position of its category in the list, and its rectangle.
+    pub(super) chips: Vec<(usize, Rectangle)>,
+    /// The height of the label over the chips, or None when there are no chips.
+    pub(super) chips_label_y: Option<f32>,
+    pub(super) hint_y: f32,
+    pub(super) height: f32,
+}
+
+/// The width of a category's chip. The font is proportional, so this is an estimate from the
+/// number of characters.
+fn chip_width(name: &str) -> f32 {
+    name.chars().count() as f32 * 6.6 + 20.0
+}
+
+/// Lays out the save box for a list of existing categories. The chips wrap onto rows that fit
+/// the box's width.
+pub(super) fn name_box_layout(categories: &[String]) -> NameBoxLayout {
+    if categories.is_empty() {
+        return NameBoxLayout {
+            chips: Vec::new(),
+            chips_label_y: None,
+            hint_y: 116.0,
+            height: NAME_BOX_HEIGHT,
+        };
+    }
+    let left = 12.0;
+    let right = NAME_BOX_WIDTH - 12.0;
+    let first_row = 122.0;
+    let mut chips = Vec::new();
+    let (mut x, mut row) = (left, 0);
+    for (index, name) in categories.iter().enumerate() {
+        let width = chip_width(name);
+        if x + width > right && x > left {
+            x = left;
+            row += 1;
+        }
+        if row >= MAX_CHIP_ROWS {
+            break;
+        }
+        chips.push((
+            index,
+            Rectangle {
+                x,
+                y: first_row + row as f32 * (CHIP_HEIGHT + CHIP_GAP),
+                width,
+                height: CHIP_HEIGHT,
+            },
+        ));
+        x += width + CHIP_GAP;
+    }
+    let rows = row + 1;
+    let hint_y = first_row + rows as f32 * (CHIP_HEIGHT + CHIP_GAP) + 6.0;
+    NameBoxLayout {
+        chips,
+        chips_label_y: Some(108.0),
+        hint_y,
+        height: hint_y + 20.0,
+    }
+}
+
+/// The box where a preset is named and sorted. It sits under the pill, in the middle, and is
+/// taller when there are existing categories to pick from.
+pub(super) fn name_box_bounds(bounds: Rectangle, categories: &[String]) -> Rectangle {
     Rectangle {
         x: (bounds.width - NAME_BOX_WIDTH) / 2.0,
         y: pill_bounds(bounds).y + PILL_HEIGHT + LIST_GAP + 6.0,
         width: NAME_BOX_WIDTH,
-        height: NAME_BOX_HEIGHT,
+        height: name_box_layout(categories).height,
     }
+}
+
+/// The existing category whose chip is under `point`, as its position in `categories`.
+pub(super) fn category_chip_at(
+    bounds: Rectangle,
+    categories: &[String],
+    point: Point,
+) -> Option<usize> {
+    let area = name_box_bounds(bounds, categories);
+    name_box_layout(categories)
+        .chips
+        .into_iter()
+        .find(|(_, chip)| {
+            Rectangle {
+                x: area.x + chip.x,
+                y: area.y + chip.y,
+                ..*chip
+            }
+            .contains(point)
+        })
+        .map(|(index, _)| index)
 }
 /// The list that opens below a dropdown, with one row per label.
 pub(super) fn dropdown_list_bounds(dropdown: Rectangle, rows: usize) -> Rectangle {

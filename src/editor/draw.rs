@@ -59,8 +59,8 @@ pub(super) fn draw_editor(
             overlays.push(view.rect_to_world(submenu_bounds(bounds, &menu.library, open)));
         }
     }
-    if graph.name_entry.is_some() {
-        overlays.push(view.rect_to_world(name_box_bounds(bounds)));
+    if let Some(entry) = &graph.name_entry {
+        overlays.push(view.rect_to_world(name_box_bounds(bounds, &entry.categories)));
     }
 
     // The nodes and wires are drawn in editor coordinates, then the view scales and moves them.
@@ -1030,9 +1030,12 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
 }
 
 /// The box where a preset is named and sorted: a title, a field for the name and one for the
-/// category, and the keys that work in it. The field being typed in is lighter and has the caret.
+/// category, a chip for each existing category, and the keys that work in it. The field being
+/// typed in is lighter and has the caret. A category that does not exist yet is tagged "new", so
+/// a typo shows before it makes a folder.
 pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, entry: &NameEntry) {
-    let area = name_box_bounds(bounds);
+    let area = name_box_bounds(bounds, &entry.categories);
+    let layout = name_box_layout(&entry.categories);
     frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
     let label = |frame: &mut Frame, content: &str, x: f32, y: f32, size: f32, color: Color| {
         frame.fill_text(Text {
@@ -1079,12 +1082,57 @@ pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, entry: &Name
             (false, false) => (text.clone(), TEXT_COLOR),
         };
         label(frame, &shown, 86.0, top + 15.0, 13.0, shade);
+        if field == EntryField::Category && entry.is_new_category() {
+            let tag = Rectangle {
+                x: rect.x + rect.width - 46.0,
+                y: rect.y + 6.0,
+                width: 38.0,
+                height: 18.0,
+            };
+            frame.fill(&rounded_rect(tag, DROPDOWN_CORNER_RADIUS), NEW_TAG_COLOR);
+            label(
+                frame,
+                "new",
+                tag.x - area.x + 8.0,
+                top + 15.0,
+                11.0,
+                TEXT_COLOR,
+            );
+        }
+    }
+
+    if let Some(y) = layout.chips_label_y {
+        label(frame, "Existing categories", 14.0, y, 11.0, DIM_TEXT_COLOR);
+    }
+    let picked = entry.existing_category();
+    for (index, chip) in &layout.chips {
+        let rect = Rectangle {
+            x: area.x + chip.x,
+            y: area.y + chip.y,
+            ..*chip
+        };
+        let name = &entry.categories[*index];
+        let is_picked = picked == Some(name);
+        let color = if is_picked {
+            CHECKBOX_CHECKED_COLOR
+        } else {
+            DROPDOWN_COLOR
+        };
+        frame.fill(&rounded_rect(rect, CHIP_HEIGHT / 2.0), color);
+        label(
+            frame,
+            name,
+            chip.x + 10.0,
+            chip.y + CHIP_HEIGHT / 2.0,
+            12.0,
+            TEXT_COLOR,
+        );
     }
     label(
         frame,
-        "Tab switches field, Enter saves, Esc cancels",
+        "Tab field, Up/Down category, Enter save, Esc cancel",
         14.0,
-        116.0,
+        layout.hint_y,
         11.0,
         DIM_TEXT_COLOR,
     );
