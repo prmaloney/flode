@@ -4,8 +4,13 @@
 //!
 //! The delay is scaled by the played note's period, so the depth in cycles does not depend on the
 //! pitch, the way the index of an FM voice does not. A delay can't be negative, so the read point
-//! rests behind the newest sample by a centre that is as large as the swing needs. The centre
-//! eases when the depth or the pitch changes, which keeps a knob move from bending the pitch.
+//! rests behind the newest sample by a centre that leaves room for the swing.
+//!
+//! The centre is fixed when the note starts, sized for the full depth. A centre that moved with
+//! the depth knob would bend the pitch while it moved, since a delay that grows or shrinks
+//! stretches or squeezes the signal the way a moving source does. With the centre fixed, the knob
+//! only scales the swing around it. The price is a delay of a few cycles of the note on this
+//! stage's output, a few milliseconds at middle C and more on low notes.
 //!
 //! Signal B is delayed by the same centre. Without that, A would lag B by the centre, and the
 //! phase between them would change the sound whenever their pitches are in a whole-number ratio.
@@ -23,9 +28,6 @@ pub struct Mix;
 /// How much louder than full scale the modulator may get before the delay would have to go
 /// negative. A unison sum can pass 1.
 const HEADROOM: f32 = 1.5;
-/// The most the centre delay moves per sample. Its move shifts the pitch by this much, so it stays
-/// small.
-const SLEW: f32 = 0.05;
 /// The most the delay swings per unit of modulator, so the centre and the swing both fit the line.
 const MAX_SWING: f32 = (DELAY_CAPACITY as f32 - 4.0) / (2.0 * HEADROOM);
 
@@ -35,8 +37,10 @@ pub struct MixState {
     /// The delay lines for the left and right of signals A and B, in that order, which this stage
     /// took at the start of the note if the voice had four free.
     delays: Option<[usize; 4]>,
-    /// Where the read point rests, in samples behind the newest.
+    /// Where the read point rests, in samples behind the newest. It never moves during a note.
     center: f32,
+    /// The widest the swing can get without the delay running out of room behind the centre.
+    max_swing: f32,
 }
 
 /// How far the delay swings per unit of modulator, in samples, at this depth and pitch.
@@ -53,13 +57,13 @@ impl AudioStage for Mix {
     type Params = MixParams;
     type State = MixState;
 
-    /// Takes four delay lines for FM, and starts the centre where the depth needs it, so a note
-    /// has no ramp in.
-    fn start(p: &MixParams, ctx: &mut StartContext) -> MixState {
-        let amount = p.amount.plain(ctx.levels);
+    /// Takes four delay lines for FM, and fixes the centre for the full depth at the note's pitch.
+    fn start(_: &MixParams, ctx: &mut StartContext) -> MixState {
+        let max_swing = swing(1.0, ctx.pitch_step);
         MixState {
             delays: ctx.take_delays(),
-            center: center_for(swing(amount, ctx.pitch_step)),
+            center: center_for(max_swing),
+            max_swing,
         }
     }
 
@@ -78,9 +82,9 @@ impl AudioStage for Mix {
             return inputs[0];
         };
 
-        let swing = swing(amount, tick.pitch_step);
-        let wanted = center_for(swing);
-        state.center += (wanted - state.center).clamp(-SLEW, SLEW);
+        // A pitch that bends below the note's own would swing wider than the centre has room for,
+        // so the swing stops at what fits.
+        let swing = swing(amount, tick.pitch_step).min(state.max_swing);
 
         tick.delays[a_left].push(inputs[0].l);
         tick.delays[a_right].push(inputs[0].r);
@@ -90,7 +94,10 @@ impl AudioStage for Mix {
         // carrier sample being read was current.
         let center = state.center;
         let side = |carrier: usize, modulator: usize| {
-            tick.delays[carrier].read(center + swing * tick.delays[modulator].read(center))
+            let wave = tick.delays[modulator]
+                .read(center)
+                .clamp(-HEADROOM, HEADROOM);
+            tick.delays[carrier].read(center + swing * wave)
         };
         Frame::new(side(a_left, b_left), side(a_right, b_right))
     }
@@ -174,16 +181,17 @@ mod tests {
         power_at(&out[2000..], pitch * 2.0) / power_at(&out[2000..], pitch)
     }
 
-    /// With no depth, FM is signal A, one sample late: the read can't go closer than that.
+    /// With no depth, FM is signal A delayed by the centre, whatever the modulator does.
     #[test]
-    fn fm_with_no_depth_passes_a_through_one_sample_late() {
+    fn fm_with_no_depth_passes_a_through_delayed_by_the_centre() {
         let mut rig = Rig::new();
+        rig.pitch_step = 440.0 / RATE;
         let params = params(MixMode::Fm, 0.0);
         let mut state = Mix::start(&params, &mut rig.start_context());
-        let input = [0.3, -0.7, 0.2, 0.9, -0.4];
-        let out: Vec<f32> = input
-            .iter()
-            .map(|&a| {
+        let centre = state.center;
+        let out: Vec<f32> = (0..2000)
+            .map(|n| {
+                let a = (TAU * 440.0 * n as f32 / RATE).sin();
                 Mix::process(
                     &params,
                     &mut state,
@@ -193,8 +201,28 @@ mod tests {
                 .l
             })
             .collect();
-        assert_eq!(out[0], 0.0);
-        assert_eq!(&out[1..], &input[..4]);
+        for n in 1000..1100 {
+            let expected = (TAU * 440.0 * (n as f32 - centre) / RATE).sin();
+            assert!((out[n] - expected).abs() < 0.01, "sample {n}");
+        }
+    }
+
+    /// The centre is set when the note starts and never moves, however the knob turns.
+    #[test]
+    fn the_centre_stays_put_when_the_depth_changes() {
+        let mut rig = Rig::new();
+        let mut state = Mix::start(&params(MixMode::Fm, 0.1), &mut rig.start_context());
+        let start = state.center;
+        for n in 0..2000 {
+            let amount = if n % 100 < 50 { 0.1 } else { 0.9 };
+            Mix::process(
+                &params(MixMode::Fm, amount),
+                &mut state,
+                &[Frame::SILENT; 2],
+                &mut rig.tick(),
+            );
+            assert_eq!(state.center, start);
+        }
     }
 
     /// The share of the signal's energy that is not on the carrier.
@@ -283,7 +311,7 @@ mod tests {
         }
         assert!(right.iter().all(|&x| x == 0.0));
         // The left modulator is silent, so the left side is the carrier, one centre late.
-        let delay = center_for(swing(0.8, 440.0 / RATE)).round() as usize;
+        let delay = state.center.round() as usize;
         for n in 3000..3100 {
             let expected = (TAU * 440.0 * (n - delay) as f32 / RATE).sin();
             assert!((left[n] - expected).abs() < 0.05, "sample {n}");
@@ -329,20 +357,67 @@ mod tests {
         }
     }
 
-    /// Raising the depth while a note sounds moves the centre gradually, so the pitch does not
-    /// jump. The centre never moves faster than the slew.
+    /// The frequency of `signal` in Hz, from its first and last upward zero crossings.
+    fn frequency(signal: &[f32]) -> f32 {
+        let crossings: Vec<f32> = signal
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0)
+            .map(|(n, w)| n as f32 + -w[0] / (w[1] - w[0]))
+            .collect();
+        (crossings.len() - 1) as f32 * RATE / (crossings[crossings.len() - 1] - crossings[0])
+    }
+
+    /// Turning the depth knob while a note sounds does not bend its pitch. With a silent
+    /// modulator the stage is a plain delay of A, so any drift in the output's frequency comes
+    /// from the delay time moving.
     #[test]
-    fn the_centre_eases_when_the_depth_changes() {
+    fn turning_the_depth_does_not_bend_the_pitch() {
         let mut rig = Rig::new();
-        let low = params(MixMode::Fm, 0.1);
-        let high = params(MixMode::Fm, 0.9);
-        let mut state = Mix::start(&low, &mut rig.start_context());
-        let mut last = state.center;
-        for _ in 0..500 {
-            Mix::process(&high, &mut state, &[Frame::SILENT; 2], &mut rig.tick());
-            assert!((state.center - last).abs() <= SLEW + 1e-6);
-            last = state.center;
+        rig.pitch_step = 440.0 / RATE;
+        let mut state = Mix::start(&params(MixMode::Fm, 0.1), &mut rig.start_context());
+        let out: Vec<f32> = (0..40000)
+            .map(|n| {
+                // The knob sweeps from 0.1 to 0.9 over the first half, then holds.
+                let amount = 0.1 + 0.8 * (n as f32 / 20000.0).min(1.0);
+                let a = Frame::mono((TAU * 440.0 * n as f32 / RATE).sin());
+                Mix::process(
+                    &params(MixMode::Fm, amount),
+                    &mut state,
+                    &[a, Frame::SILENT],
+                    &mut rig.tick(),
+                )
+                .l
+            })
+            .collect();
+        for window in out.chunks(4000).skip(1) {
+            let cents = 1200.0 * (frequency(window) / 440.0).log2();
+            assert!(cents.abs() < 3.0, "{cents} cents off");
         }
-        assert!(last > center_for(swing(0.1, 440.0 / RATE)));
+    }
+
+    /// The same holds for a knob that jumps, as a block-rate knob does.
+    #[test]
+    fn a_jump_in_the_depth_does_not_bend_the_pitch() {
+        let mut rig = Rig::new();
+        rig.pitch_step = 110.0 / RATE;
+        let mut state = Mix::start(&params(MixMode::Fm, 0.1), &mut rig.start_context());
+        let out: Vec<f32> = (0..40000)
+            .map(|n| {
+                let amount = if n < 10000 { 0.1 } else { 0.9 };
+                let a = Frame::mono((TAU * 110.0 * n as f32 / RATE).sin());
+                Mix::process(
+                    &params(MixMode::Fm, amount),
+                    &mut state,
+                    &[a, Frame::SILENT],
+                    &mut rig.tick(),
+                )
+                .l
+            })
+            .collect();
+        for window in out.chunks(5000).skip(1) {
+            let cents = 1200.0 * (frequency(window) / 110.0).log2();
+            assert!(cents.abs() < 3.0, "{cents} cents off");
+        }
     }
 }
