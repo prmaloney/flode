@@ -4,7 +4,7 @@
 //! is still readable.
 
 use super::draw::rounded_rect;
-use super::style::{DROPDOWN_COLOR, PILL_COLOR, PILL_HEIGHT, PILL_TOP, TEXT_COLOR};
+use super::style::{PILL_COLOR, PILL_HEIGHT, PILL_TOP, TEXT_COLOR};
 use nih_plug_iced::widget::canvas::{Frame, Path, Text};
 use nih_plug_iced::{alignment, Color, Point, Rectangle, Size};
 
@@ -24,6 +24,8 @@ const RED_DB: f32 = -3.0;
 /// How fast the bars fall back, in dB per second.
 const FALL_DB_PER_SECOND: f32 = 20.0;
 
+/// The empty part of a bar, lighter than the panel so the scale is visible with no sound.
+const TRACK: Color = Color::from_rgb(0.30, 0.30, 0.35);
 const GREEN: Color = Color::from_rgb(0.30, 0.78, 0.40);
 const YELLOW: Color = Color::from_rgb(0.95, 0.80, 0.25);
 const RED: Color = Color::from_rgb(0.92, 0.28, 0.25);
@@ -86,7 +88,7 @@ pub(super) fn draw(frame: &mut Frame, bounds: Rectangle, levels: [f32; 2]) {
             width,
             height: BAR_HEIGHT,
         };
-        frame.fill(&rounded_rect(track, BAR_HEIGHT / 2.0), DROPDOWN_COLOR);
+        frame.fill(&rounded_rect(track, BAR_HEIGHT / 2.0), TRACK);
 
         // The bar is filled in up to three colored runs, so the hot part reads at a glance.
         let reach = fraction(level);
