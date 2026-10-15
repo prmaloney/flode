@@ -28,6 +28,9 @@ pub struct SavedNode {
     /// Missing in graphs saved before collapsing existed. Those load expanded.
     #[serde(default)]
     pub(super) collapsed: bool,
+    /// Missing in graphs saved before nodes could be switched off. Those load switched on.
+    #[serde(default)]
+    pub(super) bypassed: bool,
     /// The dropdown rows, for oscillators, filters, and LFOs. Each one is a dropdown in order.
     #[serde(default)]
     pub(super) choices: Vec<usize>,
@@ -63,6 +66,7 @@ impl SavedNode {
             x: node.position.x,
             y: node.position.y,
             collapsed: node.collapsed,
+            bypassed: node.bypassed,
             choices: node.choices.to_vec(),
             choice: 0,
             switches: node.switches.to_vec(),
@@ -78,6 +82,7 @@ impl SavedNode {
     pub(super) fn into_node(&self) -> FlodeNode {
         let mut node = FlodeNode::new(self.kind, Point::new(self.x, self.y));
         node.collapsed = self.collapsed;
+        node.bypassed = self.bypassed;
         node.choices = self.choices.clone();
         if self.choices.is_empty() {
             node.choices.push(self.choice);

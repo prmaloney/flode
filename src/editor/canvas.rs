@@ -9,8 +9,9 @@ use nih_plug_iced::widget::canvas::{
     event::{self, Event},
     Cursor, Geometry, Program,
 };
-use nih_plug_iced::{mouse, Point, Rectangle, Vector};
+use nih_plug_iced::{keyboard, mouse, Point, Rectangle, Vector};
 
+use super::shortcuts::{self, Shortcut};
 use super::{curve::*, draw::*, graph::*, menus::*, view::*};
 
 /// Borrows the graph for one frame of the editor.
@@ -70,11 +71,19 @@ impl<'a> NodeEditor<'a> {
             }
         }
 
-        // An open menu takes the press. Its item deletes the node. A press anywhere else closes
+        // An open menu takes the press. Its entry acts on the node. A press anywhere else closes
         // the menu and then goes through as usual.
         if let Some(menu) = self.graph.menu.take() {
-            if menu_bounds(menu).contains(point) {
-                self.graph.delete_node(menu.node);
+            if let Some(item) = menu_item_at(menu, point) {
+                match item {
+                    MenuItem::Duplicate => {
+                        self.graph.duplicate_node(menu.node);
+                    }
+                    MenuItem::Bypass => {
+                        self.graph.toggle_bypass(menu.node);
+                    }
+                    MenuItem::Delete => self.graph.delete_node(menu.node),
+                }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
@@ -198,6 +207,56 @@ impl<'a> NodeEditor<'a> {
         (event::Status::Captured, Some(Message::GraphChanged))
     }
 
+    /// Handles a key event for the shortcuts, or returns None if no shortcut uses its key. A
+    /// shortcut runs once per press. Its key repeats and its release are captured and do
+    /// nothing, so the system does not beep at them.
+    pub(super) fn shortcut_event(
+        &mut self,
+        event: &keyboard::Event,
+    ) -> Option<(event::Status, Option<Message>)> {
+        match event {
+            keyboard::Event::KeyPressed {
+                key_code,
+                modifiers,
+            } => {
+                let shortcut = shortcuts::lookup(*key_code, *modifiers);
+                let Some(shortcut) = shortcut else {
+                    // A bound key pressed with the wrong modifiers is not a shortcut. It still
+                    // goes on to the piano, which uses D.
+                    return None;
+                };
+                if self.graph.shortcut_held == Some(*key_code) {
+                    return Some((event::Status::Captured, None));
+                }
+                self.graph.shortcut_held = Some(*key_code);
+                let changed = self.run_shortcut(shortcut);
+                Some((
+                    event::Status::Captured,
+                    changed.then_some(Message::GraphChanged),
+                ))
+            }
+            keyboard::Event::KeyReleased { key_code, .. }
+                if self.graph.shortcut_held == Some(*key_code) =>
+            {
+                self.graph.shortcut_held = None;
+                Some((event::Status::Captured, None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Runs a shortcut on the selected node. Returns true if the graph changed. With nothing
+    /// selected, or on a node the action does not apply to, nothing happens.
+    pub(super) fn run_shortcut(&mut self, shortcut: Shortcut) -> bool {
+        let Some(index) = self.graph.selected else {
+            return false;
+        };
+        match shortcut {
+            Shortcut::ToggleBypass => self.graph.toggle_bypass(index),
+            Shortcut::Duplicate => self.graph.duplicate_node(index).is_some(),
+        }
+    }
+
     /// True if an open dropdown list, node menu, or category list covers the cursor. These are
     /// drawn over everything else, so a press on one belongs to it. `point` is in editor
     /// coordinates, and `screen` is the cursor's screen position.
@@ -247,6 +306,7 @@ impl<'a> NodeEditor<'a> {
             self.graph.menu = Some(ContextMenu {
                 node: index,
                 position: point,
+                items: menu_items(&self.graph.nodes[index]),
             });
         }
         (event::Status::Captured, Some(Message::GraphChanged))
@@ -342,6 +402,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         let mouse_event = match event {
             Event::Mouse(mouse_event) => mouse_event,
             Event::Keyboard(key_event) => {
+                // Shortcuts come first, so one on a piano key (Shift+D) is not also a note.
+                if let Some(result) = self.shortcut_event(&key_event) {
+                    return result;
+                }
                 let status = if Piano::uses(&key_event) {
                     event::Status::Captured
                 } else {

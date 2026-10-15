@@ -4,7 +4,7 @@
 //! sits, from 0.0 (just A) to 1.0 (fully the chosen effect, or all B for a crossfade). For FM it
 //! is the modulation depth.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 use crate::dsp::mix::MixMode;
 
 pub struct Mix;
@@ -43,6 +43,10 @@ impl NodeBehavior for Mix {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn dropdown_names(&self) -> &'static [&'static str] {

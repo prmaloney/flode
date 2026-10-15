@@ -151,6 +151,7 @@ mod slot_tests {
             x: 0.0,
             y: 0.0,
             collapsed: false,
+            bypassed: false,
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -189,6 +190,7 @@ mod slot_tests {
             x: 0.0,
             y: 0.0,
             collapsed: false,
+            bypassed: false,
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -424,6 +426,7 @@ mod envelope_migration_tests {
             x,
             y: 0.0,
             collapsed: false,
+            bypassed: false,
             choices: Vec::new(),
             choice: 0,
             switches: Vec::new(),
@@ -748,5 +751,428 @@ mod layering_tests {
             Cursor::Available(Point::new(500.0, strip.y + strip.height - 4.0)),
         );
         assert!(matches!(message, Some(Message::Note(_))), "{message:?}");
+    }
+}
+
+#[cfg(test)]
+mod bypass_and_duplicate_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::editor::piano::PianoEvent;
+    use crate::editor::style::MENU_ITEM_HEIGHT;
+    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    /// An oscillator through a filter into the output: nodes 0, 2, 1 (the default graph has the
+    /// oscillator at 0 and the output at 1).
+    fn osc_filter_output() -> (Graph, usize) {
+        let mut graph = Graph::default();
+        let filter = graph.add_node(NodeKind::Filter, Point::new(300.0, 300.0));
+        let wire = graph
+            .connections
+            .iter()
+            .position(|c| c.to == 1)
+            .expect("the default wire");
+        graph.insert_into(filter, wire);
+        (graph, filter)
+    }
+
+    fn stage_count(graph: &Graph) -> usize {
+        graph.patch().lanes[0].stages.len()
+    }
+
+    fn press(editor: &mut NodeEditor, key_code: KeyCode, modifiers: Modifiers) -> Option<Message> {
+        editor
+            .update(
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key_code,
+                    modifiers,
+                }),
+                bounds(),
+                Cursor::Unavailable,
+            )
+            .1
+    }
+
+    fn release(editor: &mut NodeEditor, key_code: KeyCode) {
+        editor.update(
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key_code,
+                modifiers: Modifiers::default(),
+            }),
+            bounds(),
+            Cursor::Unavailable,
+        );
+    }
+
+    fn editor(graph: &mut Graph) -> NodeEditor<'_> {
+        NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2])
+    }
+
+    // The node model.
+
+    /// Sources mute and processors bypass. The nodes with nothing to switch off refuse.
+    #[test]
+    fn only_some_kinds_can_be_switched_off() {
+        for kind in NodeKind::ALL {
+            let mut node = FlodeNode::new(kind, Point::new(0.0, 0.0));
+            let expected = match kind {
+                NodeKind::Oscillator => crate::nodes::Bypass::Mute,
+                NodeKind::Output
+                | NodeKind::Envelope
+                | NodeKind::Lfo
+                | NodeKind::Input
+                | NodeKind::Map => crate::nodes::Bypass::None,
+                _ => crate::nodes::Bypass::PassThrough,
+            };
+            assert_eq!(node.bypass(), expected, "{kind:?}");
+            let toggled = node.toggle_bypass();
+            assert_eq!(toggled, expected != crate::nodes::Bypass::None, "{kind:?}");
+            assert_eq!(node.bypassed, toggled, "{kind:?}");
+        }
+    }
+
+    /// A switched-off node names how, and a live one names nothing.
+    #[test]
+    fn a_switched_off_node_shows_its_state() {
+        let mut osc = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        let mut filter = FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0));
+        assert_eq!(osc.bypass_label(), None);
+        osc.toggle_bypass();
+        filter.toggle_bypass();
+        assert_eq!(osc.bypass_label(), Some("mute"));
+        assert_eq!(filter.bypass_label(), Some("bypass"));
+    }
+
+    // What the audio thread plays.
+
+    /// A muted oscillator is silence, so its slot has no stages.
+    #[test]
+    fn a_muted_oscillator_makes_no_sound() {
+        let mut graph = Graph::default();
+        assert_eq!(stage_count(&graph), 1);
+        assert!(graph.toggle_bypass(0));
+        assert_eq!(stage_count(&graph), 0);
+        assert!(graph.toggle_bypass(0));
+        assert_eq!(stage_count(&graph), 1);
+    }
+
+    /// A bypassed filter hands the oscillator straight to the output.
+    #[test]
+    fn a_bypassed_filter_passes_its_input_through() {
+        let (mut graph, filter) = osc_filter_output();
+        assert_eq!(stage_count(&graph), 2);
+        graph.toggle_bypass(filter);
+        let lane = graph.patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 1);
+        assert!(matches!(lane.stages[0].params, StageParams::Oscillator(_)));
+    }
+
+    /// A bypassed effect at the end of a chain leaves the per-voice path to play, with no tap.
+    #[test]
+    fn a_bypassed_effect_leaves_the_voices_to_play() {
+        let mut graph = Graph::default();
+        let reverb = graph.add_node(NodeKind::Reverb, Point::new(300.0, 300.0));
+        let wire = graph.connections.iter().position(|c| c.to == 1).unwrap();
+        graph.insert_into(reverb, wire);
+        let with_effect = graph.patch().lanes[0].clone();
+        assert!(with_effect.stages.last().unwrap().params.is_effect());
+        assert!(with_effect.stages[0].tap);
+
+        graph.toggle_bypass(reverb);
+        let bypassed = graph.patch().lanes[0].clone();
+        assert_eq!(bypassed.stages.len(), 1);
+        assert!(!bypassed.stages[0].tap);
+    }
+
+    /// A bypassed mix plays signal A, and a muted source on B is silence in the mix.
+    #[test]
+    fn a_bypassed_mix_plays_a_and_a_muted_source_is_silent() {
+        let mut graph = Graph::default();
+        let second = graph.add_node(NodeKind::Oscillator, Point::new(0.0, 300.0));
+        let mix = graph.add_node(NodeKind::Mix, Point::new(300.0, 300.0));
+        let wire = graph.connections.iter().position(|c| c.to == 1).unwrap();
+        graph.insert_into(mix, wire);
+        graph.connect(second, Port::Audio, mix, Port::AudioIn(1));
+        assert_eq!(stage_count(&graph), 3);
+
+        graph.toggle_bypass(mix);
+        assert_eq!(stage_count(&graph), 1);
+        graph.toggle_bypass(mix);
+
+        graph.toggle_bypass(second);
+        let lane = graph.patch().lanes[0].clone();
+        assert_eq!(lane.stages.len(), 2);
+        assert_eq!(lane.stages[1].inputs[1], None);
+    }
+
+    /// A node that can't be switched off ignores a stray flag, so an old or edited save is safe.
+    #[test]
+    fn the_flag_on_a_node_that_cannot_be_switched_off_does_nothing() {
+        let mut graph = Graph::default();
+        graph.nodes[1].bypassed = true;
+        assert_eq!(stage_count(&graph), 1);
+        assert!(!graph.toggle_bypass(1));
+    }
+
+    // Saving.
+
+    /// The off state survives saving, and a save from before it loads switched on.
+    #[test]
+    fn the_off_state_survives_saving() {
+        let mut graph = Graph::default();
+        graph.toggle_bypass(0);
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert!(loaded.nodes[0].bypassed);
+        assert_eq!(loaded.patch().lanes[0].stages.len(), 0);
+
+        let mut json = serde_json::to_value(graph.to_saved()).unwrap();
+        for node in json["nodes"].as_array_mut().unwrap() {
+            node.as_object_mut().unwrap().remove("bypassed");
+        }
+        let old: SavedGraph = serde_json::from_value(json).unwrap();
+        assert!(!Graph::from_saved(&old).nodes[0].bypassed);
+    }
+
+    // Duplicate.
+
+    /// A copy has the same settings, sits offset from the original, has no wires, and is selected.
+    #[test]
+    fn a_duplicate_copies_the_settings_but_not_the_wires() {
+        let mut graph = Graph::default();
+        graph.nodes[0].set_value(KnobId::Unison, KnobId::Unison.to_normalized(5.0));
+        graph.nodes[0].choose(0, 2);
+        graph.nodes[0].toggle_bypass();
+        let wires = graph.connections.len();
+
+        let copy = graph.duplicate_node(0).expect("an oscillator duplicates");
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes[copy].kind, NodeKind::Oscillator);
+        assert_eq!(graph.nodes[copy].plain(KnobId::Unison), 5.0);
+        assert_eq!(oscillator::waveform(&graph.nodes[copy]), Waveform::Square);
+        assert!(graph.nodes[copy].bypassed);
+        assert!(graph.nodes[copy].position.x > graph.nodes[0].position.x);
+        assert!(graph.nodes[copy].position.y > graph.nodes[0].position.y);
+        assert_eq!(graph.connections.len(), wires);
+        assert!(!graph
+            .connections
+            .iter()
+            .any(|c| c.from == copy || c.to == copy));
+        assert_eq!(graph.selected, Some(copy));
+    }
+
+    /// The copy is its own node. Turning a knob on it leaves the original alone.
+    #[test]
+    fn a_duplicate_does_not_share_knobs_with_the_original() {
+        let mut graph = Graph::default();
+        let copy = graph.duplicate_node(0).unwrap();
+        graph.nodes[copy].set_value(KnobId::Detune, 1.0);
+        assert_eq!(
+            graph.nodes[0].plain(KnobId::Detune),
+            KnobId::Detune.default_plain()
+        );
+    }
+
+    /// An output node is one per patch, so it can't be copied.
+    #[test]
+    fn an_output_node_cannot_be_duplicated() {
+        let mut graph = Graph::default();
+        assert_eq!(graph.duplicate_node(1), None);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.duplicate_node(9), None);
+    }
+
+    // The right-click menu.
+
+    #[test]
+    fn each_kind_offers_the_entries_that_apply() {
+        use crate::editor::menus::{menu_items, MenuItem};
+        let items = |kind| menu_items(&FlodeNode::new(kind, Point::new(0.0, 0.0)));
+        assert_eq!(
+            items(NodeKind::Oscillator),
+            &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete]
+        );
+        assert_eq!(
+            items(NodeKind::Reverb),
+            &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete]
+        );
+        assert_eq!(
+            items(NodeKind::Lfo),
+            &[MenuItem::Duplicate, MenuItem::Delete]
+        );
+        assert_eq!(items(NodeKind::Output), &[MenuItem::Delete]);
+    }
+
+    /// The bypass entry says what it will do, and flips after it is used.
+    #[test]
+    fn the_bypass_entry_names_its_action() {
+        use crate::editor::menus::MenuItem;
+        let mut osc = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        let mut filter = FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0));
+        assert_eq!(MenuItem::Bypass.label(&osc), "Mute");
+        assert_eq!(MenuItem::Bypass.label(&filter), "Bypass");
+        osc.toggle_bypass();
+        filter.toggle_bypass();
+        assert_eq!(MenuItem::Bypass.label(&osc), "Unmute");
+        assert_eq!(MenuItem::Bypass.label(&filter), "Enable");
+        assert_eq!(MenuItem::Duplicate.label(&osc), "Duplicate");
+        assert_eq!(MenuItem::Delete.label(&osc), "Delete");
+    }
+
+    /// The menu is as tall as its entries, and a press picks the row it lands on.
+    #[test]
+    fn a_press_picks_the_entry_under_it() {
+        use crate::editor::menus::{menu_bounds, menu_item_at, menu_items, ContextMenu, MenuItem};
+        let node = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        let menu = ContextMenu {
+            node: 0,
+            position: Point::new(50.0, 60.0),
+            items: menu_items(&node),
+        };
+        let area = menu_bounds(menu);
+        assert_eq!(area.height, 3.0 * MENU_ITEM_HEIGHT);
+        let at = |row: f32| Point::new(60.0, 60.0 + (row + 0.5) * MENU_ITEM_HEIGHT);
+        assert_eq!(menu_item_at(menu, at(0.0)), Some(MenuItem::Duplicate));
+        assert_eq!(menu_item_at(menu, at(1.0)), Some(MenuItem::Bypass));
+        assert_eq!(menu_item_at(menu, at(2.0)), Some(MenuItem::Delete));
+        assert_eq!(menu_item_at(menu, at(3.0)), None);
+        assert_eq!(menu_item_at(menu, Point::new(10.0, 70.0)), None);
+    }
+
+    /// Right-click a node, then click each entry. Each does its job through the editor.
+    #[test]
+    fn the_menu_entries_work_through_the_editor() {
+        use crate::editor::menus::menu_bounds;
+        let click_entry = |graph: &mut Graph, row: usize| -> Option<Message> {
+            let target = graph.nodes[0].position;
+            let inside = Point::new(target.x + 20.0, target.y + 12.0);
+            let mut editor = editor(graph);
+            editor.update(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+                bounds(),
+                Cursor::Available(inside),
+            );
+            let menu = editor.graph.menu.expect("the menu opens");
+            let area = menu_bounds(menu);
+            let entry = Point::new(
+                area.x + 10.0,
+                area.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT,
+            );
+            editor
+                .update(
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    bounds(),
+                    Cursor::Available(entry),
+                )
+                .1
+        };
+
+        let mut graph = Graph::default();
+        let message = click_entry(&mut graph, 1);
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert!(graph.nodes[0].bypassed);
+        assert!(graph.menu.is_none());
+
+        let mut graph = Graph::default();
+        click_entry(&mut graph, 0);
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.selected, Some(2));
+
+        let mut graph = Graph::default();
+        click_entry(&mut graph, 2);
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, NodeKind::Output);
+    }
+
+    // Shortcuts.
+
+    /// M mutes the selected node, and pressing it again brings it back.
+    #[test]
+    fn m_toggles_the_selected_node() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        let message = press(&mut editor, KeyCode::M, Modifiers::default());
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert!(editor.graph.nodes[0].bypassed);
+        release(&mut editor, KeyCode::M);
+        press(&mut editor, KeyCode::M, Modifiers::default());
+        assert!(!editor.graph.nodes[0].bypassed);
+    }
+
+    /// Holding the key repeats its press. The node toggles once, not on every repeat.
+    #[test]
+    fn holding_m_toggles_once() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        press(&mut editor, KeyCode::M, Modifiers::default());
+        for _ in 0..5 {
+            let message = press(&mut editor, KeyCode::M, Modifiers::default());
+            assert!(message.is_none());
+        }
+        assert!(editor.graph.nodes[0].bypassed);
+        release(&mut editor, KeyCode::M);
+        press(&mut editor, KeyCode::M, Modifiers::default());
+        assert!(!editor.graph.nodes[0].bypassed);
+    }
+
+    /// With nothing selected, or a node that can't be switched off, M does nothing.
+    #[test]
+    fn m_needs_a_node_that_can_be_switched_off() {
+        let mut graph = Graph::default();
+        let mut editor = editor(&mut graph);
+        assert!(press(&mut editor, KeyCode::M, Modifiers::default()).is_none());
+        release(&mut editor, KeyCode::M);
+        editor.graph.selected = Some(1);
+        assert!(press(&mut editor, KeyCode::M, Modifiers::default()).is_none());
+        assert!(!editor.graph.nodes[1].bypassed);
+    }
+
+    /// Shift+D copies the selected node and selects the copy.
+    #[test]
+    fn shift_d_duplicates_the_selected_node() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert_eq!(editor.graph.nodes.len(), 3);
+        assert_eq!(editor.graph.selected, Some(2));
+    }
+
+    /// A plain D still plays a note, and does not copy anything.
+    #[test]
+    fn a_plain_d_still_plays_the_piano() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        let message = press(&mut editor, KeyCode::D, Modifiers::default());
+        assert!(matches!(
+            message,
+            Some(Message::Note(PianoEvent::NoteOn { .. }))
+        ));
+        assert_eq!(editor.graph.nodes.len(), 2);
+    }
+
+    /// Shortcuts that include Control or Command are left to the host.
+    #[test]
+    fn control_and_command_combinations_are_ignored() {
+        let mut graph = Graph::default();
+        graph.selected = Some(0);
+        let mut editor = editor(&mut graph);
+        assert!(press(&mut editor, KeyCode::M, Modifiers::CTRL).is_none());
+        assert!(press(&mut editor, KeyCode::M, Modifiers::LOGO).is_none());
+        assert!(!editor.graph.nodes[0].bypassed);
     }
 }

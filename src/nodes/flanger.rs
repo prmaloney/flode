@@ -1,6 +1,6 @@
 //! The flanger node.
 
-use super::{FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Flanger;
 
@@ -27,5 +27,9 @@ impl NodeBehavior for Flanger {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 }

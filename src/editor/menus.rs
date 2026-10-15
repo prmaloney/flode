@@ -1,7 +1,7 @@
 //! The pill of add buttons, the category lists, dropdown lists, and the right-click menu: the
 //! chrome that floats above the nodes.
 
-use crate::nodes::{Category, NodeKind};
+use crate::nodes::{Bypass, Category, FlodeNode, NodeKind};
 use nih_plug_iced::{Point, Rectangle};
 
 use super::style::*;
@@ -40,11 +40,47 @@ pub(super) fn list_row_at(list: Rectangle, point: Point, rows: usize) -> Option<
     (index < rows).then_some(index)
 }
 
+/// One entry of the right-click menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuItem {
+    /// Copies the node, with its settings and without its wires.
+    Duplicate,
+    /// Mutes a source, or bypasses a processor. It is the same action as the `m` key.
+    Bypass,
+    Delete,
+}
+
+impl MenuItem {
+    /// The text on the entry. A switched-off node offers to switch back on.
+    pub(super) fn label(self, node: &FlodeNode) -> &'static str {
+        match (self, node.bypass(), node.bypassed) {
+            (MenuItem::Duplicate, _, _) => "Duplicate",
+            (MenuItem::Delete, _, _) => "Delete",
+            (MenuItem::Bypass, Bypass::Mute, false) => "Mute",
+            (MenuItem::Bypass, Bypass::Mute, true) => "Unmute",
+            (MenuItem::Bypass, _, false) => "Bypass",
+            (MenuItem::Bypass, _, true) => "Enable",
+        }
+    }
+}
+
+/// The entries a node's menu offers, top to bottom. Every node can be deleted. Most can be
+/// duplicated, and the ones that can be switched off also offer that.
+pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
+    match (node.can_duplicate(), node.bypass() != Bypass::None) {
+        (true, true) => &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete],
+        (true, false) => &[MenuItem::Duplicate, MenuItem::Delete],
+        (false, true) => &[MenuItem::Bypass, MenuItem::Delete],
+        (false, false) => &[MenuItem::Delete],
+    }
+}
+
 /// The right-click menu for one node. `position` is its top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ContextMenu {
     pub(super) node: usize,
     pub(super) position: Point,
+    pub(super) items: &'static [MenuItem],
 }
 
 /// The pill at the top center of the editor.
@@ -114,6 +150,16 @@ pub(super) fn menu_bounds(menu: ContextMenu) -> Rectangle {
         x: menu.position.x,
         y: menu.position.y,
         width: MENU_WIDTH,
-        height: MENU_ITEM_HEIGHT,
+        height: menu.items.len() as f32 * MENU_ITEM_HEIGHT,
     }
+}
+
+/// The entry of the right-click menu under `point`.
+pub(super) fn menu_item_at(menu: ContextMenu, point: Point) -> Option<MenuItem> {
+    let bounds = menu_bounds(menu);
+    if !bounds.contains(point) {
+        return None;
+    }
+    let row = ((point.y - bounds.y) / MENU_ITEM_HEIGHT) as usize;
+    menu.items.get(row).copied()
 }

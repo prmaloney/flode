@@ -1,6 +1,6 @@
 //! The distortion node. A waveshaper with a choice of curve.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 use crate::dsp::effects::distortion::DistortionKind;
 
 pub struct Distortion;
@@ -29,6 +29,10 @@ impl NodeBehavior for Distortion {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {

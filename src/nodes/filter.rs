@@ -1,6 +1,6 @@
 //! The filter node. A state-variable filter with a low, high, or band pass response.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 use crate::dsp::svf::FilterType;
 
 pub struct Filter;
@@ -27,6 +27,10 @@ impl NodeBehavior for Filter {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {

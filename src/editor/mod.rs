@@ -17,6 +17,7 @@ mod menus;
 mod meter;
 pub mod piano;
 pub mod saved;
+mod shortcuts;
 mod style;
 #[cfg(test)]
 mod tests;

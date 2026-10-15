@@ -142,7 +142,9 @@ pub(super) fn draw_editor(
         }
 
         if let Some(menu) = graph.menu {
-            draw_menu(frame, menu, view.zoom);
+            if let Some(node) = graph.nodes.get(menu.node) {
+                draw_menu(frame, menu, node, view.zoom);
+            }
         }
     });
 
@@ -211,17 +213,24 @@ pub(super) fn draw_node(
     let node = &graph.nodes[index];
     let zoom = graph.view.zoom;
     let bounds = node.bounds();
-    frame.fill(&rounded_rect(bounds, CORNER_RADIUS), NODE_BODY_COLOR);
+    // A muted or bypassed node is darker, and says which in its header.
+    let off = node.bypass_label();
+    let (body_color, header_color) = if off.is_some() {
+        (NODE_OFF_BODY_COLOR, NODE_OFF_HEADER_COLOR)
+    } else {
+        (NODE_BODY_COLOR, NODE_HEADER_COLOR)
+    };
+    frame.fill(&rounded_rect(bounds, CORNER_RADIUS), body_color);
 
     // The header is a rounded rectangle with its bottom corners squared off.
     let header = node.header_bounds();
-    frame.fill(&rounded_rect(header, CORNER_RADIUS), NODE_HEADER_COLOR);
+    frame.fill(&rounded_rect(header, CORNER_RADIUS), header_color);
     frame.fill(
         &Path::rectangle(
             Point::new(header.x, header.y + header.height - CORNER_RADIUS),
             nih_plug_iced::Size::new(header.width, CORNER_RADIUS),
         ),
-        NODE_HEADER_COLOR,
+        header_color,
     );
 
     draw_text(
@@ -231,12 +240,35 @@ pub(super) fn draw_node(
         Text {
             content: node.title().to_string(),
             position: Point::new(header.x + TITLE_INSET, header.y + HEADER_HEIGHT / 2.0),
-            color: TEXT_COLOR,
+            color: if off.is_some() {
+                DIM_TEXT_COLOR
+            } else {
+                TEXT_COLOR
+            },
             size: 14.0,
             vertical_alignment: alignment::Vertical::Center,
             ..Text::default()
         },
     );
+    if let Some(label) = off {
+        draw_text(
+            frame,
+            covered,
+            zoom,
+            Text {
+                content: label.to_string(),
+                position: Point::new(
+                    header.x + header.width - 10.0,
+                    header.y + HEADER_HEIGHT / 2.0,
+                ),
+                color: DIM_TEXT_COLOR,
+                size: 10.0,
+                horizontal_alignment: alignment::Horizontal::Right,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            },
+        );
+    }
 
     draw_collapse_arrow(frame, node);
 
@@ -782,18 +814,23 @@ pub(super) fn draw_category_list(frame: &mut Frame, bounds: Rectangle, category:
     }
 }
 
-/// The right-click menu. It has one item for now.
-pub(super) fn draw_menu(frame: &mut Frame, menu: ContextMenu, zoom: f32) {
+/// The right-click menu: one row for each entry the node's kind offers.
+pub(super) fn draw_menu(frame: &mut Frame, menu: ContextMenu, node: &FlodeNode, zoom: f32) {
     let bounds = menu_bounds(menu);
     frame.fill(&rounded_rect(bounds, MENU_CORNER_RADIUS), MENU_COLOR);
-    frame.fill_text(Text {
-        content: "Delete node".to_string(),
-        position: Point::new(bounds.x + 12.0, bounds.y + MENU_ITEM_HEIGHT / 2.0),
-        color: TEXT_COLOR,
-        size: 14.0 * zoom,
-        vertical_alignment: alignment::Vertical::Center,
-        ..Text::default()
-    });
+    for (row, item) in menu.items.iter().enumerate() {
+        frame.fill_text(Text {
+            content: item.label(node).to_string(),
+            position: Point::new(
+                bounds.x + 12.0,
+                bounds.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
+            ),
+            color: TEXT_COLOR,
+            size: 14.0 * zoom,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    }
 }
 
 /// A rectangle with rounded corners of radius `r`. Each corner is a quadratic curve whose control

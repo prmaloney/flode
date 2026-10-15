@@ -1,6 +1,6 @@
 //! The chorus node.
 
-use super::{FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Chorus;
 
@@ -25,6 +25,10 @@ impl NodeBehavior for Chorus {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     /// A chorus starts at a gentle rate.

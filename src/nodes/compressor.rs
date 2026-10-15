@@ -1,7 +1,7 @@
 //! The compressor node. The Multiband switch turns it into an OTT style three band compressor,
 //! which shows its Depth knob.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Compressor;
 
@@ -35,6 +35,10 @@ impl NodeBehavior for Compressor {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn switch_labels(&self) -> &'static [&'static str] {

@@ -1,6 +1,6 @@
 //! The oscillator node. It makes the sound: a waveform with unison, detune, and phase randomness.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 use crate::dsp::noise::NoiseType;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
@@ -46,6 +46,10 @@ impl NodeBehavior for Oscillator {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::Mute
     }
 
     fn dropdown_names(&self) -> &'static [&'static str] {

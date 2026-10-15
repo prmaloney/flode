@@ -16,8 +16,8 @@ use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, filter, lfo, map, mix, oscillator, phaser, FlodeNode, NodeKind,
-    Port,
+    compressor, delay, distortion, filter, lfo, map, mix, oscillator, phaser, Bypass, FlodeNode,
+    NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 
@@ -429,6 +429,28 @@ impl<'p> LaneBuilder<'p> {
         if self.path.contains(&node) {
             return None;
         }
+
+        // A switched-off node makes no stage. A muted source is silence on its output, and a
+        // bypassed processor is whatever feeds its first audio input.
+        let switched_off = &wiring.nodes[node];
+        if switched_off.bypassed {
+            match switched_off.bypass() {
+                Bypass::Mute => return None,
+                Bypass::PassThrough => {
+                    let first_audio = switched_off
+                        .input_ports()
+                        .into_iter()
+                        .find(|port| port.is_audio());
+                    let link = first_audio.and_then(|port| wiring.input_link(node, port));
+                    self.path.push(node);
+                    let source = link.and_then(|link| self.place(wiring, link.from));
+                    self.path.pop();
+                    return source;
+                }
+                Bypass::None => {}
+            }
+        }
+
         let params = wiring.stage_params(node)?;
 
         self.path.push(node);

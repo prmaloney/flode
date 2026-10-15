@@ -33,6 +33,9 @@ pub(super) const MENU_CORNER_RADIUS: f32 = 6.0;
 
 pub(super) const NODE_BODY_COLOR: Color = Color::from_rgb(0.24, 0.24, 0.27);
 pub(super) const NODE_HEADER_COLOR: Color = Color::from_rgb(0.30, 0.30, 0.36);
+/// The body and header of a node that is muted or bypassed, darker than a live node's.
+pub(super) const NODE_OFF_BODY_COLOR: Color = Color::from_rgb(0.19, 0.19, 0.21);
+pub(super) const NODE_OFF_HEADER_COLOR: Color = Color::from_rgb(0.23, 0.23, 0.26);
 pub(super) const SELECTION_COLOR: Color = Color::WHITE;
 pub(super) const SELECTION_WIDTH: f32 = 2.0;
 pub(super) const TEXT_COLOR: Color = Color::WHITE;

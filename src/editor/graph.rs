@@ -8,6 +8,7 @@ use crate::nodes::{Category, FlodeNode, NodeKind, Port, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
+use nih_plug_iced::keyboard::KeyCode;
 use nih_plug_iced::{Point, Vector};
 
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
@@ -71,6 +72,9 @@ pub struct Graph {
     /// The last screen position the cursor was seen at. A release uses it, since the cursor can be
     /// outside the window when the button comes up.
     pub(super) last_screen: Point,
+    /// The key of the shortcut that last ran, while it is still held. Holding a key repeats its
+    /// press, and a shortcut runs once per press.
+    pub(super) shortcut_held: Option<KeyCode>,
 }
 
 /// The part of a dropdown under the cursor.
@@ -147,6 +151,7 @@ impl Graph {
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
+            shortcut_held: None,
         }
     }
 
@@ -414,6 +419,34 @@ impl Graph {
         let index = self.nodes.len() - 1;
         self.selected = Some(index);
         index
+    }
+
+    /// How far a copy of a node sits from the original, so it does not hide it.
+    const DUPLICATE_OFFSET: f32 = 32.0;
+
+    /// Copies a node, offset down and to the right, and selects the copy. The copy keeps the
+    /// original's settings and has no wires. Returns its index, or None for a node that can't be
+    /// copied.
+    pub(super) fn duplicate_node(&mut self, index: usize) -> Option<usize> {
+        let original = self.nodes.get(index)?;
+        if !original.can_duplicate() {
+            return None;
+        }
+        let at = Point::new(
+            original.position.x + Self::DUPLICATE_OFFSET,
+            original.position.y + Self::DUPLICATE_OFFSET,
+        );
+        self.nodes.push(original.duplicate(at));
+        let copy = self.nodes.len() - 1;
+        self.selected = Some(copy);
+        Some(copy)
+    }
+
+    /// Switches a node off or on, if its kind can be. Returns whether anything changed.
+    pub(super) fn toggle_bypass(&mut self, index: usize) -> bool {
+        self.nodes
+            .get_mut(index)
+            .is_some_and(FlodeNode::toggle_bypass)
     }
 
     /// Removes a node and its connections. Connections and the selection after it shift down

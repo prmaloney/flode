@@ -333,6 +333,11 @@ pub trait NodeBehavior: Sync {
         &[]
     }
 
+    /// What switching the node off does to its signal. Most kinds can't be switched off.
+    fn bypass(&self) -> Bypass {
+        Bypass::None
+    }
+
     /// Knobs this kind starts at a value other than the knob's own default, in plain units.
     fn defaults(&self) -> &'static [(KnobId, f32)] {
         &[]
@@ -347,6 +352,28 @@ pub trait NodeBehavior: Sync {
     /// own state, such as the oscillator's noise type under the noise waveform.
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {
         Vec::new()
+    }
+}
+
+/// What a node does to its signal when it is switched off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bypass {
+    /// The node can't be switched off.
+    None,
+    /// A source goes silent, as if it were not wired in.
+    Mute,
+    /// A processor hands its first audio input straight to its output.
+    PassThrough,
+}
+
+impl Bypass {
+    /// The word the node shows while it is switched off, or None if it can't be.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Bypass::None => None,
+            Bypass::Mute => Some("mute"),
+            Bypass::PassThrough => Some("bypass"),
+        }
     }
 }
 
@@ -366,6 +393,9 @@ pub struct FlodeNode {
     pub position: Point,
     /// A collapsed node shows only its header. Its pins sit on the header's edges.
     pub collapsed: bool,
+    /// True while the node is muted or bypassed, as its kind's `bypass` says. A kind that can't
+    /// be bypassed ignores it.
+    pub bypassed: bool,
     /// Normalized knob values, indexed by `KnobId as usize`. A node reads the ones its rows show.
     values: [f32; KnobId::COUNT],
     /// The row chosen in each dropdown, indexed by dropdown.
@@ -386,6 +416,7 @@ impl FlodeNode {
             kind,
             position,
             collapsed: false,
+            bypassed: false,
             values: std::array::from_fn(|i| KnobId::ALL[i].default_normalized()),
             choices: Vec::new(),
             switches: Vec::new(),
@@ -399,6 +430,48 @@ impl FlodeNode {
             node.values[id as usize] = id.to_normalized(plain);
         }
         node
+    }
+
+    /// True if the editor may copy this kind of node. An output node is one per patch, so it
+    /// can't be.
+    pub fn can_duplicate(&self) -> bool {
+        self.kind != NodeKind::Output
+    }
+
+    /// A copy of the node at `position`, with the same knob values, dropdown choices, switches,
+    /// and on/off state. It has no wires, since those belong to the graph.
+    pub fn duplicate(&self, position: Point) -> FlodeNode {
+        let mut copy = FlodeNode::new(self.kind, position);
+        copy.collapsed = self.collapsed;
+        copy.bypassed = self.bypassed;
+        copy.values = self.values;
+        copy.choices = self.choices.clone();
+        copy.switches = self.switches.clone();
+        copy
+    }
+
+    /// What switching this node off does. A node can only be bypassed if its kind has a bypass.
+    pub fn bypass(&self) -> Bypass {
+        self.kind.behavior().bypass()
+    }
+
+    /// The word to show on the node while it is switched off, or None while it is on.
+    pub fn bypass_label(&self) -> Option<&'static str> {
+        if self.bypassed {
+            self.bypass().label()
+        } else {
+            None
+        }
+    }
+
+    /// Switches the node off or on. Returns false, and changes nothing, for a kind that can't be
+    /// switched off.
+    pub fn toggle_bypass(&mut self) -> bool {
+        if self.bypass() == Bypass::None {
+            return false;
+        }
+        self.bypassed = !self.bypassed;
+        true
     }
 
     pub fn title(&self) -> &'static str {

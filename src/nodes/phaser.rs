@@ -1,6 +1,6 @@
 //! The phaser node. A dropdown picks how many all-pass stages it runs.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Phaser;
 
@@ -32,6 +32,10 @@ impl NodeBehavior for Phaser {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {

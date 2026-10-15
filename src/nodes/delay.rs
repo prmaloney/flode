@@ -1,7 +1,7 @@
 //! The delay node. The Sync knob sets the time from the host's tempo, and Ping pong bounces the
 //! repeats between the sides.
 
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
 
 pub struct Delay;
 
@@ -28,6 +28,10 @@ impl NodeBehavior for Delay {
 
     fn audio_out(&self) -> bool {
         true
+    }
+
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 
     fn switch_labels(&self) -> &'static [&'static str] {

@@ -768,6 +768,7 @@ dependencies = [
  "nih_plug_iced",
  "rtrb",
  "serde",
+ "serde_json",
  "triple_buffer",
 ]
 

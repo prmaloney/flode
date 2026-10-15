@@ -39,4 +39,5 @@ baseview = { path = "vendor/baseview" }
 iced_baseview = { path = "vendor/iced_baseview" }
 
 [dev-dependencies]
+serde_json = "1.0.154"
 assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }
