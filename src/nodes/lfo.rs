@@ -3,8 +3,9 @@
 //!
 //! With Sync set to a note division, the LFO follows the host's playhead instead of its rate.
 
-use super::oscillator::{Waveform, WAVEFORM_LABELS};
+use super::oscillator::WAVEFORM_LABELS;
 use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use crate::dsp::wavetable::Waveform;
 
 pub struct Lfo;
 

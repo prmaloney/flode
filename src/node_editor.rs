@@ -10,13 +10,14 @@
 //!
 //! The audio chain runs from an oscillator through any filter and envelope nodes to an output slot.
 
+use crate::dsp::wavetable::Waveform;
 use crate::knob::{self, Press};
 use crate::nodes::filter::{self, FilterType};
 use crate::nodes::knobs::KnobId;
 use crate::nodes::lfo;
 use crate::nodes::map;
 use crate::nodes::mix;
-use crate::nodes::oscillator::{self, Waveform};
+use crate::nodes::oscillator;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
     pin_y, Category, FlodeNode, NodeKind, Port, ARROW_CENTER_X, HEADER_HEIGHT, NODE_WIDTH,

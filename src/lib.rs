@@ -10,6 +10,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod dsp;
 mod editor;
 mod knob;
 mod node_editor;
@@ -17,14 +18,15 @@ mod nodes;
 mod piano;
 mod routing;
 
+use dsp::noise::{NoiseState, NoiseType};
+use dsp::rng::Rng;
+use dsp::warp::{warp_phase, warp_value, WarpMode};
+use dsp::wavetable::{WaveTables, Waveform};
 use nodes::filter::FilterType;
 use nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use nodes::knobs::{KnobId, GAIN_MIN_DB, MAX_UNISON};
 use nodes::lfo;
-use nodes::oscillator::{
-    random_unit, transpose_ratio, warp_phase, warp_value, NoiseState, NoiseType, WarpMode,
-};
-use nodes::oscillator::{WaveTables, Waveform};
+use nodes::oscillator::transpose_ratio;
 use nodes::output::{slot_knob, MAX_SLOTS};
 use piano::PianoEvent;
 use routing::{
@@ -181,7 +183,7 @@ impl Voice {
         warp_amount: f32,
         count: usize,
         transpose: f32,
-        rng: &mut u32,
+        rng: &mut Rng,
     ) -> f32 {
         if waveform == Waveform::Noise {
             self.oscillators[which].noise.sample(noise, rng)
@@ -216,7 +218,7 @@ impl Voice {
         knobs: &[KnobValue; KnobId::COUNT],
         prep: &BranchPrep,
         voice_levels: &ControlLevels,
-        rng: &mut u32,
+        rng: &mut Rng,
     ) -> f32 {
         let osc_gain =
             db_to_linear(knobs[KnobId::OscGain as usize].plain(KnobId::OscGain, voice_levels));
@@ -415,7 +417,7 @@ pub struct Flode {
     held: [(u8, f32); 128],
     held_len: usize,
     /// State of the random number generator for starting phases.
-    rng_state: u32,
+    rng: Rng,
     /// Each envelope node's times for the block, with the bypass copy last.
     env_configs: [EnvConfig; ENV_SLOTS],
     /// The level of each envelope's newest voice. Lane-wide knobs read these.
@@ -528,7 +530,7 @@ impl Flode {
                     0.0
                 };
                 let even = i as f32 / count as f32;
-                let random = self.next_random();
+                let random = self.rng.unit();
                 phases[i] = even + settings.phase_randomness * (random - even);
                 detune_ratios[i] = 2.0f32.powf(spread * settings.detune_cents / 1200.0);
             }
@@ -613,17 +615,6 @@ impl Flode {
         }
     }
 
-    /// A random number from 0.0 up to 1.0, from a xorshift generator. Runs on the audio thread,
-    /// so it does not allocate.
-    fn next_random(&mut self) -> f32 {
-        let mut x = self.rng_state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.rng_state = x;
-        x as f32 / 4_294_967_296.0
-    }
-
     /// One sample of the state-variable low-pass filter. Returns the low-pass output.
     fn filter_sample(
         &mut self,
@@ -684,7 +675,7 @@ impl Default for Flode {
             mono: false,
             held: [(0, 0.0); 128],
             held_len: 0,
-            rng_state: 0x2545_F491,
+            rng: Rng::default(),
             env_configs: [EnvConfig::BYPASS; ENV_SLOTS],
             env_levels: [0.0; MAX_ENVELOPES],
             envelopes_active: false,
@@ -965,7 +956,7 @@ impl Plugin for Flode {
                                         &mix.a.knobs,
                                         &prep_a,
                                         &voice_levels,
-                                        &mut self.rng_state,
+                                        &mut self.rng,
                                     );
                                     let b = voice.branch_contribution(
                                         1,
@@ -976,7 +967,7 @@ impl Plugin for Flode {
                                         &mix.b.knobs,
                                         prep_b,
                                         &voice_levels,
-                                        &mut self.rng_state,
+                                        &mut self.rng,
                                     );
                                     let mix_amount = mix.mix.plain(KnobId::Mix, &voice_levels);
                                     mix.mode.combine(a, b, mix_amount)
@@ -990,7 +981,7 @@ impl Plugin for Flode {
                                     &chain.knobs,
                                     &prep_a,
                                     &voice_levels,
-                                    &mut self.rng_state,
+                                    &mut self.rng,
                                 ),
                             };
                             lane_out += sample;
@@ -1074,7 +1065,7 @@ impl Plugin for Flode {
                     self.lfo_prev[lfo] = phase;
                     self.lfo_levels[lfo] = if settings.waveform == Waveform::Noise {
                         if wrapped {
-                            self.lfo_hold[lfo] = random_unit(&mut self.rng_state);
+                            self.lfo_hold[lfo] = self.rng.unit();
                         }
                         self.lfo_hold[lfo]
                     } else {
@@ -1463,7 +1454,7 @@ mod mix_tests {
                 &[KnobValue::ZERO; KnobId::COUNT],
                 &prep,
                 &ControlLevels::default(),
-                &mut 0,
+                &mut Rng::default(),
             );
         }
 
