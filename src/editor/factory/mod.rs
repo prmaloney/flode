@@ -266,6 +266,16 @@ mod tests {
         (peak, finite)
     }
 
+    /// The presets the checks run on. Set `FLODE_PRESET` to a preset's name, such as `Reese`, to
+    /// check that one alone while it is being built.
+    fn presets() -> Vec<Preset> {
+        let only = std::env::var("FLODE_PRESET").ok();
+        all()
+            .into_iter()
+            .filter(|preset| only.as_deref().is_none_or(|name| preset.name == name))
+            .collect()
+    }
+
     #[test]
     fn the_presets_have_distinct_clean_names() {
         let presets = all();
@@ -282,7 +292,7 @@ mod tests {
     /// Loading a preset keeps every wire, so each one compiles to the sound it was built for.
     #[test]
     fn every_preset_loads_without_losing_a_wire() {
-        for preset in all() {
+        for preset in presets() {
             let wires = |graph: &Graph| graph.connections.len();
             let built = preset.graph.links.len();
             assert_eq!(wires(&loaded(&preset)), built, "{}", preset.name);
@@ -293,7 +303,7 @@ mod tests {
     /// Every oscillator takes its notes from a MIDI input, and the preset plays.
     #[test]
     fn every_preset_is_wired_to_play() {
-        for preset in all() {
+        for preset in presets() {
             let graph = loaded(&preset);
             for (index, node) in graph.nodes.iter().enumerate() {
                 if node.kind == NodeKind::Oscillator {
@@ -323,7 +333,7 @@ mod tests {
     /// reads these peaks, so they are the levels a player sees.
     #[test]
     fn every_preset_plays_at_a_sane_level() {
-        for preset in all() {
+        for preset in presets() {
             let patch = loaded(&preset).patch();
             let (single, finite) = play(&preset, &patch, &[48], 3.0);
             assert!(finite, "{}", preset.name);
@@ -342,7 +352,7 @@ mod tests {
     #[test]
     fn every_preset_fits_the_window() {
         let strip_top = 712.0 - crate::editor::piano::STRIP_HEIGHT;
-        for preset in all() {
+        for preset in presets() {
             let graph = loaded(&preset);
             let bounds: Vec<_> = graph.nodes.iter().map(|n| n.bounds()).collect();
             for (i, a) in bounds.iter().enumerate() {
