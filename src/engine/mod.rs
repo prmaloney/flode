@@ -237,11 +237,13 @@ impl Engine {
     /// Starts a voice in one slot. In mono mode the slot's sounding voices fade out first.
     fn lane_note_on(&mut self, lane: usize, note: u8, velocity: f32, step: f32, target_step: f32) {
         // In mono mode the sounding voices fade out as the new note starts, so only one stays
-        // loud. The fade uses the short release, the same as a note off with no envelope.
+        // loud. The fade uses the short release, the same as a note off with no envelope. A voice
+        // that is already in a long release tail is cut to the same fade, so no tail rings on
+        // under the new note.
         if self.mono {
             for voice in self.lanes[lane].voices_mut() {
                 for env in voice.envs.iter_mut() {
-                    env.release(FADE_SECONDS, self.sample_rate);
+                    env.cut(FADE_SECONDS, self.sample_rate);
                 }
             }
         }

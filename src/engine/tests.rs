@@ -180,6 +180,52 @@ fn first_note_never_glides() {
     assert!((voice.step - voice.target_step).abs() < 1e-9);
 }
 
+/// A note let go with a long release is still ringing when the next mono note starts. The new note
+/// cuts that tail short, so one voice sounds, not a tail under it.
+#[test]
+fn a_mono_note_cuts_the_release_tail_of_the_one_before() {
+    let mut patch = mono_patch(0.0, false);
+    patch.envelopes[0] = Some(envelope(5.0, 1.0));
+    patch.lanes[0].stages[0] = osc(OscillatorParams {
+        envelope: Some(0),
+        ..OscillatorParams::default()
+    });
+    let mut engine = engine_on(&patch);
+
+    engine.note_on(60, 1.0);
+    render(&mut engine, 4410);
+    engine.note_off(60);
+    render(&mut engine, 4410);
+    // The first note is half a second into a five second tail.
+    assert_eq!(engine.lanes[0].voices().count(), 1);
+
+    engine.note_on(64, 1.0);
+    // The fade is 10 ms, so well within 50 ms the old voice is gone.
+    render(&mut engine, 2205);
+    assert_eq!(engine.lanes[0].voices().count(), 1);
+    assert_eq!(newest(&engine).note, 64);
+}
+
+/// In poly mode the same tail rings on under the next note.
+#[test]
+fn a_poly_note_leaves_the_release_tail_alone() {
+    let mut patch = plain_oscillator_patch();
+    patch.envelopes[0] = Some(envelope(5.0, 1.0));
+    patch.lanes[0].stages[0] = osc(OscillatorParams {
+        envelope: Some(0),
+        ..OscillatorParams::default()
+    });
+    let mut engine = engine_on(&patch);
+
+    engine.note_on(60, 1.0);
+    render(&mut engine, 4410);
+    engine.note_off(60);
+    render(&mut engine, 4410);
+    engine.note_on(64, 1.0);
+    render(&mut engine, 2205);
+    assert_eq!(engine.lanes[0].voices().count(), 2);
+}
+
 /// Letting go of the newest mono note plays the note still held, from its own press.
 #[test]
 fn mono_recalls_the_held_note() {

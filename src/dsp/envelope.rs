@@ -99,6 +99,19 @@ impl Adsr {
         }
     }
 
+    /// Ends the envelope within `seconds`. An envelope that is not releasing starts its release.
+    /// One that is already releasing speeds up if its release is slower than that, and keeps its
+    /// pace if it is faster. A release never slows.
+    pub fn cut(&mut self, seconds: f32, sample_rate: f32) {
+        let step = self.level / (seconds * sample_rate).max(1.0);
+        if self.phase == EnvPhase::Release {
+            self.release_step = self.release_step.max(step);
+        } else {
+            self.phase = EnvPhase::Release;
+            self.release_step = step;
+        }
+    }
+
     /// True once the release has run out.
     pub fn finished(&self) -> bool {
         self.phase == EnvPhase::Release && self.level <= 0.0
@@ -113,6 +126,37 @@ impl Adsr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cut speeds up a slow release, leaves a faster one alone, and starts one that has not begun.
+    #[test]
+    fn a_cut_only_ever_speeds_a_release_up() {
+        let rate = 1000.0;
+        // A release of 100 s from level 1.0 loses 1e-5 a sample. A 10 ms cut needs 0.1 a sample.
+        let mut slow = Adsr {
+            phase: EnvPhase::Release,
+            level: 1.0,
+            release_step: 1e-5,
+        };
+        slow.cut(0.01, rate);
+        assert!((slow.release_step - 0.1).abs() < 1e-6);
+
+        let mut fast = Adsr {
+            phase: EnvPhase::Release,
+            level: 1.0,
+            release_step: 0.5,
+        };
+        fast.cut(0.01, rate);
+        assert_eq!(fast.release_step, 0.5);
+
+        let mut held = Adsr {
+            phase: EnvPhase::Sustain,
+            level: 0.8,
+            release_step: 0.0,
+        };
+        held.cut(0.01, rate);
+        assert!(held.releasing());
+        assert!((held.release_step - 0.08).abs() < 1e-6);
+    }
 
     /// A release never takes an envelope below zero, even while the voice waits on a longer one.
     #[test]
