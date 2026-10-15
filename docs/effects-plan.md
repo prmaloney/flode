@@ -1,8 +1,8 @@
 # Effects: plan and requirements
 
 Seven effects are wired into the graph as nodes: distortion, compressor, reverb, delay, chorus,
-phaser, and flanger. The plumbing is done. Each effect's DSP is a stub in `src/dsp/effects/` that
-passes its input through. This document says how the pieces fit and what each effect must do.
+phaser, and flanger. Each one's DSP is in `src/dsp/effects/`. This document is the plan they were
+built from. It says how the pieces fit and what each effect has to do.
 
 ## How effects run
 
@@ -19,7 +19,7 @@ passes its input through. This document says how the pieces fit and what each ef
 
 ## The contract for each DSP file
 
-Each effect has one file in `src/dsp/effects/` with this shape, already in place as a stub:
+Each effect has one file in `src/dsp/effects/` with this shape:
 
 - `<Name>Params`: plain-valued controls. The field list and ranges in the stub are fixed. Do not
   add, remove, or rename fields, because `src/engine/effects.rs` builds them.

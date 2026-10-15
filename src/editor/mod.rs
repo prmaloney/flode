@@ -10,6 +10,7 @@
 
 pub mod canvas;
 mod curve;
+mod demo;
 mod draw;
 #[cfg(test)]
 mod factory;
@@ -136,10 +137,11 @@ impl IcedEditor for FlodeEditor {
         (params, note_tx, link): Self::InitializationFlags,
         context: Arc<dyn GuiContext>,
     ) -> (Self, Command<Self::Message>) {
-        let graph = match params.graph.lock() {
+        let mut graph = match params.graph.lock() {
             Ok(saved) => graph::Graph::from_saved(&saved),
             Err(_) => graph::Graph::default(),
         };
+        demo::apply(&mut graph);
         link.publish(graph.patch());
         let editor = FlodeEditor {
             params,
