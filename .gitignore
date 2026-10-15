@@ -1,5 +1,6 @@
 /target
 /.DS_Store
 /.claude/settings.local.json
-/vendor/
 /.claude/worktrees/
+# Marker files cargo leaves in a crate it unpacked.
+.cargo-ok

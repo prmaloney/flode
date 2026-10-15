@@ -1,0 +1,30 @@
+name: Rust
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install XCB and GL dependencies
+      run: |
+        sudo apt update
+        # baseview dependencies
+        sudo apt install libgl-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      if: contains(matrix.os, 'ubuntu')
+    - name: Install rust stable
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    - name: Build (wgpu)
+      run: cargo build --examples --workspace --verbose --features wgpu,wgpu_image,wgpu_svg,wgpu_canvas,wgpu_default_system_font,palette
+    - name: Build (glow)
+      run: cargo build --examples --workspace --verbose --no-default-features --features glow,glow_canvas,glow_default_system_font,palette
+    - name: Run tests
+      run: cargo test --examples --workspace --verbose
