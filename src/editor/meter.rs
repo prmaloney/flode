@@ -5,7 +5,8 @@
 
 use super::depth::{draw_shadow, FLOAT_SHADOW};
 use super::draw::rounded_rect;
-use super::style::{PILL_COLOR, PILL_HEIGHT, PILL_TOP, TEXT_COLOR};
+use super::piano::SOUNDING_DOT_COLOR;
+use super::style::{DIM_TEXT_COLOR, PILL_COLOR, PILL_HEIGHT, PILL_TOP, TEXT_COLOR};
 use nih_plug_iced::widget::canvas::{Frame, Path, Text};
 use nih_plug_iced::{alignment, Color, Point, Rectangle, Size};
 
@@ -73,9 +74,54 @@ impl Ballistics {
     }
 }
 
-/// Draws the meter. `levels` are the held peaks as linear amplitude.
-pub(super) fn draw(frame: &mut Frame, bounds: Rectangle, levels: [f32; 2]) {
+/// How long the MIDI light takes to fade after a note arrives, in seconds.
+const MIDI_LIGHT_SECONDS: f32 = 0.35;
+
+/// How lit the MIDI light is `seconds` after a note arrived: full at once, then fading to dark.
+pub(super) fn midi_light(seconds: f32) -> f32 {
+    (1.0 - seconds / MIDI_LIGHT_SECONDS).clamp(0.0, 1.0)
+}
+
+/// The MIDI light: a dot with its name under it, left of the meter. It lights when the audio
+/// thread takes in a note, whether it came from the host or the key strip, so a note that is
+/// heard as nothing can be told from one that never arrived. `light` is from 0.0 to 1.0.
+fn draw_midi_light(frame: &mut Frame, panel: Rectangle, light: f32) {
+    let center = Point::new(panel.x - 22.0, panel.y + PILL_HEIGHT / 2.0 - 5.0);
+    if light > 0.0 {
+        frame.fill(
+            &Path::circle(center, 7.0),
+            Color {
+                a: 0.25 * light,
+                ..SOUNDING_DOT_COLOR
+            },
+        );
+    }
+    frame.fill(
+        &Path::circle(center, 3.5),
+        lerp_color(TRACK, SOUNDING_DOT_COLOR, light),
+    );
+    frame.fill_text(Text {
+        content: "MIDI".to_string(),
+        position: Point::new(center.x, center.y + 11.0),
+        color: DIM_TEXT_COLOR,
+        size: 9.0,
+        horizontal_alignment: alignment::Horizontal::Center,
+        vertical_alignment: alignment::Vertical::Center,
+        ..Text::default()
+    });
+}
+
+/// The color a fraction `t` of the way from `from` to `to`.
+fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    Color::from_rgb(mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
+}
+
+/// Draws the meter. `levels` are the held peaks as linear amplitude. `midi_light` is how lit the
+/// MIDI indicator is.
+pub(super) fn draw(frame: &mut Frame, bounds: Rectangle, levels: [f32; 2], midi_light: f32) {
     let panel = meter_bounds(bounds);
+    draw_midi_light(frame, panel, midi_light);
     draw_shadow(frame, panel, PILL_HEIGHT / 2.0, FLOAT_SHADOW);
     frame.fill(&rounded_rect(panel, PILL_HEIGHT / 2.0), PILL_COLOR);
 
@@ -132,6 +178,16 @@ fn fraction_of_db(db: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MIDI light is full when a note arrives, fades steadily, and is dark after its time.
+    #[test]
+    fn the_midi_light_fades_after_a_note() {
+        assert_eq!(midi_light(0.0), 1.0);
+        let half = midi_light(MIDI_LIGHT_SECONDS / 2.0);
+        assert!((half - 0.5).abs() < 1e-6, "{half}");
+        assert_eq!(midi_light(MIDI_LIGHT_SECONDS), 0.0);
+        assert_eq!(midi_light(10.0), 0.0);
+    }
 
     fn db(db: f32) -> f32 {
         10f32.powf(db / 20.0)

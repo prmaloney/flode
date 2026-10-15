@@ -1937,6 +1937,39 @@ mod section_tests {
 mod preset_ui_tests {
     use super::*;
 
+    fn drag(index: usize, value: f32) -> Vec<MacroEdit> {
+        vec![
+            MacroEdit::Begin(index),
+            MacroEdit::Set(index, value),
+            MacroEdit::End(index),
+        ]
+    }
+
+    /// A load that leaves every macro where the host has it writes nothing to the host.
+    #[test]
+    fn unchanged_macros_are_not_written_to_the_host() {
+        let edits: Vec<MacroEdit> = (0..4).flat_map(|i| drag(i, 0.0)).collect();
+        assert!(without_unchanged_macros(&edits, |_| 0.0).is_empty());
+    }
+
+    /// A macro that moves keeps its whole drag, and the others drop out.
+    #[test]
+    fn a_macro_that_moves_is_still_written() {
+        let mut edits = drag(0, 0.0);
+        edits.extend(drag(1, 0.45));
+        let kept = without_unchanged_macros(&edits, |_| 0.0);
+        assert_eq!(kept, drag(1, 0.45));
+    }
+
+    /// A drag that has only started has no Set, so it is passed on as it is.
+    #[test]
+    fn a_drag_with_no_value_yet_is_kept() {
+        let edits = vec![MacroEdit::Begin(2)];
+        assert_eq!(without_unchanged_macros(&edits, |_| 0.7), edits);
+        let edits = vec![MacroEdit::End(2)];
+        assert_eq!(without_unchanged_macros(&edits, |_| 0.7), edits);
+    }
+
     /// Each row of the preset list lights on its own line, and a submenu row is not on the list.
     #[test]
     fn a_preset_row_knows_its_line_in_the_list() {

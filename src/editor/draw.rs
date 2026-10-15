@@ -148,7 +148,7 @@ pub(super) fn draw_editor(
         open_item,
     );
     draw_status(&mut frame, bounds, graph);
-    super::meter::draw(&mut frame, bounds, output);
+    super::meter::draw(&mut frame, bounds, output, graph.midi_light);
 
     let strip = piano::strip_bounds(bounds);
     // Text would show through a menu drawn over the strip, so the strip drops its labels then.

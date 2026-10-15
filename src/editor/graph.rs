@@ -65,6 +65,38 @@ pub(super) enum MacroEdit {
     End(usize),
 }
 
+/// `edits` without the ones for a macro whose every `Set` leaves it where the host already has it.
+/// A preset load records a full drag for each of the four macros, and most presets leave them at
+/// zero, so this keeps a load from writing host parameters it does not change. A macro with no
+/// `Set` in `edits`, such as a drag that has only started, keeps its edits. `current` is the
+/// host's value of a macro.
+pub(super) fn without_unchanged_macros(
+    edits: &[MacroEdit],
+    current: impl Fn(usize) -> f32,
+) -> Vec<MacroEdit> {
+    let moves = |index: usize| {
+        edits.iter().any(|edit| match edit {
+            MacroEdit::Set(i, value) => *i == index && (value - current(index)).abs() > 1e-4,
+            _ => false,
+        })
+    };
+    let sets = |index: usize| {
+        edits
+            .iter()
+            .any(|edit| matches!(edit, MacroEdit::Set(i, _) if *i == index))
+    };
+    edits
+        .iter()
+        .copied()
+        .filter(|edit| {
+            let index = match edit {
+                MacroEdit::Begin(i) | MacroEdit::Set(i, _) | MacroEdit::End(i) => *i,
+            };
+            !sets(index) || moves(index)
+        })
+        .collect()
+}
+
 /// The open preset list: what is saved, and the category whose submenu is open, if one is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PresetMenu {
@@ -159,6 +191,8 @@ pub struct Graph {
     /// True when the computer keyboard plays notes, which is in the standalone app. The strip
     /// marks the keys it plays. In a plugin it is false, and only clicks on the strip play.
     pub(super) computer_keys: bool,
+    /// How lit the MIDI indicator is, from 0.0 to 1.0. It jumps up when a note arrives and fades.
+    pub(super) midi_light: f32,
     /// True while the cursor is inside the editor. Hover highlights use it, so one does not stay
     /// lit after the cursor leaves.
     pub(super) cursor_in: bool,
@@ -290,6 +324,7 @@ impl Graph {
             mouse_note: None,
             computer_keys: true,
             cursor_in: false,
+            midi_light: 0.0,
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),

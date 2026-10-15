@@ -44,6 +44,8 @@ pub struct Flode {
     /// Notes from the editor's computer keyboard. Drained on the audio thread in `process`.
     note_tx: Arc<Mutex<Producer<PianoEvent>>>,
     note_rx: Consumer<PianoEvent>,
+    /// The note-ons the audio thread has received so far. The editor shows when it changes.
+    notes_in: u32,
 }
 
 impl Default for Flode {
@@ -57,6 +59,7 @@ impl Default for Flode {
             audio,
             note_tx: Arc::new(Mutex::new(note_tx)),
             note_rx,
+            notes_in: 0,
         }
     }
 }
@@ -195,7 +198,10 @@ impl Plugin for Flode {
 
         while let Ok(note) = self.note_rx.pop() {
             match note {
-                PianoEvent::NoteOn { note, velocity } => self.engine.note_on(note, velocity),
+                PianoEvent::NoteOn { note, velocity } => {
+                    self.notes_in = self.notes_in.wrapping_add(1);
+                    self.engine.note_on(note, velocity)
+                }
                 PianoEvent::NoteOff { note } => self.engine.note_off(note),
             }
         }
@@ -208,7 +214,10 @@ impl Plugin for Flode {
                     break;
                 }
                 match event {
-                    NoteEvent::NoteOn { note, velocity, .. } => self.engine.note_on(note, velocity),
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        self.notes_in = self.notes_in.wrapping_add(1);
+                        self.engine.note_on(note, velocity)
+                    }
                     NoteEvent::NoteOff { note, .. } => self.engine.note_off(note),
                     NoteEvent::MidiPitchBend { value, .. } => self.engine.pitch_bend(value),
                     NoteEvent::MidiCC { cc: 1, value, .. } => self.engine.mod_wheel(value),
@@ -235,6 +244,7 @@ impl Plugin for Flode {
             levels: self.engine.levels(),
             active_notes: self.engine.active_notes(),
             output: self.engine.take_output_peak(),
+            notes_in: self.notes_in,
         });
 
         ProcessStatus::KeepAlive

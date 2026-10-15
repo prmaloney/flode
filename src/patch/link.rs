@@ -21,6 +21,10 @@ pub struct Meters {
     /// The loudest left and right output sample of the last block, as linear amplitude, shown on
     /// the output meter.
     pub output: [f32; 2],
+    /// How many note-ons the audio thread has received, from the host or the key strip. It wraps.
+    /// The editor lights its MIDI indicator when this changes, so it shows that notes arrive
+    /// whatever the patch does with them.
+    pub notes_in: u32,
 }
 
 /// The editor's ends of the two channels.

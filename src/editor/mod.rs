@@ -67,6 +67,9 @@ struct FlodeEditor {
     meter: meter::Ballistics,
     /// When the meter last updated, to time its fall.
     meter_updated: Option<Instant>,
+    /// The note-on count the editor last saw from the audio thread, and when it last changed.
+    notes_seen: u32,
+    midi_flash: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,7 +87,14 @@ impl FlodeEditor {
             return;
         }
         let setter = ParamSetter::new(self.context.as_ref());
-        for edit in std::mem::take(&mut self.graph.macro_edits) {
+        // A preset that leaves a macro where the host has it needs no write to that parameter.
+        let edits = std::mem::take(&mut self.graph.macro_edits);
+        let edits = graph::without_unchanged_macros(&edits, |index| {
+            self.params
+                .macro_param(index)
+                .unmodulated_normalized_value()
+        });
+        for edit in edits {
             match edit {
                 graph::MacroEdit::Begin(index) => {
                     setter.begin_set_parameter(self.params.macro_param(index))
@@ -166,6 +176,8 @@ impl IcedEditor for FlodeEditor {
             graph,
             meter: meter::Ballistics::default(),
             meter_updated: None,
+            notes_seen: 0,
+            midi_flash: None,
         };
         (editor, Command::none())
     }
@@ -224,6 +236,16 @@ impl IcedEditor for FlodeEditor {
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
         self.meter_updated = Some(now);
         let output = self.meter.update(meters.output, seconds);
+
+        // The MIDI light flashes when the audio thread has taken in a note-on since the last frame,
+        // and fades after.
+        if meters.notes_in != self.notes_seen {
+            self.notes_seen = meters.notes_in;
+            self.midi_flash = Some(now);
+        }
+        self.graph.midi_light = self.midi_flash.map_or(0.0, |flash| {
+            meter::midi_light(now.duration_since(flash).as_secs_f32())
+        });
         let editor: Canvas<canvas::Message, NodeEditor<'_>> = Canvas::new(NodeEditor::new(
             &mut self.graph,
             meters.levels,
