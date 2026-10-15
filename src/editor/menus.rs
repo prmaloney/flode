@@ -12,15 +12,92 @@ use super::style::*;
 pub(super) enum PillItem {
     Kind(NodeKind),
     Category(Category),
+    /// Opens the list of presets, with the entry that saves one.
+    Presets,
 }
 
 /// The pill's buttons, from left to right.
-pub(super) const PILL_ITEMS: [PillItem; 4] = [
+pub(super) const PILL_ITEMS: [PillItem; 5] = [
     PillItem::Kind(NodeKind::Oscillator),
     PillItem::Category(Category::Driver),
     PillItem::Category(Category::Util),
     PillItem::Category(Category::Effects),
+    PillItem::Presets,
 ];
+
+/// A row of the preset list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PresetRow {
+    /// Opens the box that names and saves the current graph.
+    SaveAs,
+    /// Loads the saved preset at this position in the list.
+    Load(usize),
+}
+
+/// The widest a preset name is drawn on the pill, in characters.
+pub(super) const PILL_NAME_CHARS: usize = 10;
+
+/// A preset name cut to fit the pill, with an ellipsis if it was longer.
+pub(super) fn shorten(name: &str) -> String {
+    if name.chars().count() <= PILL_NAME_CHARS {
+        name.to_string()
+    } else {
+        let head: String = name.chars().take(PILL_NAME_CHARS - 1).collect();
+        format!("{head}…")
+    }
+}
+
+/// How many saved names the list shows. It stops short of the key strip, and always has room for
+/// a few.
+pub(super) fn preset_names_shown(bounds: Rectangle, names: usize) -> usize {
+    let top = pill_bounds(bounds).y + PILL_HEIGHT + LIST_GAP;
+    let room = (bounds.height - super::piano::STRIP_HEIGHT - top) / MENU_ITEM_HEIGHT;
+    // One row of the room is the save entry.
+    names.min((room.floor() as usize).saturating_sub(1).max(3))
+}
+
+/// The list under the Presets button: the save entry, then the saved names. With none saved it
+/// has a row that says so.
+pub(super) fn preset_list_bounds(bounds: Rectangle, names: usize) -> Rectangle {
+    let index = PILL_ITEMS
+        .iter()
+        .position(|item| *item == PillItem::Presets)
+        .unwrap_or(0);
+    let segment = pill_segment(bounds, index);
+    let rows = 1 + preset_names_shown(bounds, names).max(1);
+    let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
+    Rectangle {
+        // The list lines up with the pill's right end, so it stays inside the window.
+        x: segment.x + segment.width - width,
+        y: segment.y + segment.height + LIST_GAP,
+        width,
+        height: rows as f32 * MENU_ITEM_HEIGHT,
+    }
+}
+
+/// The row of the preset list under `point`. The note row for an empty list is not a row.
+pub(super) fn preset_row_at(bounds: Rectangle, names: usize, point: Point) -> Option<PresetRow> {
+    let list = preset_list_bounds(bounds, names);
+    if !list.contains(point) {
+        return None;
+    }
+    let row = ((point.y - list.y) / MENU_ITEM_HEIGHT) as usize;
+    match row {
+        0 => Some(PresetRow::SaveAs),
+        row if row <= preset_names_shown(bounds, names) => Some(PresetRow::Load(row - 1)),
+        _ => None,
+    }
+}
+
+/// The box where a preset's name is typed. It sits under the pill, in the middle.
+pub(super) fn name_box_bounds(bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        x: (bounds.width - NAME_BOX_WIDTH) / 2.0,
+        y: pill_bounds(bounds).y + PILL_HEIGHT + LIST_GAP + 6.0,
+        width: NAME_BOX_WIDTH,
+        height: NAME_BOX_HEIGHT,
+    }
+}
 /// The list that opens below a dropdown, with one row per label.
 pub(super) fn dropdown_list_bounds(dropdown: Rectangle, rows: usize) -> Rectangle {
     Rectangle {

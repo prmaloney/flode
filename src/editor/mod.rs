@@ -92,6 +92,24 @@ impl FlodeEditor {
         }
     }
 
+    /// Saves the preset the user just named. It is saved here because the macro values are the
+    /// host's, and the graph does not hold them. The graph is also saved with the project, so
+    /// the preset's name stays on the pill.
+    fn save_pending_preset(&mut self) {
+        if self.graph.pending_save.is_none() {
+            return;
+        }
+        let macros = std::array::from_fn(|index| {
+            self.params
+                .macro_param(index)
+                .unmodulated_normalized_value()
+        });
+        self.graph.save_pending_preset(macros);
+        if let Ok(mut saved) = self.params.graph.lock() {
+            *saved = self.graph.to_saved();
+        }
+    }
+
     /// Shows the host's macro values on the macro node, which they may have moved by automation.
     fn show_macros(&mut self) {
         let values = std::array::from_fn(|index| {
@@ -163,6 +181,7 @@ impl IcedEditor for FlodeEditor {
                 }
             }
         }
+        self.save_pending_preset();
         self.send_macro_edits();
         Command::none()
     }

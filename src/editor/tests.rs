@@ -212,6 +212,7 @@ mod slot_tests {
         };
         let saved = SavedGraph {
             version: 0,
+            preset_name: None,
             nodes: vec![node(NodeKind::Oscillator), node(NodeKind::Output)],
             connections: vec![(0, 1)],
             links: Vec::new(),
@@ -491,6 +492,7 @@ mod envelope_migration_tests {
         };
         let saved = SavedGraph {
             version: 0,
+            preset_name: None,
             nodes: vec![
                 node(NodeKind::Oscillator, 0.0),
                 node(NodeKind::Envelope, 100.0),
@@ -1810,6 +1812,329 @@ mod section_tests {
             graph.nodes[copy].sections_collapsed,
             graph.nodes[0].sections_collapsed
         );
+    }
+}
+
+#[cfg(test)]
+mod preset_ui_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::editor::piano::PianoEvent;
+    use crate::editor::style::MENU_ITEM_HEIGHT;
+    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+    use std::path::PathBuf;
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    /// A folder for one test's presets, removed when the test ends.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("flode-ui-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn graph_in(dir: &TempDir) -> Graph {
+        let mut graph = minimal_graph();
+        graph.preset_dir = Some(dir.0.clone());
+        graph
+    }
+
+    fn click(editor: &mut NodeEditor, at: Point) -> Option<Message> {
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let message = editor.update(press, bounds(), Cursor::Available(at)).1;
+        let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        editor.update(release, bounds(), Cursor::Available(at));
+        message
+    }
+
+    fn key(editor: &mut NodeEditor, event: keyboard::Event) -> Option<Message> {
+        editor
+            .update(Event::Keyboard(event), bounds(), Cursor::Unavailable)
+            .1
+    }
+
+    fn type_text(editor: &mut NodeEditor, text: &str) {
+        for c in text.chars() {
+            key(editor, keyboard::Event::CharacterReceived(c));
+        }
+    }
+
+    fn press_key(editor: &mut NodeEditor, key_code: KeyCode) -> Option<Message> {
+        let event = keyboard::Event::KeyPressed {
+            key_code,
+            modifiers: Modifiers::default(),
+        };
+        key(editor, event)
+    }
+
+    fn presets_button() -> Point {
+        let segment = pill_segment(bounds(), 4);
+        Point::new(
+            segment.x + segment.width / 2.0,
+            segment.y + segment.height / 2.0,
+        )
+    }
+
+    /// The middle of row `row` in the preset list.
+    fn list_row(names: usize, row: usize) -> Point {
+        let list = preset_list_bounds(bounds(), names);
+        Point::new(
+            list.x + 20.0,
+            list.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT,
+        )
+    }
+
+    /// Save a preset through the UI: open the list, pick Save as, type a name, press Enter. The
+    /// editor then saves it, which the test does by hand with the macro values it is given.
+    fn save_through_the_ui(graph: &mut Graph, name: &str, macros: [f32; 4]) {
+        let names = graph
+            .preset_dir
+            .as_deref()
+            .map_or(0, |d| crate::presets::list_in(d).len());
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        click(&mut editor, list_row(names, 0));
+        assert!(editor.graph.name_entry.is_some());
+        // Clear the name the box started with, then type.
+        for _ in 0..60 {
+            press_key(&mut editor, KeyCode::Backspace);
+        }
+        type_text(&mut editor, name);
+        let message = press_key(&mut editor, KeyCode::Enter);
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        graph.save_pending_preset(macros);
+    }
+
+    #[test]
+    fn saving_through_the_ui_writes_a_named_preset() {
+        let dir = TempDir::new("save");
+        let mut graph = graph_in(&dir);
+        save_through_the_ui(&mut graph, "  Warm pad ", [0.1, 0.2, 0.3, 0.4]);
+
+        assert_eq!(crate::presets::list_in(&dir.0), ["Warm pad"]);
+        let saved = crate::presets::load_in(&dir.0, "Warm pad").unwrap();
+        assert_eq!(saved.macros, [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(graph.preset_name.as_deref(), Some("Warm pad"));
+        assert!(graph.name_entry.is_none() && graph.pending_save.is_none());
+        // The name stays with the project's saved graph.
+        assert_eq!(graph.to_saved().preset_name.as_deref(), Some("Warm pad"));
+        assert_eq!(
+            Graph::from_saved(&graph.to_saved()).preset_name.as_deref(),
+            Some("Warm pad")
+        );
+    }
+
+    /// Saving again under a name that is already there replaces that preset, and the box starts
+    /// with the current preset's name.
+    #[test]
+    fn saving_again_keeps_the_name_and_replaces_the_file() {
+        let dir = TempDir::new("again");
+        let mut graph = graph_in(&dir);
+        save_through_the_ui(&mut graph, "Lead", [0.0; 4]);
+        graph.start_name_entry();
+        assert_eq!(graph.name_entry.as_deref(), Some("Lead"));
+        graph.confirm_name_entry();
+        graph.save_pending_preset([0.9; 4]);
+        assert_eq!(crate::presets::list_in(&dir.0), ["Lead"]);
+        assert_eq!(
+            crate::presets::load_in(&dir.0, "Lead").unwrap().macros,
+            [0.9; 4]
+        );
+    }
+
+    /// Loading a preset swaps the graph and sends its macro values to the host.
+    #[test]
+    fn loading_a_preset_swaps_the_graph_and_sets_the_macros() {
+        let dir = TempDir::new("load");
+        let mut graph = graph_in(&dir);
+        graph.add_node(NodeKind::Reverb, Point::new(400.0, 300.0));
+        save_through_the_ui(&mut graph, "Wet", [0.5, 0.6, 0.7, 0.8]);
+
+        let mut other = graph_in(&dir);
+        other.delete_node(0);
+        assert_eq!(other.nodes.len(), 2);
+        let mut editor = NodeEditor::new(&mut other, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        assert_eq!(
+            editor.graph.preset_list.as_deref(),
+            Some(&["Wet".to_string()][..])
+        );
+        let message = click(&mut editor, list_row(1, 1));
+        assert!(matches!(message, Some(Message::GraphChanged)));
+
+        assert!(editor.graph.preset_list.is_none());
+        assert_eq!(editor.graph.nodes.len(), 4);
+        assert!(editor
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Reverb));
+        assert_eq!(editor.graph.preset_name.as_deref(), Some("Wet"));
+        assert!(editor.graph.patch().lanes[0].is_active());
+        // The host hears each macro's gesture and value.
+        let sets: Vec<_> = editor
+            .graph
+            .macro_edits
+            .iter()
+            .filter_map(|edit| match edit {
+                MacroEdit::Set(i, v) => Some((*i, *v)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sets, [(0, 0.5), (1, 0.6), (2, 0.7), (3, 0.8)]);
+    }
+
+    /// An unreadable preset leaves the graph alone and says so.
+    #[test]
+    fn a_missing_preset_changes_nothing() {
+        let dir = TempDir::new("missing");
+        let mut graph = graph_in(&dir);
+        let count = graph.nodes.len();
+        assert!(!graph.load_preset("ghost"));
+        assert_eq!(graph.nodes.len(), count);
+        assert!(graph
+            .status
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("ghost")));
+    }
+
+    /// While the box is open, keys are text. They do not play the piano or run a shortcut.
+    #[test]
+    fn the_name_box_takes_the_keys() {
+        let dir = TempDir::new("keys");
+        let mut graph = graph_in(&dir);
+        graph.selected = Some(0);
+        graph.name_entry = Some(String::new());
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+
+        // 'a' is a piano key and 'm' is the bypass shortcut. Both are just letters here.
+        let message = press_key(&mut editor, KeyCode::A);
+        assert!(!matches!(message, Some(Message::Note(_))));
+        type_text(&mut editor, "am");
+        press_key(&mut editor, KeyCode::M);
+        assert!(!editor.graph.nodes[0].bypassed);
+        assert_eq!(editor.graph.name_entry.as_deref(), Some("am"));
+
+        // Characters a file name can't hold are dropped, and Backspace removes one.
+        type_text(&mut editor, "a/b:c");
+        assert_eq!(editor.graph.name_entry.as_deref(), Some("amabc"));
+        press_key(&mut editor, KeyCode::Backspace);
+        assert_eq!(editor.graph.name_entry.as_deref(), Some("amab"));
+
+        // Enter with a blank name keeps the box open.
+        editor.graph.name_entry = Some("   ".to_string());
+        press_key(&mut editor, KeyCode::Enter);
+        assert!(editor.graph.name_entry.is_some());
+        assert!(editor.graph.pending_save.is_none());
+
+        press_key(&mut editor, KeyCode::Escape);
+        assert!(editor.graph.name_entry.is_none());
+        assert!(editor.graph.pending_save.is_none());
+    }
+
+    /// The name stops growing at the longest allowed name.
+    #[test]
+    fn the_name_has_a_length_limit() {
+        let dir = TempDir::new("limit");
+        let mut graph = graph_in(&dir);
+        graph.name_entry = Some(String::new());
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        type_text(&mut editor, &"x".repeat(100));
+        assert_eq!(
+            editor.graph.name_entry.as_ref().map(|t| t.chars().count()),
+            Some(crate::presets::MAX_NAME_LEN)
+        );
+    }
+
+    /// A key held when the box opens still ends its note when it comes up.
+    #[test]
+    fn a_held_piano_key_still_releases_while_the_box_is_open() {
+        let dir = TempDir::new("held");
+        let mut graph = graph_in(&dir);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let on = press_key(&mut editor, KeyCode::A);
+        assert!(matches!(on, Some(Message::Note(PianoEvent::NoteOn { .. }))));
+        editor.graph.name_entry = Some(String::new());
+        let up = keyboard::Event::KeyReleased {
+            key_code: KeyCode::A,
+            modifiers: Modifiers::default(),
+        };
+        let off = key(&mut editor, up);
+        assert!(matches!(
+            off,
+            Some(Message::Note(PianoEvent::NoteOff { .. }))
+        ));
+    }
+
+    /// A press outside the box cancels it, and one on the keys does not play a note.
+    #[test]
+    fn a_press_outside_the_box_cancels_it() {
+        let dir = TempDir::new("outside");
+        let mut graph = graph_in(&dir);
+        graph.name_entry = Some("x".to_string());
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let keys = Point::new(300.0, 700.0);
+        let message = click(&mut editor, keys);
+        assert!(!matches!(message, Some(Message::Note(_))));
+        assert!(editor.graph.name_entry.is_none());
+
+        // A press inside the box leaves it open.
+        editor.graph.name_entry = Some("x".to_string());
+        let inside = name_box_bounds(bounds());
+        click(&mut editor, Point::new(inside.x + 10.0, inside.y + 10.0));
+        assert!(editor.graph.name_entry.is_some());
+    }
+
+    /// The button opens the list, and pressing it again or pressing elsewhere closes it.
+    #[test]
+    fn the_presets_button_toggles_the_list() {
+        let dir = TempDir::new("toggle");
+        let mut graph = graph_in(&dir);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        click(&mut editor, presets_button());
+        assert!(editor.graph.preset_list.is_some());
+        click(&mut editor, presets_button());
+        assert!(editor.graph.preset_list.is_none());
+        click(&mut editor, presets_button());
+        click(&mut editor, Point::new(400.0, 400.0));
+        assert!(editor.graph.preset_list.is_none());
+    }
+
+    /// Each row of the list is an action, the empty list has a note row that is not one, and a long
+    /// list stops above the keys.
+    #[test]
+    fn rows_map_to_actions() {
+        let names = 3;
+        let at = |row: usize| preset_row_at(bounds(), names, list_row(names, row));
+        assert_eq!(at(0), Some(PresetRow::SaveAs));
+        assert_eq!(at(1), Some(PresetRow::Load(0)));
+        assert_eq!(at(3), Some(PresetRow::Load(2)));
+        // With none saved, the row under the save entry is a note, not a preset.
+        assert_eq!(preset_row_at(bounds(), 0, list_row(0, 1)), None);
+        // A long name list stops above the keys.
+        let list = preset_list_bounds(bounds(), 100);
+        assert!(list.y + list.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
+        assert_eq!(shorten("Short"), "Short");
+        assert_eq!(shorten("A very long preset name").chars().count(), 10);
     }
 }
 

@@ -9,8 +9,11 @@ use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDT
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
+use crate::presets::{self, Preset};
 use nih_plug_iced::keyboard::KeyCode;
 use nih_plug_iced::{Point, Vector};
+use std::path::PathBuf;
+use std::time::Instant;
 
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
 
@@ -89,6 +92,19 @@ pub struct Graph {
     pub(super) shortcut_held: Option<KeyCode>,
     /// Changes to macro knobs the editor has not yet passed to the host, oldest first.
     pub(super) macro_edits: Vec<MacroEdit>,
+    /// The folder presets are saved in and loaded from. None if the home folder is unknown.
+    pub(super) preset_dir: Option<PathBuf>,
+    /// The preset this graph was last saved as or loaded from.
+    pub(super) preset_name: Option<String>,
+    /// The open preset list: the saved names, read when it opened.
+    pub(super) preset_list: Option<Vec<String>>,
+    /// The name being typed, while the save box is open.
+    pub(super) name_entry: Option<String>,
+    /// A name the user confirmed. The editor saves the preset under it, since the macro values
+    /// are the host's.
+    pub(super) pending_save: Option<String>,
+    /// A line shown under the pill for a few seconds, such as "Saved Lead".
+    pub(super) status: Option<(String, Instant)>,
 }
 
 /// The part of a dropdown under the cursor.
@@ -196,7 +212,106 @@ impl Graph {
             last_screen: Point::new(0.0, 0.0),
             shortcut_held: None,
             macro_edits: Vec::new(),
+            preset_dir: presets::directory(),
+            preset_name: None,
+            preset_list: None,
+            name_entry: None,
+            pending_save: None,
+            status: None,
         }
+    }
+
+    /// Shows a line under the pill for a few seconds.
+    pub(super) fn say(&mut self, text: impl Into<String>) {
+        self.status = Some((text.into(), Instant::now()));
+    }
+
+    /// Opens the preset list, reading the saved names now.
+    pub(super) fn open_preset_list(&mut self) {
+        let names = self
+            .preset_dir
+            .as_deref()
+            .map(presets::list_in)
+            .unwrap_or_default();
+        self.preset_list = Some(names);
+    }
+
+    /// Opens the save box. It starts with the current preset's name, so saving again replaces it.
+    pub(super) fn start_name_entry(&mut self) {
+        self.preset_list = None;
+        self.name_entry = Some(self.preset_name.clone().unwrap_or_default());
+    }
+
+    /// Takes the typed name. A name that is not usable keeps the box open and says why.
+    pub(super) fn confirm_name_entry(&mut self) {
+        let Some(typed) = self.name_entry.as_deref() else {
+            return;
+        };
+        match presets::clean_name(typed) {
+            Some(name) => {
+                self.name_entry = None;
+                self.pending_save = Some(name);
+            }
+            None => self.say("Type a name first"),
+        }
+    }
+
+    /// Saves the preset a confirmed name asked for, with the macro knobs' current values. Does
+    /// nothing if no name is waiting.
+    pub(super) fn save_pending_preset(&mut self, macros: [f32; MACRO_COUNT]) {
+        let Some(name) = self.pending_save.take() else {
+            return;
+        };
+        let Some(dir) = self.preset_dir.clone() else {
+            self.say("Could not save: no preset folder");
+            return;
+        };
+        let preset = Preset {
+            name: name.clone(),
+            graph: self.to_saved(),
+            macros,
+        };
+        match presets::save_in(&dir, &preset) {
+            Ok(()) => {
+                self.preset_name = Some(name.clone());
+                self.say(format!("Saved {name}"));
+            }
+            Err(error) => self.say(format!("Could not save: {error}")),
+        }
+    }
+
+    /// Replaces the graph with the saved preset `name`, and sends its macro values to the host.
+    /// Returns true if the graph changed. A preset that can't be read leaves the graph alone and
+    /// says so.
+    pub(super) fn load_preset(&mut self, name: &str) -> bool {
+        let loaded = match self.preset_dir.as_deref() {
+            Some(dir) => presets::load_in(dir, name),
+            None => Err(std::io::Error::other("no preset folder")),
+        };
+        let preset = match loaded {
+            Ok(preset) => preset,
+            Err(error) => {
+                self.say(format!("Could not load {name}: {error}"));
+                return false;
+            }
+        };
+        // Only the nodes and wires change. The view, the piano's held keys, and where presets
+        // live stay as they were.
+        let view = self.view;
+        let piano = std::mem::take(&mut self.piano);
+        let dir = self.preset_dir.clone();
+        *self = Graph::from_saved(&preset.graph);
+        self.view = view;
+        self.piano = piano;
+        self.preset_dir = dir;
+        self.preset_name = Some(preset.name.clone());
+        for (index, &value) in preset.macros.iter().enumerate() {
+            self.macro_edits.push(MacroEdit::Begin(index));
+            self.macro_edits.push(MacroEdit::Set(index, value));
+            self.macro_edits.push(MacroEdit::End(index));
+        }
+        self.say(format!("Loaded {}", preset.name));
+        true
     }
 
     /// Which macro a knob on a node is, or None for any other knob.
@@ -393,6 +508,7 @@ impl Graph {
             migrate_notes(&mut nodes, &mut connections);
         }
         let mut graph = Self::with(nodes, connections);
+        graph.preset_name = saved.preset_name.clone();
         graph.refresh_slots();
         graph
     }
@@ -400,6 +516,7 @@ impl Graph {
     pub fn to_saved(&self) -> SavedGraph {
         SavedGraph {
             version: SAVE_VERSION,
+            preset_name: self.preset_name.clone(),
             nodes: self.nodes.iter().map(SavedNode::new).collect(),
             connections: Vec::new(),
             links: self.connections.clone(),

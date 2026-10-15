@@ -88,6 +88,30 @@ impl<'a> NodeEditor<'a> {
             }
         }
 
+        // The save box takes every press. One outside the box cancels it.
+        if self.graph.name_entry.is_some() {
+            if !name_box_bounds(bounds).contains(screen) {
+                self.graph.name_entry = None;
+            }
+            return (event::Status::Captured, Some(Message::GraphChanged));
+        }
+
+        // An open preset list takes the press. Its row saves or loads. Any other press closes it.
+        let had_presets = self.graph.preset_list.is_some();
+        if let Some(names) = self.graph.preset_list.take() {
+            match preset_row_at(bounds, names.len(), screen) {
+                Some(PresetRow::SaveAs) => {
+                    self.graph.start_name_entry();
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                Some(PresetRow::Load(index)) => {
+                    self.graph.load_preset(&names[index]);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                None => {}
+            }
+        }
+
         // An open category list takes the press. Its row adds the node. Any other press closes it.
         let open_category = self.graph.category_menu.take();
         if let Some(category) = open_category {
@@ -106,6 +130,13 @@ impl<'a> NodeEditor<'a> {
                 // Pressing the same category again closes its list.
                 if open_category != Some(category) {
                     self.graph.category_menu = Some(category);
+                }
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            // Pressing the button again closes the list, which the press already did.
+            Some(PillItem::Presets) => {
+                if !had_presets {
+                    self.graph.open_preset_list();
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
@@ -301,7 +332,59 @@ impl<'a> NodeEditor<'a> {
                 return true;
             }
         }
-        false
+        if let Some(names) = &self.graph.preset_list {
+            if preset_row_at(bounds, names.len(), screen).is_some() {
+                return true;
+            }
+        }
+        // The save box takes every press, so a press on the keys does not play one.
+        self.graph.name_entry.is_some()
+    }
+
+    /// Handles a key event while the save box is open. The box takes every key, so the piano and
+    /// the shortcuts stay quiet. A key already held when the box opened still gets its release, so
+    /// no note sticks.
+    pub(super) fn name_entry_event(
+        &mut self,
+        event: &keyboard::Event,
+    ) -> (event::Status, Option<Message>) {
+        match event {
+            keyboard::Event::CharacterReceived(c) => {
+                let room = self
+                    .graph
+                    .name_entry
+                    .as_ref()
+                    .is_some_and(|text| text.chars().count() < crate::presets::MAX_NAME_LEN);
+                if room && crate::presets::valid_char(*c) {
+                    if let Some(text) = self.graph.name_entry.as_mut() {
+                        text.push(*c);
+                    }
+                }
+                (event::Status::Captured, Some(Message::Hovered))
+            }
+            keyboard::Event::KeyPressed { key_code, .. } => {
+                match key_code {
+                    keyboard::KeyCode::Backspace => {
+                        if let Some(text) = self.graph.name_entry.as_mut() {
+                            text.pop();
+                        }
+                    }
+                    keyboard::KeyCode::Escape => self.graph.name_entry = None,
+                    keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
+                        self.graph.confirm_name_entry();
+                        // The editor saves the preset when it hears of this.
+                        return (event::Status::Captured, Some(Message::GraphChanged));
+                    }
+                    _ => {}
+                }
+                (event::Status::Captured, Some(Message::Hovered))
+            }
+            keyboard::Event::KeyReleased { .. } => {
+                let note = self.graph.piano.handle(event.clone());
+                (event::Status::Captured, note.map(Message::Note))
+            }
+            _ => (event::Status::Ignored, None),
+        }
     }
 
     /// Adds a node of `kind` centered on `point` and makes it follow the cursor until the next
@@ -434,6 +517,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         let mouse_event = match event {
             Event::Mouse(mouse_event) => mouse_event,
             Event::Keyboard(key_event) => {
+                // The save box takes the keys while it is open.
+                if self.graph.name_entry.is_some() {
+                    return self.name_entry_event(&key_event);
+                }
                 // Shortcuts come first, so one on a piano key (Shift+D) is not also a note.
                 if let Some(result) = self.shortcut_event(&key_event) {
                     return result;

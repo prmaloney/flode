@@ -18,6 +18,7 @@ mod editor;
 mod engine;
 mod nodes;
 mod patch;
+mod presets;
 
 use dsp::wavetable::WaveTables;
 use editor::graph::Graph;

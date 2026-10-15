@@ -18,6 +18,9 @@ pub struct SavedGraph {
     /// Which save format this is. Missing in the oldest saves, which read as 0.
     #[serde(default)]
     pub(super) version: u32,
+    /// The preset this graph was last saved as or loaded from, if any. Shown on the pill.
+    #[serde(default)]
+    pub(super) preset_name: Option<String>,
     pub(super) nodes: Vec<SavedNode>,
     /// Audio connections as (output node index, input node index). Graphs saved before ports
     /// existed use this. New saves leave it empty.

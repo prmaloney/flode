@@ -53,6 +53,12 @@ pub(super) fn draw_editor(
     if let Some(category) = graph.category_menu {
         overlays.push(view.rect_to_world(category_list_bounds(bounds, category)));
     }
+    if let Some(names) = &graph.preset_list {
+        overlays.push(view.rect_to_world(preset_list_bounds(bounds, names.len())));
+    }
+    if graph.name_entry.is_some() {
+        overlays.push(view.rect_to_world(name_box_bounds(bounds)));
+    }
 
     // The nodes and wires are drawn in editor coordinates, then the view scales and moves them.
     frame.with_save(|frame| {
@@ -107,7 +113,8 @@ pub(super) fn draw_editor(
     });
 
     // The pill stays fixed on screen. It is drawn after the nodes, so it covers them.
-    draw_pill(&mut frame, bounds);
+    draw_pill(&mut frame, bounds, graph.preset_name.as_deref());
+    draw_status(&mut frame, bounds, graph);
     super::meter::draw(&mut frame, bounds, output);
 
     let strip = piano::strip_bounds(bounds);
@@ -150,6 +157,10 @@ pub(super) fn draw_editor(
 
     if let Some(category) = graph.category_menu {
         draw_category_list(&mut frame, bounds, category, graph);
+    }
+    draw_preset_list(&mut frame, bounds, graph);
+    if let Some(text) = &graph.name_entry {
+        draw_name_entry(&mut frame, bounds, text);
     }
 
     vec![frame.into_geometry()]
@@ -820,7 +831,7 @@ pub(super) fn draw_selection(frame: &mut Frame, node: &FlodeNode) {
 }
 
 /// The pill of add buttons at the top of the editor.
-pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle) {
+pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle, preset_name: Option<&str>) {
     let pill = pill_bounds(bounds);
     frame.fill(&rounded_rect(pill, PILL_HEIGHT / 2.0), PILL_COLOR);
 
@@ -842,11 +853,13 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle) {
         let center_x = pill.x + (index as f32 + 0.5) * segment;
         let center_y = pill.y + pill.height / 2.0;
         let label = match item {
-            PillItem::Kind(kind) => kind.title(),
-            PillItem::Category(category) => category.label(),
+            PillItem::Kind(kind) => kind.title().to_string(),
+            PillItem::Category(category) => category.label().to_string(),
+            // The button names the current preset, cut short to fit.
+            PillItem::Presets => preset_name.map_or("Presets".to_string(), shorten),
         };
         frame.fill_text(Text {
-            content: label.to_string(),
+            content: label,
             position: Point::new(center_x, center_y),
             color: TEXT_COLOR,
             size: 14.0,
@@ -854,9 +867,15 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle) {
             vertical_alignment: alignment::Vertical::Center,
             ..Text::default()
         });
-        // A category opens a list, so its button has a chevron.
-        if let PillItem::Category(_) = item {
-            let chevron_x = center_x + 36.0;
+        // A category and the presets open a list, so their buttons have a chevron.
+        if let PillItem::Category(_) | PillItem::Presets = item {
+            // The Presets button can hold a name, so its chevron sits further out.
+            let chevron_x = center_x
+                + if *item == PillItem::Presets {
+                    50.0
+                } else {
+                    36.0
+                };
             let chevron = Path::new(|builder| {
                 builder.move_to(Point::new(chevron_x - 3.0, center_y - 2.0));
                 builder.line_to(Point::new(chevron_x, center_y + 2.0));
@@ -871,6 +890,110 @@ pub(super) fn draw_pill(frame: &mut Frame, bounds: Rectangle) {
             );
         }
     }
+}
+
+/// The list under the Presets button: "Save as...", then the saved names. The current preset is
+/// marked. An empty library says so.
+pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+    let Some(names) = &graph.preset_list else {
+        return;
+    };
+    let list = preset_list_bounds(bounds, names.len());
+    frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
+    let shown = preset_names_shown(bounds, names.len());
+    let row_text = |frame: &mut Frame, row: usize, content: String, color: Color| {
+        frame.fill_text(Text {
+            content,
+            position: Point::new(
+                list.x + 12.0,
+                list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
+            ),
+            color,
+            size: 13.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    };
+    row_text(frame, 0, "Save as...".to_string(), TEXT_COLOR);
+    if names.is_empty() {
+        row_text(frame, 1, "No presets yet".to_string(), DIM_TEXT_COLOR);
+    }
+    for (index, name) in names.iter().take(shown).enumerate() {
+        let current = graph.preset_name.as_deref() == Some(name.as_str());
+        let content = if current {
+            format!("{name}  (current)")
+        } else {
+            name.clone()
+        };
+        row_text(frame, index + 1, content, TEXT_COLOR);
+    }
+    if names.len() > shown {
+        // Only the first names fit above the keys.
+        let more = names.len() - shown;
+        frame.fill_text(Text {
+            content: format!("{more} more not shown"),
+            position: Point::new(list.x + 12.0, list.y + list.height + 10.0),
+            color: DIM_TEXT_COLOR,
+            size: 11.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    }
+}
+
+/// The box where a preset's name is typed: a title, the text with a caret, and the keys that
+/// finish it.
+pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, text: &str) {
+    let area = name_box_bounds(bounds);
+    frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
+    let label = |frame: &mut Frame, content: &str, y: f32, size: f32, color: Color| {
+        frame.fill_text(Text {
+            content: content.to_string(),
+            position: Point::new(area.x + 14.0, area.y + y),
+            color,
+            size,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    };
+    label(frame, "Save preset as", 16.0, 12.0, DIM_TEXT_COLOR);
+
+    let field = Rectangle {
+        x: area.x + 12.0,
+        y: area.y + 30.0,
+        width: area.width - 24.0,
+        height: 30.0,
+    };
+    frame.fill(&rounded_rect(field, DROPDOWN_CORNER_RADIUS), DROPDOWN_COLOR);
+    // The caret is a bar after the text.
+    label(frame, &format!("{text}|"), 45.0, 14.0, TEXT_COLOR);
+    label(
+        frame,
+        "Enter to save, Esc to cancel",
+        76.0,
+        11.0,
+        DIM_TEXT_COLOR,
+    );
+}
+
+/// The line under the pill that says what a save or load did, for a few seconds.
+pub(super) fn draw_status(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+    let Some((text, since)) = &graph.status else {
+        return;
+    };
+    if since.elapsed() > STATUS_SECONDS {
+        return;
+    }
+    let pill = pill_bounds(bounds);
+    frame.fill_text(Text {
+        content: text.clone(),
+        position: Point::new(pill.x + pill.width / 2.0, pill.y + pill.height + 16.0),
+        color: DIM_TEXT_COLOR,
+        size: 12.0,
+        horizontal_alignment: alignment::Horizontal::Center,
+        vertical_alignment: alignment::Vertical::Center,
+        ..Text::default()
+    });
 }
 
 /// The list under an open category. Its rows are the category's node kinds, or a note when the
