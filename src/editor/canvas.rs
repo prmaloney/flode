@@ -65,6 +65,10 @@ impl<'a> NodeEditor<'a> {
                 let rows = dropdown.labels.len();
                 let list = dropdown_list_bounds(dropdown.bounds, rows);
                 if let Some(row) = list_row_at(list, point, rows) {
+                    // A row that can't be used closes the list and changes nothing.
+                    if self.graph.dropdown_row_disabled(index, which, row) {
+                        return (event::Status::Captured, None);
+                    }
                     self.graph.nodes[index].choose(which, row);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }

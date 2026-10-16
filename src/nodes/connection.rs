@@ -1,6 +1,6 @@
 //! A wire between two nodes.
 
-use super::{FlodeNode, NodeKind, Port};
+use super::{FlodeNode, Port};
 use serde::{Deserialize, Serialize};
 
 /// A wire from an output port on one node to an input port on another.
@@ -21,7 +21,6 @@ impl Connection {
         };
         self.from != self.to
             && self.out.signal() == self.input.signal()
-            && (self.out != Port::Audio || NodeKind::may_feed(from.kind, to.kind))
             && from.output_point(self.out).is_some()
             && to.input_point(self.input).is_some()
     }
@@ -109,6 +108,7 @@ mod tests {
 #[cfg(test)]
 mod effect_rule_tests {
     use super::*;
+    use crate::nodes::NodeKind;
     use nih_plug_iced::Point;
 
     fn node(kind: NodeKind) -> FlodeNode {
@@ -125,10 +125,10 @@ mod effect_rule_tests {
         .is_valid(nodes)
     }
 
-    /// An effect's output goes to another effect or an output slot, and nowhere else. The per-voice
-    /// nodes can feed anything that takes audio.
+    /// An effect's output goes to anything that takes audio: another effect, a filter, a mix, or
+    /// an output slot. A source takes no audio, so no wire runs into one.
     #[test]
-    fn an_effect_only_feeds_effects_and_the_output() {
+    fn an_effect_feeds_anything_that_takes_audio() {
         let nodes = [
             node(NodeKind::Reverb),
             node(NodeKind::Delay),
@@ -139,9 +139,11 @@ mod effect_rule_tests {
         ];
         assert!(wire(&nodes, 0, 1, Port::Audio));
         assert!(wire(&nodes, 0, 4, Port::Slot(0)));
-        assert!(!wire(&nodes, 0, 2, Port::Audio));
-        assert!(!wire(&nodes, 0, 3, Port::AudioIn(0)));
+        assert!(wire(&nodes, 0, 2, Port::Audio));
+        assert!(wire(&nodes, 0, 3, Port::AudioIn(0)));
+        assert!(wire(&nodes, 0, 3, Port::AudioIn(1)));
         assert!(wire(&nodes, 5, 0, Port::Audio));
         assert!(wire(&nodes, 2, 1, Port::Audio));
+        assert!(!wire(&nodes, 0, 5, Port::Audio));
     }
 }

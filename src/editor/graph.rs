@@ -4,6 +4,7 @@ use crate::editor::piano::Piano;
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::macros::MACRO_COUNT;
+use crate::nodes::mix;
 use crate::nodes::output::MAX_SLOTS;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
@@ -528,7 +529,11 @@ impl Graph {
             if let Some(dropdown) = node.dropdowns().into_iter().find(|d| d.which == which) {
                 let rows = dropdown.labels.len();
                 let list = dropdown_list_bounds(dropdown.bounds, rows);
+                // A row that can't be used does not light, but it still covers what is under it.
                 if let Some(row) = list_row_at(list, point, rows) {
+                    if self.dropdown_row_disabled(index, which, row) {
+                        return None;
+                    }
                     return Some(Hover::Row {
                         node: index,
                         which,
@@ -600,6 +605,16 @@ impl Graph {
     /// The graph's wires as the compiler reads them.
     pub fn wiring(&self) -> Wiring<'_> {
         Wiring::new(&self.nodes, &self.connections)
+    }
+
+    /// True if row `row` of dropdown `which` on `node` can't be used right now, so the list shows
+    /// it dimmed and a press on it does nothing. FM mix needs each voice's pitch, so a mix that
+    /// runs on the bus, with an effect upstream, can't use it.
+    pub(super) fn dropdown_row_disabled(&self, node: usize, which: usize, row: usize) -> bool {
+        self.nodes[node].kind == NodeKind::Mix
+            && which == 0
+            && row == mix::FM_ROW
+            && self.wiring().runs_on_bus(node)
     }
 
     /// True if a control wire drives this knob. A driven knob can't be dragged.
@@ -737,12 +752,7 @@ impl Graph {
         let bounds = dragged.bounds();
         self.connections.iter().position(|c| {
             let fits = if audio_node {
-                // The two wires the splice would make have to be allowed: an effect's output
-                // only goes to another effect or an output slot.
-                c.out == Port::Audio
-                    && c.input.is_audio()
-                    && NodeKind::may_feed(self.nodes[c.from].kind, dragged.kind)
-                    && NodeKind::may_feed(dragged.kind, self.nodes[c.to].kind)
+                c.out == Port::Audio && c.input.is_audio()
             } else {
                 c.out.is_control_out() && matches!(c.input, Port::Knob(_))
             };

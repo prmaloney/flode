@@ -496,6 +496,133 @@ fn an_effect_at_the_end_of_a_chain_plays_the_voices() {
     assert!(peak(&out) > 0.05, "{}", peak(&out));
 }
 
+/// A chorus with none of its effect mixed in. It passes its input through, so a test can use it
+/// as a bus stage that changes nothing.
+fn clear_effect(source: u8) -> StageSpec {
+    use crate::patch::stage::ChorusParams;
+    StageSpec::new(StageParams::Chorus(ChorusParams {
+        rate: Param::default_of(KnobId::LfoRate),
+        depth: Param::default_of(KnobId::Depth),
+        spread: Param::default_of(KnobId::Spread),
+        mix: Param::fixed(KnobId::Mix, 0.0),
+    }))
+    .with_input(0, source)
+}
+
+/// A mix on the bus, with signal `a` on its first input and `b` on its second.
+fn bus_mix(mode: MixMode, amount: f32, a: u8, b: u8) -> StageSpec {
+    StageSpec::new(StageParams::Mix(MixParams {
+        mode,
+        amount: Param::fixed(KnobId::Mix, amount),
+    }))
+    .with_input(0, a)
+    .with_input(1, b)
+    .on_bus()
+}
+
+/// The oscillator that feeds the bus stages in these tests, tapped so the voices are summed.
+fn tapped_source() -> StageSpec {
+    let mut source = osc(OscillatorParams::default());
+    source.tap = true;
+    source
+}
+
+/// The left channel of one note played through `stages`, for a second.
+fn play_through(stages: &[StageSpec]) -> Vec<f32> {
+    let mut engine = engine_on(&patch_with(0, stages));
+    engine.note_on(60, 1.0);
+    render(&mut engine, 44100)
+}
+
+/// Two effect chains from one oscillator, added in a bus mix, sound as the two summed. Two copies
+/// of the same signal are twice as loud as one.
+#[test]
+fn a_bus_mix_adds_two_effect_chains() {
+    let one = peak(&play_through(&[tapped_source(), clear_effect(0)]));
+    let two = peak(&play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        clear_effect(0),
+        bus_mix(MixMode::Add, 1.0, 1, 2),
+    ]));
+    assert!(one > 0.05, "{one}");
+    assert!((two / one - 2.0).abs() < 0.02, "{two} against {one}");
+}
+
+/// A crossfade with none of signal B is signal A, so the second chain does not change the sound.
+#[test]
+fn a_bus_crossfade_at_zero_is_the_first_chain() {
+    let one = play_through(&[tapped_source(), clear_effect(0)]);
+    let mixed = play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        clear_effect(0),
+        bus_mix(MixMode::Crossfade, 0.0, 1, 2),
+    ]);
+    assert_eq!(one, mixed);
+}
+
+/// A dry path and an effect path can meet. The mix reads the summed oscillator on one input.
+#[test]
+fn a_dry_path_and_a_bus_path_meet_in_a_bus_mix() {
+    let one = peak(&play_through(&[tapped_source(), clear_effect(0)]));
+    let both = peak(&play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        bus_mix(MixMode::Add, 1.0, 0, 1),
+    ]));
+    assert!((both / one - 2.0).abs() < 0.02, "{both} against {one}");
+}
+
+/// A mix with an FM mode on the bus has no note pitch to scale by, so it passes signal A through.
+#[test]
+fn an_fm_mix_on_the_bus_passes_signal_a_through() {
+    let plain = play_through(&[tapped_source(), clear_effect(0)]);
+    let fm = play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        bus_mix(MixMode::Fm, 1.0, 1, 1),
+    ]);
+    assert_eq!(plain, fm);
+}
+
+/// A filter after an effect filters the summed signal. A low pass well below the note leaves
+/// little of it.
+#[test]
+fn a_filter_on_the_bus_filters_the_sum() {
+    let filter = |source: u8| {
+        StageSpec::new(StageParams::Filter(FilterParams {
+            cutoff: Param::fixed(KnobId::Cutoff, 100.0),
+            resonance: Param::fixed(KnobId::Resonance, 0.0),
+            ..FilterParams::default()
+        }))
+        .with_input(0, source)
+        .on_bus()
+    };
+    let open = peak(&play_through(&[tapped_source(), clear_effect(0)]));
+    let closed = peak(&play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        filter(1),
+    ]));
+    assert!(open > 0.05, "{open}");
+    assert!(closed < open * 0.4, "{closed} against {open}");
+}
+
+/// The voices of the bus mix's source are summed once for the bus, not once per bus stage that
+/// reads them, so the dry path is the same level however many stages read it.
+#[test]
+fn the_taps_sum_the_voices_once() {
+    let one = peak(&play_through(&[tapped_source(), clear_effect(0)]));
+    let two = peak(&play_through(&[
+        tapped_source(),
+        clear_effect(0),
+        clear_effect(0),
+        bus_mix(MixMode::Crossfade, 0.0, 1, 2),
+    ]));
+    assert!((one - two).abs() < 1e-6, "{one} {two}");
+}
+
 /// The output peak is the loudest sample on each side since it was last read, and reading it
 /// starts a new window.
 #[test]

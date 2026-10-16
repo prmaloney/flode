@@ -1,6 +1,7 @@
 //! The audio stages of a patch, as plain data. A stage is one audio node: it has some audio
 //! inputs and one output. A slot's stages sit in an arena in signal order, and each stage names
-//! the stages that feed it by position. The engine runs the arena once per voice.
+//! the stages that feed it by position. The engine runs the per-voice stages of the arena once
+//! per voice. The stages on the bus run once, on the sum of the voices.
 
 use super::control::Param;
 use crate::dsp::effects::distortion::DistortionKind;
@@ -199,8 +200,8 @@ impl StageParams {
         }
     }
 
-    /// True for the effects. They run once on a slot's summed voices, where every other stage
-    /// runs once per voice.
+    /// True for the effects. They always run once on a slot's summed voices, on the bus. A filter
+    /// or a mix runs per voice, unless something on the bus feeds it. Then it runs on the bus too.
     pub fn is_effect(&self) -> bool {
         !matches!(
             self,
@@ -216,24 +217,38 @@ pub struct StageSpec {
     /// The arena position of the stage on each audio input, or `None` for an input with no wire.
     /// Every position is lower than this stage's own, since the arena is in signal order.
     pub inputs: [Option<u8>; MAX_INPUTS],
-    /// True for a per-voice stage that an effect reads. The engine adds its output across the
-    /// voices to feed the effect.
+    /// True for a stage that runs once on the summed voices, on the bus, in place of once per
+    /// voice. Every effect is on the bus. So is any stage that reads one, directly or through
+    /// other stages, since by then the voices are already added together. An oscillator is never
+    /// on the bus.
+    pub bus: bool,
+    /// True for a per-voice stage that a bus stage reads. The engine adds its output across the
+    /// voices to feed the bus stage.
     pub tap: bool,
-    /// Which instance of its kind an effect uses. The engine keeps a few of each kind, and an
-    /// effect past the last one passes its input through. Unused by the other stages.
+    /// Which instance of its kind a bus stage uses. The engine keeps a few of each effect kind
+    /// and of the filter, and a stage past the last one passes its input through. Unused by the
+    /// per-voice stages and by a bus mix, which has no memory.
     pub pool: u8,
 }
 
 #[cfg(test)]
 impl StageSpec {
-    /// A stage with nothing wired to its inputs.
+    /// A stage with nothing wired to its inputs. An effect starts on the bus, and the other kinds
+    /// run per voice until `on_bus` moves them.
     pub fn new(params: StageParams) -> Self {
         Self {
             params,
             inputs: [None; MAX_INPUTS],
+            bus: params.is_effect(),
             tap: false,
             pool: 0,
         }
+    }
+
+    /// The same stage run on the bus.
+    pub fn on_bus(mut self) -> Self {
+        self.bus = true;
+        self
     }
 
     /// The same stage with `source` wired to audio input `input`.

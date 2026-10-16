@@ -38,6 +38,52 @@ impl<'a> Wiring<'a> {
         self.links.iter().find(|c| c.to == node && c.input == port)
     }
 
+    /// True if `node` makes a stage that runs on the bus: it is an effect, or an effect feeds it,
+    /// directly or through other audio nodes. This follows the same rules as the compiler. A node
+    /// that is switched off makes no stage, so a muted source has no effect to pass on, and a
+    /// bypassed processor is whatever feeds its first audio input.
+    pub fn runs_on_bus(&self, node: usize) -> bool {
+        self.bus_from(node, &mut Vec::new())
+    }
+
+    fn bus_from(&self, node: usize, path: &mut Vec<usize>) -> bool {
+        if path.contains(&node) {
+            return false;
+        }
+        let this = &self.nodes[node];
+        let follow_first_only = match (this.bypassed, this.bypass()) {
+            (true, Bypass::Mute) => return false,
+            (true, Bypass::PassThrough) => true,
+            _ => {
+                if self.stage_params(node).is_some_and(|p| p.is_effect()) {
+                    return true;
+                }
+                false
+            }
+        };
+        path.push(node);
+        let mut ports = this
+            .input_ports()
+            .into_iter()
+            .filter(|port| port.is_audio());
+        let found = if follow_first_only {
+            ports
+                .next()
+                .into_iter()
+                .any(|port| self.feeds_bus(node, port, path))
+        } else {
+            ports.any(|port| self.feeds_bus(node, port, path))
+        };
+        path.pop();
+        found
+    }
+
+    /// True if the node wired into `port` of `node` runs on the bus.
+    fn feeds_bus(&self, node: usize, port: Port, path: &mut Vec<usize>) -> bool {
+        self.input_link(node, port)
+            .is_some_and(|link| self.bus_from(link.from, path))
+    }
+
     /// A knob as the audio thread reads it: the node's own value and the route that drives it.
     pub fn knob_value(&self, node: usize, id: KnobId) -> KnobValue {
         KnobValue {
@@ -404,11 +450,12 @@ impl<'a> Wiring<'a> {
     }
 }
 
-/// The kinds of effect, for counting how many of each a patch uses.
-pub const EFFECT_KINDS: usize = 7;
+/// The kinds of bus stage that keep memory, for counting how many of each a patch uses: the seven
+/// effects, and the filter, which only runs on the bus when something on the bus feeds it.
+pub const EFFECT_KINDS: usize = 8;
 
-/// Which counter an effect uses, or None for a stage that is not an effect.
-fn effect_kind(params: &StageParams) -> Option<usize> {
+/// Which counter a bus stage uses, or None for a stage with no memory, such as a mix.
+fn pool_kind(params: &StageParams) -> Option<usize> {
     match params {
         StageParams::Distortion(_) => Some(0),
         StageParams::Compressor(_) => Some(1),
@@ -417,7 +464,8 @@ fn effect_kind(params: &StageParams) -> Option<usize> {
         StageParams::Chorus(_) => Some(4),
         StageParams::Phaser(_) => Some(5),
         StageParams::Flanger(_) => Some(6),
-        _ => None,
+        StageParams::Filter(_) => Some(7),
+        StageParams::Oscillator(_) | StageParams::Mix(_) => None,
     }
 }
 
@@ -497,24 +545,26 @@ impl<'p> LaneBuilder<'p> {
         }
         self.path.pop();
 
-        // Effects run on the summed voices, so a per-voice stage can't read one. A wire like that
-        // can't be made in the editor, and an old or hand edited save that has one reads silence.
-        if !params.is_effect() {
-            for source in inputs.iter_mut() {
-                if source.is_some_and(|at| self.stages[at as usize].params.is_effect()) {
-                    *source = None;
-                }
-            }
-        }
+        // A stage runs on the bus if it is an effect, or if anything on the bus feeds it. The
+        // voices are added together by then, so it can only run once, on the sum.
+        let bus = params.is_effect()
+            || inputs
+                .iter()
+                .flatten()
+                .any(|&at| self.stages[at as usize].bus);
 
         let mut pool = 0;
-        if let Some(kind) = effect_kind(&params) {
-            pool = self.pools[kind];
-            self.pools[kind] = pool.saturating_add(1);
-            // A per-voice stage that feeds an effect is added across the voices to feed it.
+        if bus {
+            if let Some(kind) = pool_kind(&params) {
+                pool = self.pools[kind];
+                self.pools[kind] = pool.saturating_add(1);
+            }
+            // A per-voice stage that feeds the bus is added across the voices to feed it.
             for source in inputs.iter().flatten() {
                 let stage = &mut self.stages[*source as usize];
-                stage.tap = !stage.params.is_effect();
+                if !stage.bus {
+                    stage.tap = true;
+                }
             }
         }
 
@@ -522,6 +572,7 @@ impl<'p> LaneBuilder<'p> {
         let spec = StageSpec {
             params,
             inputs,
+            bus,
             tap: false,
             pool,
         };
@@ -943,15 +994,21 @@ mod effect_tests {
     /// Every effect node makes an effect stage with one input, and no other node does.
     #[test]
     fn effect_nodes_make_effect_stages() {
+        let effects = [
+            NodeKind::Distortion,
+            NodeKind::Compressor,
+            NodeKind::Reverb,
+            NodeKind::Delay,
+            NodeKind::Chorus,
+            NodeKind::Phaser,
+            NodeKind::Flanger,
+        ];
         for kind in NodeKind::ALL {
             let nodes = vec![node(kind)];
             let params = Wiring::new(&nodes, &[]).stage_params(0);
-            assert_eq!(
-                params.is_some_and(|p| p.is_effect()),
-                kind.is_effect(),
-                "{kind:?}"
-            );
-            if kind.is_effect() {
+            let is_effect = effects.contains(&kind);
+            assert_eq!(params.is_some_and(|p| p.is_effect()), is_effect, "{kind:?}");
+            if is_effect {
                 assert_eq!(params.unwrap().input_count(), 1, "{kind:?}");
                 let ports = nodes[0].input_ports();
                 assert_eq!(ports.iter().filter(|p| p.is_audio()).count(), 1, "{kind:?}");
@@ -1032,7 +1089,7 @@ mod effect_tests {
 
     /// A per-voice stage can't read an effect. A save that wires one that way reads silence there.
     #[test]
-    fn a_voice_stage_reading_an_effect_gets_silence() {
+    fn a_filter_after_an_effect_runs_on_the_bus() {
         let mut nodes = vec![
             node(NodeKind::Oscillator),
             node(NodeKind::Reverb),
@@ -1047,6 +1104,127 @@ mod effect_tests {
         let lane = &lanes(&mut nodes, &links, 3)[0];
         let filter = lane.stages.last().unwrap();
         assert!(matches!(filter.params, StageParams::Filter(_)));
-        assert_eq!(filter.inputs[0], None);
+        assert_eq!(filter.inputs[0], Some(1));
+        assert!(filter.bus);
+        assert!(!filter.tap);
+        // The oscillator stays per voice, and the voices are summed for the reverb.
+        assert!(!lane.stages[0].bus && lane.stages[0].tap);
+        assert!(lane.stages[1].bus);
+    }
+
+    /// Two effect chains from one oscillator meet in a mix. The oscillator is placed and tapped
+    /// once, each chain is on the bus, and the mix reads the end of each.
+    #[test]
+    fn two_effect_chains_meet_in_a_mix() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Delay),
+            node(NodeKind::Mix),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(0, 2, Port::Audio),
+            audio(1, 3, Port::AudioIn(0)),
+            audio(2, 3, Port::AudioIn(1)),
+            audio(3, 4, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 4)[0];
+        assert_eq!(lane.stages.len(), 4);
+        let kinds: Vec<bool> = lane.stages.iter().map(|s| s.bus).collect();
+        assert_eq!(kinds, [false, true, true, true]);
+        assert!(lane.stages[0].tap);
+        let mix = &lane.stages[3];
+        assert!(matches!(mix.params, StageParams::Mix(_)));
+        assert_eq!(mix.inputs, [Some(1), Some(2)]);
+        assert!(!mix.tap);
+    }
+
+    /// A dry path and an effect path meet in a mix. The dry stage is per voice, and the mix taps
+    /// it to sum the voices.
+    #[test]
+    fn a_dry_path_and_an_effect_path_meet_in_a_mix() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Mix),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(0, 2, Port::AudioIn(0)),
+            audio(1, 2, Port::AudioIn(1)),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 3);
+        assert!(lane.stages[0].tap, "the oscillator feeds the bus twice");
+        assert!(lane.stages[2].bus);
+        assert_eq!(lane.stages[2].inputs, [Some(0), Some(1)]);
+    }
+
+    /// A mix of two per-voice stages stays per voice, as it did before.
+    #[test]
+    fn a_mix_of_voice_stages_stays_per_voice() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Mix),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 2, Port::AudioIn(0)),
+            audio(1, 2, Port::AudioIn(1)),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert!(lane.stages.iter().all(|s| !s.bus && !s.tap));
+    }
+
+    /// Filters on the bus take instances of their own, counted across slots, and a mix takes
+    /// none.
+    #[test]
+    fn bus_filters_take_their_own_instances() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Filter),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Filter),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 6, Port::Slot(0)),
+            audio(3, 4, Port::Audio),
+            audio(4, 5, Port::Audio),
+            audio(5, 6, Port::Slot(1)),
+        ];
+        let lanes = lanes(&mut nodes, &links, 6);
+        assert_eq!(lanes[0].stages[2].pool, 0);
+        assert_eq!(lanes[1].stages[2].pool, 1);
+    }
+
+    /// A per-voice filter, with no effect before it, runs per voice and takes no pool.
+    #[test]
+    fn a_filter_before_the_effects_stays_per_voice() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Filter),
+            node(NodeKind::Reverb),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert!(!lane.stages[1].bus);
+        assert!(lane.stages[1].tap);
+        assert_eq!(lane.stages[1].pool, 0);
     }
 }

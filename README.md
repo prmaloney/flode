@@ -39,7 +39,7 @@ Flode is not affiliated with Blender or the Blender Foundation.
   can drag.
 - **Filter.** Low pass, high pass and band pass, run once per voice, so a filter envelope follows
   each note on its own.
-- **Mix.** Crossfade, AM, ring modulation, or FM between two signals.
+- **Mix.** Crossfade, AM, ring modulation, FM, or Add between two signals.
 - **Effects.** Distortion (soft, hard, tube, fold, crush), compressor with a multiband mode,
   reverb, delay with tempo sync and ping pong, chorus, phaser, and flanger.
 - **MIDI Input.** Sends notes to oscillators, and holds mono, glide, and the pitch wheel, mod wheel,
@@ -109,9 +109,13 @@ changes.
 2. An oscillator plays only the notes wired into its MIDI pin, so it is silent until a MIDI Input
    is connected.
 3. Wire audio into an output slot to hear it.
-4. The output of an effect can go to another effect or to an output slot, and nowhere else. Effects
-   run on the summed voices, so a filter or an oscillator cannot take an effect as its input. You
-   can have four of each kind of effect.
+4. Audio can go to any audio input. Effects run once, on the summed voices, and anything an effect
+   feeds runs on the summed voices too. That lets two effect chains run in parallel from one
+   oscillator and meet in a Mix. Add sums them, and Crossfade blends them. A filter or a mix after
+   an effect is one shared instance, so a knob that an envelope drives follows the newest note. FM
+   needs each note's pitch, so an FM mix after an effect passes its first input through, and its
+   row in the dropdown is dimmed. You can have four of each kind of effect, and four filters after
+   an effect.
 5. A graph has one Output node and one Macro node. They cannot be added a second time or duplicated.
 
 Mono, glide and "glide on every note" are on the MIDI Input node. In mono mode a new note cuts the
@@ -176,8 +180,9 @@ docs/             design notes
 ```
 
 A graph compiles to a small arena of stages for each output slot, in signal order. Each voice runs
-the arena, and the effects run on the summed voices after it. `docs/effects-plan.md` has the
-details for the effects.
+the per-voice stages of the arena. The stages on the bus, which are the effects and anything an
+effect feeds, run once on the summed voices after it. `docs/effects-plan.md` has the details for
+the effects.
 
 `vendor/` holds two crates the build patches: `baseview`, for a nil-window check on newer macOS,
 and `iced_baseview`, for a method that needs a newer baseview API. They keep their own licenses.
@@ -187,9 +192,10 @@ and `iced_baseview`, for a method that needs a newer baseview API. They keep the
 Flode is young. The DSP is covered by tests for level, stability, filter and delay behavior, and
 allocation on the audio thread, but how it sounds is still being tuned by ear. Known limits:
 
-- Nothing can be wired after an effect except another effect or an output slot.
-- There are four instances of each effect kind. A fifth passes its input through.
-- The distortion adds about 15 samples of latency when its mix is above zero.
+- There are four instances of each effect kind, and four filters that run after an effect. A fifth
+  passes its input through.
+- The distortion adds about 15 samples of latency when its mix is above zero. Parallel chains are
+  not delay compensated, so a distorted chain merged with a clean one can comb filter a little.
 - The FM mix delays the signal by a few cycles of the note, so that knob moves do not bend the
   pitch.
 - The preset list has no scrolling, delete, or rename. Delete the files to remove a preset.

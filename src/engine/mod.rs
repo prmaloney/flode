@@ -379,10 +379,13 @@ impl Engine {
             // would have without it. The slot's gain comes after, like a fader.
             lane_out = lane_out * VOICE_MIX;
             lane.taps.iter_mut().for_each(|tap| *tap = *tap * VOICE_MIX);
-            if let Some(effected) =
-                self.effects
-                    .run(graph, &lane.taps, &levels, self.transport.tempo)
-            {
+            if let Some(effected) = self.effects.run(
+                graph,
+                &lane.taps,
+                &levels,
+                self.transport.tempo,
+                self.smooth,
+            ) {
                 lane_out = effected;
             }
             let gain = lane.ease_gain(db_to_linear(graph.gain.plain(&levels)), self.smooth);

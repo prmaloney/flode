@@ -4,6 +4,7 @@
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::frame::Frame;
 use crate::dsp::svf::{Coefficients, Svf};
+use crate::patch::control::ControlLevels;
 use crate::patch::stage::{FilterParams, MAX_INPUTS};
 
 pub struct Filter;
@@ -16,6 +17,41 @@ pub struct FilterState {
     /// The cutoff as log2 of Hz, so the easing is even across octaves.
     cutoff_log2: f32,
     resonance: f32,
+}
+
+impl FilterState {
+    /// A filter at the knob values, not easing in from zero.
+    pub fn new(p: &FilterParams, levels: &ControlLevels) -> Self {
+        Self {
+            svf: [Svf::new(); 2],
+            cutoff_log2: p.cutoff.plain(levels).log2(),
+            resonance: p.resonance.plain(levels),
+        }
+    }
+
+    /// One frame through the filter. The cutoff and resonance ease a fraction `smooth` of the way
+    /// to the knob values each frame. The bus uses this directly, and a voice's filter stage goes
+    /// through it too.
+    pub fn tick(
+        &mut self,
+        p: &FilterParams,
+        input: Frame,
+        levels: &ControlLevels,
+        smooth: f32,
+        sample_rate: f32,
+    ) -> Frame {
+        let cutoff_target = p.cutoff.plain(levels);
+        let resonance_target = p.resonance.plain(levels);
+        self.cutoff_log2 += (cutoff_target.log2() - self.cutoff_log2) * smooth;
+        self.resonance += (resonance_target - self.resonance) * smooth;
+        // Both sides run the same response, so they share one set of coefficients.
+        let coefficients = Coefficients::new(self.cutoff_log2.exp2(), self.resonance, sample_rate);
+        let [left, right] = &mut self.svf;
+        Frame::new(
+            left.tick(input.l, &coefficients, p.kind),
+            right.tick(input.r, &coefficients, p.kind),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -32,11 +68,7 @@ impl AudioStage for Filter {
 
     /// Starts at the knob values, not easing in from zero.
     fn start(p: &FilterParams, ctx: &mut StartContext) -> FilterState {
-        FilterState {
-            svf: [Svf::new(); 2],
-            cutoff_log2: p.cutoff.plain(ctx.levels).log2(),
-            resonance: p.resonance.plain(ctx.levels),
-        }
+        FilterState::new(p, ctx.levels)
     }
 
     fn process(
@@ -45,18 +77,7 @@ impl AudioStage for Filter {
         inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
     ) -> Frame {
-        let cutoff_target = p.cutoff.plain(tick.levels);
-        let resonance_target = p.resonance.plain(tick.levels);
-        state.cutoff_log2 += (cutoff_target.log2() - state.cutoff_log2) * tick.smooth;
-        state.resonance += (resonance_target - state.resonance) * tick.smooth;
-        // Both sides run the same response, so they share one set of coefficients.
-        let coefficients =
-            Coefficients::new(state.cutoff_log2.exp2(), state.resonance, tick.sample_rate);
-        let [left, right] = &mut state.svf;
-        Frame::new(
-            left.tick(inputs[0].l, &coefficients, p.kind),
-            right.tick(inputs[0].r, &coefficients, p.kind),
-        )
+        state.tick(p, inputs[0], tick.levels, tick.smooth, tick.sample_rate)
     }
 }
 

@@ -153,7 +153,11 @@ impl StageState {
 pub fn start_arena(graph: &LaneGraph, ctx: &mut StartContext) -> [StageState; MAX_STAGES] {
     let mut states = StageState::ARENA;
     for (state, spec) in states.iter_mut().zip(&graph.stages) {
-        *state = StageState::start(&spec.params, ctx);
+        // A bus stage runs once on the summed voices, so a voice keeps nothing for it. Skipping
+        // it also keeps a bus mix from taking delay lines the voice's own stages could use.
+        if !spec.bus {
+            *state = StageState::start(&spec.params, ctx);
+        }
     }
     states
 }
@@ -161,9 +165,10 @@ pub fn start_arena(graph: &LaneGraph, ctx: &mut StartContext) -> [StageState; MA
 /// Runs a slot's per-voice stages for one voice and one sample, and returns what the last stage
 /// makes. The arena is in signal order, so each stage finds its inputs already computed.
 ///
-/// Effects are skipped, since they run once on the summed voices. A stage that an effect reads
-/// adds its output to `taps`, which holds the sum over the voices so far. When the last stage is
-/// an effect, the voice itself makes silence, and its sound reaches the output through the taps.
+/// Stages on the bus are skipped, since they run once on the summed voices. A stage that a bus
+/// stage reads adds its output to `taps`, which holds the sum over the voices so far. When the
+/// last stage is on the bus, the voice itself makes silence, and its sound reaches the output
+/// through the taps.
 pub fn evaluate(
     graph: &LaneGraph,
     states: &mut [StageState; MAX_STAGES],
@@ -172,7 +177,7 @@ pub fn evaluate(
 ) -> Frame {
     let mut outputs = [Frame::SILENT; MAX_STAGES];
     for (index, spec) in graph.stages.iter().enumerate() {
-        if spec.params.is_effect() {
+        if spec.bus {
             continue;
         }
         let inputs = spec

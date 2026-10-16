@@ -6,14 +6,21 @@ built from. It says how the pieces fit and what each effect has to do.
 
 ## How effects run
 
-- An effect is a node with one audio input and one audio output. Its output can feed another
-  effect or an output slot. It cannot feed an oscillator, filter, or mix node.
-- Effects run once per sample on a slot's summed voices, after the per-voice stages. The voices
-  are scaled by `VOICE_MIX` (0.25) first, so an effect sees the level the slot would have without
-  it. The slot gain applies after the effects.
-- The engine keeps four instances of each effect kind, built in `Effects::new(sample_rate)`. A
-  patch hands each effect stage an instance by its `pool` number. The glue that reads the knobs and
-  calls the DSP is in `src/engine/effects.rs`.
+- An effect is a node with one audio input and one audio output. Its output can feed any node that
+  takes audio: another effect, a filter, a mix, or an output slot. Only the oscillator takes no
+  audio.
+- Effects run once per sample on a slot's summed voices, after the per-voice stages. This is the
+  bus. A stage runs on the bus if it is an effect or if anything on the bus feeds it, which the
+  compiler works out in `place` in `src/patch/wiring.rs` and records in `StageSpec::bus`. A
+  per-voice stage that a bus stage reads is tapped, so its voices are summed to feed the bus.
+- A filter on the bus is one shared filter. A mix on the bus combines two summed signals, so it
+  can sum two parallel effect chains. FM needs each note's pitch, so an FM mix on the bus passes
+  its first input through.
+- The voices are scaled by `VOICE_MIX` (0.25) first, so an effect sees the level the slot would
+  have without it. The slot gain applies after the effects.
+- The engine keeps four instances of each effect kind, and four of the bus filter, built in
+  `Effects::new(sample_rate)`. A patch hands each bus stage an instance by its `pool` number. The
+  glue that reads the knobs and calls the DSP is in `src/engine/effects.rs`.
 - Tails keep ringing after the last voice ends, because the effects run on silence while the slot
   has stages.
 

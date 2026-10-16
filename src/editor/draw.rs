@@ -190,12 +190,16 @@ pub(super) fn draw_editor(
                     }) if node == index && hovered == which => Some(row),
                     _ => None,
                 };
+                let disabled: Vec<bool> = (0..dropdown.labels.len())
+                    .map(|row| graph.dropdown_row_disabled(index, which, row))
+                    .collect();
                 draw_list(
                     frame,
                     list,
                     &dropdown.labels,
                     dropdown.selected,
                     hovered_row,
+                    &disabled,
                     view.zoom,
                 );
             }
@@ -516,12 +520,16 @@ pub(super) fn draw_node(
                 node: index,
                 which: dropdown.which,
             });
+        // A chosen value that can't work right now, such as FM on a mix that runs on the bus,
+        // shows dimmed.
+        let dim = graph.dropdown_row_disabled(index, dropdown.which, dropdown.selected);
         draw_dropdown(
             frame,
             dropdown.bounds,
             dropdown.name,
             dropdown.labels[dropdown.selected],
             hovered,
+            dim,
             zoom,
             covered,
         );
@@ -949,13 +957,15 @@ pub(super) fn draw_switch(
     );
 }
 
-/// The closed dropdown: the current label and a chevron.
+/// The closed dropdown: the current label and a chevron. `dim` draws the label dimmed, for a value
+/// that can't take effect.
 pub(super) fn draw_dropdown(
     frame: &mut Frame,
     bounds: Rectangle,
     name: &str,
     label: &str,
     hovered: bool,
+    dim: bool,
     zoom: f32,
     covered: &[Rectangle],
 ) {
@@ -990,7 +1000,7 @@ pub(super) fn draw_dropdown(
                 bounds.x + bounds.width - 22.0,
                 bounds.y + bounds.height / 2.0,
             ),
-            color: TEXT_COLOR,
+            color: if dim { DIM_TEXT_COLOR } else { TEXT_COLOR },
             size: 13.0,
             horizontal_alignment: alignment::Horizontal::Right,
             vertical_alignment: alignment::Vertical::Center,
@@ -1014,13 +1024,14 @@ pub(super) fn draw_dropdown(
     );
 }
 
-/// The open dropdown list. The selected row is highlighted.
+/// The open dropdown list. The selected row is highlighted. A row `disabled` marks is dimmed.
 pub(super) fn draw_list(
     frame: &mut Frame,
     list: Rectangle,
     labels: &[&str],
     selected: usize,
     hovered_row: Option<usize>,
+    disabled: &[bool],
     zoom: f32,
 ) {
     draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
@@ -1059,7 +1070,11 @@ pub(super) fn draw_list(
         frame.fill_text(Text {
             content: label.to_string(),
             position: Point::new(list.x + 12.0, row_y + WAVEFORM_ITEM_HEIGHT / 2.0),
-            color: TEXT_COLOR,
+            color: if disabled.get(row).copied().unwrap_or(false) {
+                DIM_TEXT_COLOR
+            } else {
+                TEXT_COLOR
+            },
             size: 13.0 * zoom,
             vertical_alignment: alignment::Vertical::Center,
             ..Text::default()

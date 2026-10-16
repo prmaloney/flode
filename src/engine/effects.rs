@@ -1,10 +1,11 @@
-//! The effects of every slot. Each one runs once per sample on its slot's summed voices, after the
-//! per-voice stages. The engine keeps a few instances of each kind, built when the sample rate is
-//! set, since an effect's memory can't be allocated on the audio thread. A patch hands each effect
-//! stage an instance by its `pool` number.
+//! The bus of every slot: the stages that run once per sample on the slot's summed voices, after
+//! the per-voice stages. These are the effects, and any filter or mix that something on the bus
+//! feeds. The engine keeps a few instances of each effect kind and of the filter, built when the
+//! sample rate is set, since their memory can't be allocated on the audio thread. A patch hands
+//! each such stage an instance by its `pool` number.
 //!
 //! This module reads the knobs and passes plain numbers to the effects in `dsp::effects`. It does
-//! no signal processing of its own.
+//! no signal processing of its own, apart from combining the two signals of a mix.
 
 use crate::dsp::effects::chorus::{Chorus, ChorusParams};
 use crate::dsp::effects::compressor::{Compressor, CompressorParams};
@@ -14,9 +15,11 @@ use crate::dsp::effects::flanger::{Flanger, FlangerParams};
 use crate::dsp::effects::phaser::{Phaser, PhaserParams};
 use crate::dsp::effects::reverb::{Reverb, ReverbParams};
 use crate::dsp::frame::Frame;
+use crate::dsp::mix::MixMode;
+use crate::engine::stage::FilterState;
 use crate::nodes::lfo::cycles_per_beat;
 use crate::patch::control::ControlLevels;
-use crate::patch::stage::{LaneGraph, StageParams, MAX_STAGES};
+use crate::patch::stage::{LaneGraph, StageParams, MAX_INPUTS, MAX_STAGES};
 
 /// How many instances of each effect kind the engine keeps. An effect stage past this many, in
 /// graph order across all slots, passes its input through.
@@ -26,6 +29,7 @@ pub const POOL: usize = 4;
 const MAX_DELAY_MS: f32 = 2000.0;
 
 pub struct Effects {
+    sample_rate: f32,
     distortion: Vec<Distortion>,
     compressor: Vec<Compressor>,
     reverb: Vec<Reverb>,
@@ -33,6 +37,9 @@ pub struct Effects {
     chorus: Vec<Chorus>,
     phaser: Vec<Phaser>,
     flanger: Vec<Flanger>,
+    /// The filters that run on the bus. One starts at its knob values the first time it plays,
+    /// so it holds `None` until then.
+    filter: Vec<Option<FilterState>>,
 }
 
 impl Effects {
@@ -40,6 +47,8 @@ impl Effects {
     /// is set and never on the audio thread.
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            sample_rate,
+            filter: vec![None; POOL],
             distortion: (0..POOL).map(|_| Distortion::new(sample_rate)).collect(),
             compressor: (0..POOL).map(|_| Compressor::new(sample_rate)).collect(),
             reverb: (0..POOL).map(|_| Reverb::new(sample_rate)).collect(),
@@ -59,45 +68,57 @@ impl Effects {
         self.chorus.iter_mut().for_each(Chorus::reset);
         self.phaser.iter_mut().for_each(Phaser::reset);
         self.flanger.iter_mut().for_each(Flanger::reset);
+        self.filter.iter_mut().for_each(|filter| *filter = None);
     }
 
-    /// Runs the effects of one slot for one sample and returns what the last one makes, or None
-    /// when the slot has no effects. `taps` holds the summed voices at each stage that an effect
-    /// reads, and `tempo` is the host's, for a synced delay.
+    /// Runs the bus stages of one slot for one sample and returns what the last stage makes, or
+    /// None when that stage runs per voice. `taps` holds the summed voices at each per-voice stage
+    /// that a bus stage reads, `smooth` is how far a filter eases toward its knobs per sample, and
+    /// `tempo` is the host's, for a synced delay.
     pub fn run(
         &mut self,
         graph: &LaneGraph,
         taps: &[Frame; MAX_STAGES],
         levels: &ControlLevels,
         tempo: Option<f64>,
+        smooth: f32,
     ) -> Option<Frame> {
-        // An effect can only feed another effect or the slot, so if there are any, the last stage
-        // is one.
+        // A stage that reads the bus is on the bus too, so if any stage is, the last one is.
         let root = graph.stages.len().checked_sub(1)?;
-        if !graph.stages[root].params.is_effect() {
+        if !graph.stages[root].bus {
             return None;
         }
         let mut outputs = *taps;
         for (index, spec) in graph.stages.iter().enumerate() {
-            if !spec.params.is_effect() {
+            if !spec.bus {
                 continue;
             }
-            let input = spec.inputs[0].map_or(Frame::SILENT, |i| outputs[i as usize]);
-            outputs[index] =
-                self.process(&spec.params, usize::from(spec.pool), input, levels, tempo);
+            let inputs = spec
+                .inputs
+                .map(|source| source.map_or(Frame::SILENT, |i| outputs[i as usize]));
+            outputs[index] = self.process(
+                &spec.params,
+                usize::from(spec.pool),
+                inputs,
+                levels,
+                tempo,
+                smooth,
+            );
         }
         Some(outputs[root])
     }
 
-    /// One sample through one effect. An instance past the pool passes the input through.
+    /// One sample through one bus stage. An instance past the pool passes the input through.
     fn process(
         &mut self,
         params: &StageParams,
         pool: usize,
-        input: Frame,
+        inputs: [Frame; MAX_INPUTS],
         levels: &ControlLevels,
         tempo: Option<f64>,
+        smooth: f32,
     ) -> Frame {
+        let input = inputs[0];
         match params {
             StageParams::Distortion(p) => match self.distortion.get_mut(pool) {
                 Some(fx) => fx.process(
@@ -198,8 +219,26 @@ impl Effects {
                 ),
                 None => input,
             },
-            // The per-voice stages never reach here.
-            StageParams::Oscillator(_) | StageParams::Filter(_) | StageParams::Mix(_) => input,
+            // A filter on the bus is one shared filter over the summed voices, so a knob that an
+            // envelope drives follows the newest note, not each note's own.
+            StageParams::Filter(p) => match self.filter.get_mut(pool) {
+                Some(state) => state
+                    .get_or_insert_with(|| FilterState::new(p, levels))
+                    .tick(p, input, levels, smooth, self.sample_rate),
+                None => input,
+            },
+            StageParams::Mix(p) => {
+                let amount = p.amount.plain(levels);
+                // FM reads signal A at a delay that follows B, scaled by the note's pitch, and the
+                // sum of voices has no one pitch. So on the bus an FM mix passes A through.
+                if p.mode == MixMode::Fm {
+                    inputs[0]
+                } else {
+                    inputs[0].zip(inputs[1], |a, b| p.mode.combine(a, b, amount))
+                }
+            }
+            // A source never runs on the bus.
+            StageParams::Oscillator(_) => input,
         }
     }
 }

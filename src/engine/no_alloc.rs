@@ -39,7 +39,8 @@ fn busy_patch() -> Patch {
             .with_input(1, 1),
         StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 3),
     ]);
-    // A second slot plays a warped, panned saw.
+    // A second slot plays a warped, panned saw into two parallel effect chains. One goes through a
+    // filter on the bus, and a mix on the bus adds the two. This covers the bus filter and mix.
     let warped = OscillatorParams {
         waveform: Waveform::Saw,
         warp: WarpMode::Pwm,
@@ -47,9 +48,39 @@ fn busy_patch() -> Patch {
         pan: Param::fixed(KnobId::Pan, -0.5),
         ..OscillatorParams::default()
     };
+    let mut warped_source = StageSpec::new(StageParams::Oscillator(warped));
+    warped_source.tap = true;
+    let mut chorus = StageSpec::new(StageParams::Chorus(ChorusParams {
+        rate: Param::default_of(KnobId::LfoRate),
+        depth: Param::default_of(KnobId::Depth),
+        spread: Param::default_of(KnobId::Spread),
+        mix: Param::default_of(KnobId::Mix),
+    }))
+    .with_input(0, 0);
+    chorus.pool = 1;
+    let mut delay = StageSpec::new(StageParams::Delay(DelayParams {
+        time: Param::default_of(KnobId::DelayTime),
+        sync: Param::default_of(KnobId::LfoSync),
+        feedback: Param::default_of(KnobId::Feedback),
+        damp: Param::default_of(KnobId::Damp),
+        mix: Param::default_of(KnobId::Mix),
+        ping_pong: false,
+    }))
+    .with_input(0, 0);
+    delay.pool = 1;
+    let bus_filter = StageSpec::new(StageParams::Filter(FilterParams::default()))
+        .with_input(0, 1)
+        .on_bus();
+    let add = StageSpec::new(StageParams::Mix(MixParams {
+        mode: MixMode::Add,
+        amount: Param::fixed(KnobId::Mix, 1.0),
+    }))
+    .with_input(0, 3)
+    .with_input(1, 2)
+    .on_bus();
     patch.lanes[1]
         .stages
-        .push(StageSpec::new(StageParams::Oscillator(warped)));
+        .extend([warped_source, chorus, delay, bus_filter, add]);
     // A third slot mixes two oscillators by FM, which runs a delay line per voice.
     let fm_mix = MixParams {
         mode: MixMode::Fm,

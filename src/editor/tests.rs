@@ -3000,3 +3000,201 @@ mod macro_tests {
         assert_eq!(loaded.connections, graph.connections);
     }
 }
+
+#[cfg(test)]
+mod parallel_effects_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::editor::style::WAVEFORM_ITEM_HEIGHT;
+    use crate::nodes::mix::FM_ROW;
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    /// The default window, which the canvas events are given.
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    /// An oscillator, the output, and a MIDI input, with nothing wired to the output yet. The
+    /// oscillator is node 0 and the output is node 1.
+    fn bare() -> Graph {
+        let mut graph = minimal_graph();
+        graph.connections.retain(|c| c.out != Port::Audio);
+        graph
+    }
+
+    /// Oscillator 0 into two effect chains, a reverb and a delay, that a mix adds, into the
+    /// output. Returns the graph and the mix's index.
+    fn parallel() -> (Graph, usize) {
+        let mut graph = bare();
+        let reverb = graph.add_node(NodeKind::Reverb, Point::new(300.0, 100.0));
+        let delay = graph.add_node(NodeKind::Delay, Point::new(300.0, 300.0));
+        let mix = graph.add_node(NodeKind::Mix, Point::new(600.0, 200.0));
+        graph.connect(0, Port::Audio, reverb, Port::Audio);
+        graph.connect(0, Port::Audio, delay, Port::Audio);
+        graph.connect(reverb, Port::Audio, mix, Port::AudioIn(0));
+        graph.connect(delay, Port::Audio, mix, Port::AudioIn(1));
+        graph.connect(mix, Port::Audio, 1, Port::Slot(0));
+        graph.refresh_slots();
+        (graph, mix)
+    }
+
+    /// An effect's output can go to a filter or a mix, which the old rule did not allow.
+    #[test]
+    fn an_effect_can_feed_a_filter_and_a_mix() {
+        let mut graph = bare();
+        let reverb = graph.add_node(NodeKind::Reverb, Point::new(300.0, 100.0));
+        let filter = graph.add_node(NodeKind::Filter, Point::new(500.0, 100.0));
+        let mix = graph.add_node(NodeKind::Mix, Point::new(500.0, 300.0));
+        graph.connect(reverb, Port::Audio, filter, Port::Audio);
+        graph.connect(reverb, Port::Audio, mix, Port::AudioIn(0));
+        let wires = |to| graph.connections.iter().filter(|c| c.to == to).count();
+        assert_eq!(wires(filter), 1);
+        assert_eq!(wires(mix), 1);
+    }
+
+    /// Two effect chains from one oscillator meet in a mix, and the slot plays that mix. The
+    /// oscillator is placed once, and the other three stages are on the bus.
+    #[test]
+    fn two_effect_chains_play_through_a_mix() {
+        let (graph, mix) = parallel();
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.to == mix && c.input == Port::AudioIn(1)));
+        let lane = graph.patch().lanes[0].clone();
+        let bus: Vec<bool> = lane.stages.iter().map(|s| s.bus).collect();
+        assert_eq!(bus, [false, true, true, true]);
+        assert!(lane.stages[0].tap);
+        assert!(matches!(lane.stages[3].params, StageParams::Mix(_)));
+    }
+
+    /// Dropping a filter onto a wire that leaves an effect now splices it in.
+    #[test]
+    fn a_filter_dropped_on_an_effect_wire_splices_in() {
+        let mut graph = bare();
+        let reverb = graph.add_node(NodeKind::Reverb, Point::new(300.0, 300.0));
+        graph.connect(0, Port::Audio, reverb, Port::Audio);
+        graph.connect(reverb, Port::Audio, 1, Port::Slot(0));
+        let filter = graph.add_node(NodeKind::Filter, Point::new(0.0, 0.0));
+        let wire = graph
+            .connections
+            .iter()
+            .position(|c| c.from == reverb && c.to == 1)
+            .unwrap();
+        graph.insert_into(filter, wire);
+        let from_reverb = graph
+            .connections
+            .iter()
+            .any(|c| c.from == reverb && c.to == filter);
+        let to_output = graph
+            .connections
+            .iter()
+            .any(|c| c.from == filter && c.to == 1);
+        assert!(from_reverb && to_output);
+    }
+
+    /// FM is dimmed on a mix that an effect feeds, and only there.
+    #[test]
+    fn fm_is_dimmed_on_a_mix_after_an_effect() {
+        let (graph, mix) = parallel();
+        let rows = crate::dsp::mix::MixMode::ALL.len();
+        for row in 0..rows {
+            assert_eq!(
+                graph.dropdown_row_disabled(mix, 0, row),
+                row == FM_ROW,
+                "row {row}"
+            );
+        }
+        // Another node's dropdown, and the mix's own later dropdowns, are never dimmed.
+        assert!(!graph.dropdown_row_disabled(0, 0, FM_ROW));
+        assert!(!graph.dropdown_row_disabled(mix, 1, FM_ROW));
+    }
+
+    /// A mix of two oscillators runs per voice, so FM is open to it.
+    #[test]
+    fn fm_is_open_on_a_mix_of_voices() {
+        let mut graph = bare();
+        let second = add_oscillator(&mut graph, Point::new(0.0, 300.0));
+        let mix = graph.add_node(NodeKind::Mix, Point::new(300.0, 200.0));
+        graph.connect(0, Port::Audio, mix, Port::AudioIn(0));
+        graph.connect(second, Port::Audio, mix, Port::AudioIn(1));
+        graph.connect(mix, Port::Audio, 1, Port::Slot(0));
+        assert!(!graph.dropdown_row_disabled(mix, 0, FM_ROW));
+    }
+
+    /// A bypassed effect makes no stage, so a mix after it is still per voice and FM is open.
+    #[test]
+    fn a_bypassed_effect_does_not_dim_fm() {
+        let (mut graph, mix) = parallel();
+        let find = |graph: &Graph, kind| graph.nodes.iter().position(|n| n.kind == kind).unwrap();
+        let reverb = find(&graph, NodeKind::Reverb);
+        let delay = find(&graph, NodeKind::Delay);
+        assert!(graph.dropdown_row_disabled(mix, 0, FM_ROW));
+        graph.toggle_bypass(reverb);
+        graph.toggle_bypass(delay);
+        assert!(!graph.dropdown_row_disabled(mix, 0, FM_ROW));
+    }
+
+    /// The point on the open list's `row`, for a mix whose Type dropdown is open.
+    fn row_point(graph: &Graph, mix: usize, row: usize) -> Point {
+        let dropdown = graph.nodes[mix]
+            .dropdowns()
+            .into_iter()
+            .find(|d| d.which == 0)
+            .unwrap();
+        let list = dropdown_list_bounds(dropdown.bounds, dropdown.labels.len());
+        // The view starts unscaled and unmoved, so editor and screen coordinates agree.
+        Point::new(
+            list.x + 20.0,
+            list.y + (row as f32 + 0.5) * WAVEFORM_ITEM_HEIGHT,
+        )
+    }
+
+    /// A press on the dimmed FM row closes the list and leaves the mode as it was. A press on
+    /// another row picks it.
+    #[test]
+    fn a_press_on_the_dimmed_row_changes_nothing() {
+        let (mut graph, mix) = parallel();
+        graph.nodes[mix].choose(0, 0);
+        graph.dropdown_menu = Some((mix, 0));
+        let at = row_point(&graph, mix, FM_ROW);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let (_, message) = editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            BOUNDS,
+            Cursor::Available(at),
+        );
+        assert!(message.is_none(), "{message:?}");
+        assert_eq!(graph.nodes[mix].choice(0), 0);
+        assert!(graph.dropdown_menu.is_none());
+
+        graph.dropdown_menu = Some((mix, 0));
+        let at = row_point(&graph, mix, crate::dsp::mix::MixMode::Add as usize);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let (_, message) = editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            BOUNDS,
+            Cursor::Available(at),
+        );
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert_eq!(
+            graph.nodes[mix].choice(0),
+            crate::dsp::mix::MixMode::Add as usize
+        );
+    }
+
+    /// The dimmed row does not light under the cursor.
+    #[test]
+    fn the_dimmed_row_does_not_hover() {
+        let (mut graph, mix) = parallel();
+        graph.dropdown_menu = Some((mix, 0));
+        let fm = row_point(&graph, mix, FM_ROW);
+        assert_eq!(graph.hover_at(fm), None);
+        let add = row_point(&graph, mix, crate::dsp::mix::MixMode::Add as usize);
+        assert!(matches!(graph.hover_at(add), Some(Hover::Row { row, .. }) if row == 4));
+    }
+}

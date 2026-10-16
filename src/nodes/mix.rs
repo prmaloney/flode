@@ -9,7 +9,11 @@ use crate::dsp::mix::MixMode;
 
 pub struct Mix;
 
-const MIX_TYPE_LABELS: [&str; 4] = ["Crossfade", "AM", "Ring Mod", "FM"];
+const MIX_TYPE_LABELS: [&str; 5] = ["Crossfade", "AM", "Ring Mod", "FM", "Add"];
+
+/// The row of the type dropdown that holds FM. A mix that runs on the bus can't do it, so the
+/// editor dims this row there.
+pub const FM_ROW: usize = MixMode::Fm as usize;
 
 #[cfg(test)]
 mod tests {
@@ -20,6 +24,9 @@ mod tests {
     fn the_labels_match_the_modes() {
         assert_eq!(MIX_TYPE_LABELS.len(), MixMode::ALL.len());
         assert_eq!(MIX_TYPE_LABELS[MixMode::Fm as usize], "FM");
+        assert_eq!(MIX_TYPE_LABELS[FM_ROW], "FM");
+        assert_eq!(MixMode::ALL[FM_ROW], MixMode::Fm);
+        assert_eq!(MIX_TYPE_LABELS[MixMode::Add as usize], "Add");
     }
 }
 

@@ -13,6 +13,9 @@ pub enum MixMode {
     /// Signal B pushes the phase of signal A around, as FM does to a carrier. It needs a delay
     /// line, so the mix stage runs it, and `combine` only passes A through.
     Fm = 3,
+    /// Signal B is added to signal A, at the level the mix amount sets. It sums two parallel
+    /// chains, such as a dry path and an effect, without taking anything from either.
+    Add = 4,
 }
 
 /// How far a full-scale modulator moves the phase at the top of the mix amount, in cycles. One
@@ -28,11 +31,14 @@ pub fn fm_depth(amount: f32) -> f32 {
 
 impl MixMode {
     /// Every mode, in the order the dropdown lists them.
-    pub const ALL: [MixMode; 4] = [
+    ///
+    /// Add is last, so a saved mix keeps the mode it was saved with.
+    pub const ALL: [MixMode; 5] = [
         MixMode::Crossfade,
         MixMode::Am,
         MixMode::RingMod,
         MixMode::Fm,
+        MixMode::Add,
     ];
 
     /// Combines two samples, for the modes that need no memory. `mix` runs from 0.0, which is
@@ -51,6 +57,8 @@ impl MixMode {
             // The product of the two signals, faded in as the mix rises.
             MixMode::RingMod => a * (1.0 - mix) + a * b * mix,
             MixMode::Fm => a,
+            // A plus B at the level of the amount: none of B at 0, all of it at 1.
+            MixMode::Add => a + b * mix,
         }
     }
 }
@@ -85,6 +93,14 @@ mod tests {
         assert!(fm_depth(0.25) < fm_depth(0.5) && fm_depth(0.5) < fm_depth(1.0));
         // The knob clamps, so a driven amount can't push past the maximum.
         assert_eq!(fm_depth(3.0), FM_MAX_CYCLES);
+    }
+
+    /// Add leaves A alone at 0, and sums the two at 1, at the level the amount sets in between.
+    #[test]
+    fn add_sums_b_at_the_level_of_the_amount() {
+        assert_eq!(MixMode::Add.combine(0.5, 0.25, 0.0), 0.5);
+        assert_eq!(MixMode::Add.combine(0.5, 0.25, 1.0), 0.75);
+        assert_eq!(MixMode::Add.combine(0.5, 0.25, 0.5), 0.625);
     }
 
     #[test]

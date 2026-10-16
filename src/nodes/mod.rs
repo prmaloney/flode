@@ -192,28 +192,6 @@ impl NodeKind {
         matches!(self, NodeKind::Output | NodeKind::Macro)
     }
 
-    /// True for the effects that run on a slot's summed voices: distortion, compressor, reverb,
-    /// delay, chorus, phaser, and flanger. Their output can feed another of them or an output
-    /// slot, and nothing else, since the voices are already added together there.
-    pub fn is_effect(self) -> bool {
-        matches!(
-            self,
-            NodeKind::Distortion
-                | NodeKind::Compressor
-                | NodeKind::Reverb
-                | NodeKind::Delay
-                | NodeKind::Chorus
-                | NodeKind::Phaser
-                | NodeKind::Flanger
-        )
-    }
-
-    /// True if an audio wire may run from a node of kind `from` to one of kind `to`. A wire out
-    /// of an effect can only go to another effect or an output slot.
-    pub fn may_feed(from: NodeKind, to: NodeKind) -> bool {
-        !from.is_effect() || to.is_effect() || to == NodeKind::Output
-    }
-
     /// What sets this kind apart from the others.
     pub fn behavior(self) -> &'static dyn NodeBehavior {
         match self {
