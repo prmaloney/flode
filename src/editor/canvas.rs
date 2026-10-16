@@ -284,6 +284,8 @@ impl<'a> NodeEditor<'a> {
                     self.graph.select(index);
                 }
                 if in_header {
+                    // A drag takes the node over from any slide it is in.
+                    self.graph.finish_slides();
                     self.graph.interaction = Interaction::MovingNode { node: index, grab };
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
@@ -504,6 +506,17 @@ impl<'a> NodeEditor<'a> {
     pub(super) fn secondary_press(&mut self, point: Point) -> (event::Status, Option<Message>) {
         self.graph.menu = None;
         self.graph.dropdown_menu = None;
+        // Shift and right drag from a node wires it to the node the drag ends on.
+        if self.graph.shift {
+            if let Some(from) = self.graph.node_at(point) {
+                self.graph.interaction = Interaction::AutoLinking {
+                    from,
+                    start: point,
+                    cursor: point,
+                };
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+        }
         if let Some(index) = self.graph.node_at(point) {
             // A right press on a node of a group keeps the group, so the menu acts on all of it.
             if !self.graph.is_selected(index) {
@@ -522,6 +535,28 @@ impl<'a> NodeEditor<'a> {
             });
         }
         (event::Status::Captured, Some(Message::GraphChanged))
+    }
+
+    /// Right release: ends an auto connect drag. Over a node other than the one it began on, that
+    /// wires the two.
+    pub(super) fn release_secondary(&mut self, point: Point) -> (event::Status, Option<Message>) {
+        let Interaction::AutoLinking { from, .. } = self.graph.interaction else {
+            return (event::Status::Ignored, None);
+        };
+        self.graph.interaction = Interaction::Idle;
+        let changed = self
+            .graph
+            .node_at(point)
+            .filter(|&to| to != from)
+            .is_some_and(|to| self.graph.auto_connect(from, to));
+        (
+            event::Status::Captured,
+            Some(if changed {
+                Message::GraphChanged
+            } else {
+                Message::Hovered
+            }),
+        )
     }
 
     pub(super) fn release(&mut self, point: Point) -> (event::Status, Option<Message>) {
@@ -556,6 +591,8 @@ impl<'a> NodeEditor<'a> {
                 self.graph.box_base.clear();
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
+            // The left button ending an auto connect drag cancels it.
+            Interaction::AutoLinking { .. } => (event::Status::Captured, Some(Message::Hovered)),
             Interaction::Placing { .. } => (event::Status::Captured, None),
             Interaction::Idle => (event::Status::Ignored, None),
         }
@@ -577,6 +614,14 @@ impl<'a> NodeEditor<'a> {
                     None
                 };
                 (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::AutoLinking { from, start, .. } => {
+                self.graph.interaction = Interaction::AutoLinking {
+                    from,
+                    start,
+                    cursor: point,
+                };
+                (event::Status::Captured, Some(Message::Hovered))
             }
             Interaction::Boxing { start, .. } => {
                 self.graph.interaction = Interaction::Boxing {
@@ -678,7 +723,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         self.graph.cursor_in = position.is_some();
         let released = matches!(
             mouse_event,
-            mouse::Event::ButtonReleased(mouse::Button::Left)
+            mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Right)
         );
         if position.is_none() && !released {
             return (event::Status::Ignored, None);
@@ -738,6 +783,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 self.secondary_press(point)
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point),
+            mouse::Event::ButtonReleased(mouse::Button::Right) => self.release_secondary(point),
             mouse::Event::CursorMoved { .. } => {
                 let submenu_changed = self.hover_preset_menu(bounds, screen);
                 let hover = self.graph.hover_at(point);

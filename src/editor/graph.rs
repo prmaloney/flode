@@ -42,6 +42,13 @@ pub(super) enum Interaction {
         start: Point,
         cursor: Point,
     },
+    /// Shift and right drag from a node. Releasing over another node wires the two together the
+    /// way `Graph::auto_connect` picks. `start` and `cursor` are in world coordinates.
+    AutoLinking {
+        from: usize,
+        start: Point,
+        cursor: Point,
+    },
     /// Dragging a wire from an output port. `cursor` is the current end of the wire.
     Wiring {
         from: usize,
@@ -58,6 +65,23 @@ pub(super) enum Interaction {
         node: usize,
         end: usize,
     },
+}
+
+/// A node easing from where it was to where it now belongs.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Slide {
+    pub(super) node: usize,
+    from: Point,
+    pub(super) to: Point,
+    start: Instant,
+}
+
+/// How long a node takes to slide into place.
+const SLIDE_SECONDS: f32 = 0.18;
+
+/// Fast at first, then settling: 0.0 to 1.0 in, 0.0 to 1.0 out.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
 /// A change to a macro knob that the editor has to pass to the host, since the macro knobs are host
@@ -191,6 +215,8 @@ pub struct Graph {
     pub(super) selected: Option<usize>,
     /// The other nodes of a multiple selection. They move and delete with the primary one.
     pub(super) also_selected: Vec<usize>,
+    /// Nodes easing into new places. Their positions move a little each frame.
+    pub(super) slides: Vec<Slide>,
     /// The selection a box drag started from. A box with Shift held adds to it.
     pub(super) box_base: Vec<usize>,
     /// True while Shift is held, as the last keyboard event reported it.
@@ -333,6 +359,7 @@ impl Graph {
             selected: None,
             also_selected: Vec::new(),
             box_base: Vec::new(),
+            slides: Vec::new(),
             shift: false,
             menu: None,
             dropdown_menu: None,
@@ -808,6 +835,102 @@ impl Graph {
             to: old.to,
             input: old.input,
         });
+        self.make_room(node, old.from, old.to);
+    }
+
+    /// The space left on each side of a node spliced between two others.
+    const SPLICE_MARGIN: f32 = 40.0;
+
+    /// Spaces out `from` and `to` so `node`, just spliced between them, sits in the gap with a
+    /// margin on each side. If the gap is too small, `to` and every node it feeds slide right by
+    /// the shortfall, and `node` slides into the gap if it is outside it. A wire that loops back
+    /// to `from` has no right side to push, so nothing moves.
+    fn make_room(&mut self, node: usize, from: usize, to: usize) {
+        let margin = Self::SPLICE_MARGIN;
+        let downstream = self.downstream(to);
+        if from == to || downstream.contains(&from) || downstream.contains(&node) {
+            return;
+        }
+        let left_edge = self.nodes[from].bounds();
+        let right_edge = self.nodes[to].bounds();
+        let width = self.nodes[node].bounds().width;
+        let gap = right_edge.x - (left_edge.x + left_edge.width);
+        let shortfall = (width + 2.0 * margin - gap).max(0.0);
+        if shortfall > 0.0 {
+            for &moved in &downstream {
+                let at = self.target_of(moved);
+                self.slide_to(moved, Point::new(at.x + shortfall, at.y));
+            }
+        }
+        let low = left_edge.x + left_edge.width + margin;
+        let high = right_edge.x + shortfall - margin - width;
+        let at = self.nodes[node].position;
+        let x = at.x.clamp(low, high.max(low));
+        self.slide_to(node, Point::new(x, at.y));
+    }
+
+    /// `start` and every node its wires lead on to, following them from output to input.
+    fn downstream(&self, start: usize) -> Vec<usize> {
+        let mut reached = vec![start];
+        let mut next = 0;
+        while next < reached.len() {
+            let at = reached[next];
+            next += 1;
+            for c in self.connections.iter().filter(|c| c.from == at) {
+                if !reached.contains(&c.to) {
+                    reached.push(c.to);
+                }
+            }
+        }
+        reached
+    }
+
+    /// Where `node` is, or where it is sliding to.
+    fn target_of(&self, node: usize) -> Point {
+        self.slides
+            .iter()
+            .find(|slide| slide.node == node)
+            .map_or(self.nodes[node].position, |slide| slide.to)
+    }
+
+    /// Starts `node` easing toward `to`, from where it is now.
+    pub(super) fn slide_to(&mut self, node: usize, to: Point) {
+        self.slides.retain(|slide| slide.node != node);
+        let from = self.nodes[node].position;
+        if from != to {
+            self.slides.push(Slide {
+                node,
+                from,
+                to,
+                start: Instant::now(),
+            });
+        }
+    }
+
+    /// Moves every sliding node along its path to the time `now`. Returns true if one reached its
+    /// place, which is a change the editor has to save.
+    pub(super) fn advance_slides(&mut self, now: Instant) -> bool {
+        let mut arrived = false;
+        let nodes = &mut self.nodes;
+        self.slides.retain(|slide| {
+            let t = now.saturating_duration_since(slide.start).as_secs_f32() / SLIDE_SECONDS;
+            let done = t >= 1.0;
+            let k = if done { 1.0 } else { ease_out(t) };
+            nodes[slide.node].position = Point::new(
+                slide.from.x + (slide.to.x - slide.from.x) * k,
+                slide.from.y + (slide.to.y - slide.from.y) * k,
+            );
+            arrived |= done;
+            !done
+        });
+        arrived
+    }
+
+    /// Puts every sliding node at its place at once.
+    pub(super) fn finish_slides(&mut self) {
+        for slide in std::mem::take(&mut self.slides) {
+            self.nodes[slide.node].position = slide.to;
+        }
     }
 
     /// Connects an output port to an input port, if the two match. An input holds one
@@ -826,6 +949,76 @@ impl Graph {
             .retain(|c| !(c.to == to && c.input == input));
         self.connections.push(link);
         self.refresh_slots();
+    }
+
+    /// The name an output pin goes by, if it has one.
+    fn out_name(port: Port) -> Option<&'static str> {
+        port.output_label()
+    }
+
+    /// The name an input pin goes by, if it has one. A knob's pin is named for the knob.
+    fn in_name(port: Port) -> Option<&'static str> {
+        match port {
+            Port::Knob(id) => Some(id.name()),
+            other => other.input_label(),
+        }
+    }
+
+    /// The wire from `from` to `to` that makes the most sense, or None if no pins of the two can
+    /// join. Only pins that carry the same kind of signal can join. Among those, a wire between
+    /// pins with the same name wins, such as a Shape output and a Shape input. Otherwise the
+    /// first pair, top to bottom, whose input has no wire yet wins, so audio goes to the first
+    /// free audio input. Otherwise the first pair. A wire that is already there is not offered
+    /// again.
+    pub(super) fn best_link(&self, from: usize, to: usize) -> Option<Connection> {
+        let source = self.nodes.get(from)?;
+        let target = self.nodes.get(to)?;
+        let inputs = target.input_ports();
+        let links: Vec<Connection> = source
+            .output_ports()
+            .into_iter()
+            .flat_map(|out| {
+                inputs.iter().map(move |&input| Connection {
+                    from,
+                    out,
+                    to,
+                    input,
+                })
+            })
+            .filter(|link| link.is_valid(&self.nodes) && !self.connections.contains(link))
+            .collect();
+        let named = |link: &&Connection| {
+            matches!(
+                (Self::out_name(link.out), Self::in_name(link.input)),
+                (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)
+            )
+        };
+        let free = |link: &&Connection| {
+            !self
+                .connections
+                .iter()
+                .any(|c| c.to == to && c.input == link.input)
+        };
+        links
+            .iter()
+            .find(named)
+            .or_else(|| links.iter().find(free))
+            .or_else(|| links.first())
+            .copied()
+    }
+
+    /// Wires `from` to `to` with `best_link`. If nothing joins that way, tries the wire the other
+    /// way round, so dragging from the later node of a chain still connects. Returns whether a
+    /// wire was made.
+    pub(super) fn auto_connect(&mut self, from: usize, to: usize) -> bool {
+        let Some(link) = self
+            .best_link(from, to)
+            .or_else(|| self.best_link(to, from))
+        else {
+            return false;
+        };
+        self.connect(link.from, link.out, link.to, link.input);
+        true
     }
 
     /// True if a node of `kind` may be added. A kind that is one per graph, such as the output and
@@ -990,6 +1183,8 @@ impl Graph {
     /// Removes a node and its connections. Connections and the selection after it shift down
     /// to match the new node indices.
     pub(super) fn delete_node(&mut self, index: usize) {
+        // Slides name nodes by index, so they land before the indices shift.
+        self.finish_slides();
         self.nodes.remove(index);
         self.connections
             .retain(|c| c.from != index && c.to != index);

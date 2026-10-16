@@ -3481,3 +3481,298 @@ mod selection_tests {
         assert_eq!(graph.selection(), vec![2]);
     }
 }
+
+#[cfg(test)]
+mod splice_and_link_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use crate::nodes::NODE_WIDTH;
+    use nih_plug_iced::keyboard::{self, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+    use std::time::{Duration, Instant};
+
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    /// An oscillator feeding a delay that feeds the output, with the oscillator and delay `gap`
+    /// apart and the output well to the right. Returns the graph and the oscillator-to-delay wire.
+    fn chain(gap: f32) -> (Graph, usize) {
+        let mut graph = Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 80.0)),
+                FlodeNode::new(NodeKind::Delay, Point::new(NODE_WIDTH + gap, 80.0)),
+                FlodeNode::new(NodeKind::Output, Point::new(900.0, 80.0)),
+            ],
+            Vec::new(),
+        );
+        graph.connect(0, Port::Audio, 1, Port::Audio);
+        graph.connect(1, Port::Audio, 2, Port::Slot(0));
+        (graph, 0)
+    }
+
+    #[test]
+    fn a_splice_between_close_nodes_spaces_them_out() {
+        let (mut graph, link) = chain(10.0);
+        let filter = graph.add_node(NodeKind::Filter, Point::new(NODE_WIDTH + 2.0, 300.0));
+        let output_before = graph.nodes[2].position.x;
+        graph.insert_into(filter, link);
+        graph.finish_slides();
+        let left = graph.nodes[0].bounds();
+        let new = graph.nodes[filter].bounds();
+        let right = graph.nodes[1].bounds();
+        assert!(new.x - (left.x + left.width) >= 40.0, "left gap");
+        assert!(right.x - (new.x + new.width) >= 40.0, "right gap");
+        // The output is downstream of the delay, so it moved by the same amount.
+        let shift = right.x - (NODE_WIDTH + 10.0);
+        assert!(shift > 0.0);
+        assert_eq!(graph.nodes[2].position.x, output_before + shift);
+        // Heights stay where they were.
+        assert_eq!(graph.nodes[filter].position.y, 300.0);
+        assert_eq!(graph.nodes[1].position.y, 80.0);
+    }
+
+    #[test]
+    fn a_splice_with_room_to_spare_moves_nothing_downstream() {
+        let (mut graph, link) = chain(400.0);
+        let filter = graph.add_node(NodeKind::Filter, Point::new(NODE_WIDTH + 100.0, 300.0));
+        graph.insert_into(filter, link);
+        graph.finish_slides();
+        assert_eq!(graph.nodes[1].position.x, NODE_WIDTH + 400.0);
+        assert_eq!(graph.nodes[2].position.x, 900.0);
+        assert_eq!(graph.nodes[filter].position.x, NODE_WIDTH + 100.0);
+    }
+
+    #[test]
+    fn a_node_dropped_outside_a_wide_enough_gap_slides_into_it() {
+        let (mut graph, link) = chain(400.0);
+        // Dropped over the oscillator's own space, left of where the margin allows.
+        let filter = graph.add_node(NodeKind::Filter, Point::new(20.0, 300.0));
+        graph.insert_into(filter, link);
+        graph.finish_slides();
+        assert_eq!(graph.nodes[filter].position.x, NODE_WIDTH + 40.0);
+    }
+
+    #[test]
+    fn nodes_ease_toward_their_place() {
+        let (mut graph, link) = chain(10.0);
+        let filter = graph.add_node(NodeKind::Filter, Point::new(NODE_WIDTH + 2.0, 300.0));
+        graph.insert_into(filter, link);
+        let start = graph.nodes[1].position.x;
+        let end = graph.slides.iter().find(|s| s.node == 1).unwrap().to.x;
+        assert_eq!(
+            graph.nodes[1].position.x, start,
+            "nothing moves until a frame"
+        );
+        let now = Instant::now();
+        assert!(!graph.advance_slides(now + Duration::from_millis(60)));
+        let mid = graph.nodes[1].position.x;
+        assert!(mid > start && mid < end, "{start} < {mid} < {end}");
+        // Easing out covers more than half the way in a third of the time.
+        assert!(mid - start > (end - start) / 3.0);
+        assert!(graph.advance_slides(now + Duration::from_secs(1)));
+        assert_eq!(graph.nodes[1].position.x, end);
+        assert!(graph.slides.is_empty());
+    }
+
+    #[test]
+    fn a_wire_that_loops_back_does_not_push_nodes() {
+        // A filter, a delay and a second filter in a ring, so the delay's downstream reaches back
+        // to the first filter.
+        let mut graph = Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Filter, Point::new(0.0, 80.0)),
+                FlodeNode::new(NodeKind::Delay, Point::new(NODE_WIDTH + 10.0, 80.0)),
+                FlodeNode::new(NodeKind::Filter, Point::new(900.0, 80.0)),
+            ],
+            Vec::new(),
+        );
+        graph.connect(0, Port::Audio, 1, Port::Audio);
+        graph.connect(1, Port::Audio, 2, Port::Audio);
+        graph.connect(2, Port::Audio, 0, Port::Audio);
+        let link = graph
+            .connections
+            .iter()
+            .position(|c| c.from == 0 && c.to == 1)
+            .unwrap();
+        let filter = graph.add_node(NodeKind::Filter, Point::new(NODE_WIDTH + 2.0, 300.0));
+        graph.insert_into(filter, link);
+        graph.finish_slides();
+        assert_eq!(graph.nodes[2].position.x, 900.0);
+        assert_eq!(graph.nodes[1].position.x, NODE_WIDTH + 10.0);
+    }
+
+    fn node_graph(kinds: &[NodeKind]) -> Graph {
+        let nodes = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| FlodeNode::new(kind, Point::new(i as f32 * 300.0, 80.0)))
+            .collect();
+        Graph::with(nodes, Vec::new())
+    }
+
+    fn link(graph: &Graph, from: usize, to: usize) -> Option<(Port, Port)> {
+        graph.best_link(from, to).map(|c| (c.out, c.input))
+    }
+
+    #[test]
+    fn matching_names_win() {
+        let graph = node_graph(&[NodeKind::Envelope, NodeKind::Oscillator]);
+        assert_eq!(link(&graph, 0, 1), Some((Port::Shape, Port::Shape)));
+    }
+
+    #[test]
+    fn audio_goes_to_the_first_free_audio_input() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Oscillator, NodeKind::Mix]);
+        assert_eq!(link(&graph, 0, 2), Some((Port::Audio, Port::AudioIn(0))));
+        graph.connect(0, Port::Audio, 2, Port::AudioIn(0));
+        assert_eq!(link(&graph, 1, 2), Some((Port::Audio, Port::AudioIn(1))));
+    }
+
+    #[test]
+    fn audio_goes_to_the_next_empty_output_slot() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Oscillator, NodeKind::Output]);
+        graph.auto_connect(0, 2);
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 0 && c.input == Port::Slot(0)));
+        graph.auto_connect(1, 2);
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 1 && c.input == Port::Slot(1)));
+    }
+
+    #[test]
+    fn notes_go_to_the_notes_pin() {
+        let graph = node_graph(&[NodeKind::Input, NodeKind::Oscillator]);
+        assert_eq!(link(&graph, 0, 1), Some((Port::Notes, Port::Notes)));
+    }
+
+    #[test]
+    fn audio_beats_control_when_both_could_join() {
+        // A filter takes audio on one pin and control on its knobs, so an LFO's control goes to a
+        // knob and an oscillator's audio goes to the audio pin.
+        let graph = node_graph(&[NodeKind::Oscillator, NodeKind::Lfo, NodeKind::Filter]);
+        assert_eq!(link(&graph, 0, 2), Some((Port::Audio, Port::Audio)));
+        let (out, input) = link(&graph, 1, 2).expect("lfo to knob");
+        assert_eq!(out, Port::Shape);
+        assert!(matches!(input, Port::Knob(_)));
+    }
+
+    #[test]
+    fn a_wire_already_there_is_not_made_twice() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
+        assert!(graph.auto_connect(0, 1));
+        let count = graph.connections.len();
+        // Nothing else of the filter takes audio, so a second try finds no wire.
+        assert!(!graph.auto_connect(0, 1) || graph.connections.len() == count);
+    }
+
+    #[test]
+    fn dragging_from_the_later_node_still_connects() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
+        assert!(graph.auto_connect(1, 0));
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 0 && c.to == 1 && c.out == Port::Audio));
+    }
+
+    #[test]
+    fn nodes_with_nothing_to_join_stay_apart() {
+        let mut graph = node_graph(&[NodeKind::Output, NodeKind::Output]);
+        assert!(!graph.auto_connect(0, 1));
+        assert!(graph.connections.is_empty());
+    }
+
+    fn send(graph: &mut Graph, event: Event, at: Point) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(event, BOUNDS, Cursor::Available(at));
+    }
+
+    fn mouse_at(graph: &mut Graph, event: mouse::Event, at: Point) {
+        send(graph, Event::Mouse(event), at);
+    }
+
+    fn middle(graph: &Graph, node: usize) -> Point {
+        let bounds = graph.nodes[node].header_bounds();
+        Point::new(
+            bounds.x + bounds.width * 0.6,
+            bounds.y + bounds.height / 2.0,
+        )
+    }
+
+    fn shift(graph: &mut Graph, held: bool) {
+        let modifiers = if held {
+            Modifiers::SHIFT
+        } else {
+            Modifiers::default()
+        };
+        send(
+            graph,
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)),
+            Point::new(0.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn shift_right_drag_from_one_node_to_another_connects_them() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
+        shift(&mut graph, true);
+        let (a, b) = (middle(&graph, 0), middle(&graph, 1));
+        mouse_at(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+            a,
+        );
+        assert!(matches!(graph.interaction, Interaction::AutoLinking { .. }));
+        assert!(graph.menu.is_none());
+        mouse_at(&mut graph, mouse::Event::CursorMoved { position: b }, b);
+        mouse_at(
+            &mut graph,
+            mouse::Event::ButtonReleased(mouse::Button::Right),
+            b,
+        );
+        assert!(matches!(graph.interaction, Interaction::Idle));
+        assert_eq!(graph.connections.len(), 1);
+        assert_eq!(graph.connections[0].to, 1);
+    }
+
+    #[test]
+    fn shift_right_drag_that_ends_on_empty_canvas_does_nothing() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
+        shift(&mut graph, true);
+        let a = middle(&graph, 0);
+        mouse_at(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+            a,
+        );
+        let empty = Point::new(900.0, 600.0);
+        mouse_at(
+            &mut graph,
+            mouse::Event::ButtonReleased(mouse::Button::Right),
+            empty,
+        );
+        assert!(graph.connections.is_empty());
+        assert!(matches!(graph.interaction, Interaction::Idle));
+    }
+
+    #[test]
+    fn a_plain_right_click_still_opens_the_menu() {
+        let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
+        let a = middle(&graph, 0);
+        mouse_at(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+            a,
+        );
+        assert!(graph.menu.is_some());
+    }
+}

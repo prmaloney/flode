@@ -69,6 +69,13 @@ the sustain hold. A noise LFO has no dot.
   one selected node's header moves the whole group. Right-click on a selected node, then Delete or
   Bypass, acts on the group. Auto pack, also in that menu, lines the group up in columns by its
   wires, with sources on the left. Only a single node splices into a wire.
+- A node dropped on a wire needs room. If the two nodes on that wire are closer than the new node
+  and a margin on each side, the node after it, and everything that node feeds, ease to the right.
+- Shift and right drag from one node to another connects them. The orange line follows the cursor,
+  and the node it would connect to is outlined. Only pins that carry the same kind of signal can
+  join. A pair with the same name wins, such as Shape to Shape. Otherwise the first pair whose
+  input is free is used, which puts audio on the first empty audio input or output slot. If the
+  first node has nothing to give the second, the wire goes the other way.
 - Fold the sections of a tall node, or collapse the whole node down to its pins.
 - `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
   in the right-click menu.

@@ -82,6 +82,8 @@ pub(super) const DROPDOWN_COLOR: Color = Color::from_rgb(0.15, 0.155, 0.195);
 /// A dropdown and its list rows lighten under the cursor.
 pub(super) const DROPDOWN_HOVER_COLOR: Color = Color::from_rgb(0.22, 0.23, 0.29);
 pub(super) const LIST_ROW_HOVER_COLOR: Color = Color::from_rgb(0.25, 0.26, 0.33);
+/// The line of an auto connect drag, and the dot where it starts.
+pub(super) const AUTO_LINK_COLOR: Color = Color::from_rgb(0.96, 0.65, 0.23);
 pub(super) const HIGHLIGHT_WIRE_COLOR: Color = Color::from_rgb(1.0, 0.75, 0.25);
 /// The farthest a wire's handles reach from a pin when the pins are close together.
 pub(super) const MIN_WIRE_REACH: f32 = 60.0;

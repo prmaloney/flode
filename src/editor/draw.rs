@@ -126,6 +126,26 @@ pub(super) fn draw_editor(
             draw_selection(frame, &graph.nodes[index]);
         }
 
+        if let Interaction::AutoLinking {
+            from,
+            start,
+            cursor,
+        } = graph.interaction
+        {
+            // The node the drag would connect to is outlined, and the line runs to the cursor.
+            if let Some(target) = graph.node_at(cursor).filter(|&node| node != from) {
+                draw_selection(frame, &graph.nodes[target]);
+            }
+            frame.stroke(
+                &Path::line(start, cursor),
+                Stroke::default()
+                    .with_color(AUTO_LINK_COLOR)
+                    .with_width(3.0)
+                    .with_line_cap(LineCap::Round),
+            );
+            frame.fill(&Path::circle(start, 6.0), AUTO_LINK_COLOR);
+        }
+
         if let Interaction::Boxing { start, cursor } = graph.interaction {
             draw_selection_box(frame, start, cursor);
         }

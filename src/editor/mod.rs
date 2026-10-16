@@ -236,6 +236,12 @@ impl IcedEditor for FlodeEditor {
             .meter_updated
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
         self.meter_updated = Some(now);
+        // Nodes spaced out by a splice ease into place. The saved graph follows once they land.
+        if self.graph.advance_slides(now) {
+            if let Ok(mut saved) = self.params.graph.lock() {
+                *saved = self.graph.to_saved();
+            }
+        }
         let output = self.meter.update(meters.output, seconds);
 
         // The MIDI light flashes when the audio thread has taken in a note-on since the last frame,
