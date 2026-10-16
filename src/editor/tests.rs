@@ -3428,6 +3428,46 @@ mod selection_tests {
         assert_eq!(sorted(graph.selection()), [0, 1]);
     }
 
+    fn open_menu(graph: &mut Graph, node: usize) -> crate::editor::menus::ContextMenu {
+        let at = header(graph, node);
+        mouse_event(graph, mouse::Event::ButtonPressed(mouse::Button::Right), at);
+        graph.menu.expect("menu open")
+    }
+
+    #[test]
+    fn auto_pack_is_offered_only_for_a_group() {
+        use crate::editor::menus::MenuItem;
+        let mut graph = row();
+        graph.select(0);
+        assert!(!open_menu(&mut graph, 0).items.contains(&MenuItem::AutoPack));
+        graph.set_selection(vec![0, 1]);
+        let menu = open_menu(&mut graph, 0);
+        assert!(menu.items.contains(&MenuItem::AutoPack));
+        // Delete stays last.
+        assert_eq!(menu.items.last(), Some(&MenuItem::Delete));
+    }
+
+    #[test]
+    fn auto_pack_puts_a_chain_in_signal_order() {
+        use crate::editor::menus::MenuItem;
+        let mut graph = row();
+        // Chorus feeds Delay, and Delay feeds Reverb, which is the reverse of how they sit.
+        graph.connect(2, Port::Audio, 1, Port::Audio);
+        graph.connect(1, Port::Audio, 0, Port::Audio);
+        graph.set_selection(vec![0, 1, 2]);
+        let menu = open_menu(&mut graph, 0);
+        let row_of = menu.items.iter().position(|i| *i == MenuItem::AutoPack);
+        let area = menu_bounds(menu);
+        let at = Point::new(
+            area.x + 10.0,
+            area.y + (row_of.unwrap() as f32 + 0.5) * area.height / menu.items.len() as f32,
+        );
+        press(&mut graph, at);
+        let x = |node: usize| graph.nodes[node].position.x;
+        assert!(x(2) < x(1) && x(1) < x(0));
+        assert_eq!(sorted(graph.selection()), [0, 1, 2]);
+    }
+
     #[test]
     fn a_right_press_on_an_unselected_node_selects_only_it() {
         let mut graph = row();

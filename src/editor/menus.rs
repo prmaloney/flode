@@ -299,6 +299,8 @@ pub(super) enum MenuItem {
     Duplicate,
     /// Mutes a source, or bypasses a processor. It is the same action as the `m` key.
     Bypass,
+    /// Arranges the selected nodes by how they are wired. Offered only for several nodes.
+    AutoPack,
     Delete,
 }
 
@@ -307,6 +309,7 @@ impl MenuItem {
     pub(super) fn label(self, node: &FlodeNode) -> &'static str {
         match (self, node.bypass(), node.bypassed) {
             (MenuItem::Duplicate, _, _) => "Duplicate",
+            (MenuItem::AutoPack, _, _) => "Auto pack",
             (MenuItem::Delete, _, _) => "Delete",
             (MenuItem::Bypass, Bypass::Mute, false) => "Mute",
             (MenuItem::Bypass, Bypass::Mute, true) => "Unmute",
@@ -324,6 +327,21 @@ pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
         (true, false) => &[MenuItem::Duplicate, MenuItem::Delete],
         (false, true) => &[MenuItem::Bypass, MenuItem::Delete],
         (false, false) => &[MenuItem::Delete],
+    }
+}
+
+/// The entries for a node in a group of several selected nodes, which add Auto pack above Delete.
+pub(super) fn group_menu_items(node: &FlodeNode) -> &'static [MenuItem] {
+    match (node.can_duplicate(), node.bypass() != Bypass::None) {
+        (true, true) => &[
+            MenuItem::Duplicate,
+            MenuItem::Bypass,
+            MenuItem::AutoPack,
+            MenuItem::Delete,
+        ],
+        (true, false) => &[MenuItem::Duplicate, MenuItem::AutoPack, MenuItem::Delete],
+        (false, true) => &[MenuItem::Bypass, MenuItem::AutoPack, MenuItem::Delete],
+        (false, false) => &[MenuItem::AutoPack, MenuItem::Delete],
     }
 }
 

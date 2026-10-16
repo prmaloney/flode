@@ -89,6 +89,7 @@ impl<'a> NodeEditor<'a> {
                             self.graph.toggle_bypass(index);
                         }
                     }
+                    MenuItem::AutoPack => self.graph.auto_pack(),
                     MenuItem::Delete => {
                         if self.graph.is_selected(menu.node) {
                             self.graph.delete_selected();
@@ -508,10 +509,16 @@ impl<'a> NodeEditor<'a> {
             if !self.graph.is_selected(index) {
                 self.graph.select(index);
             }
+            let node = &self.graph.nodes[index];
+            let items = if self.graph.selection().len() > 1 {
+                group_menu_items(node)
+            } else {
+                menu_items(node)
+            };
             self.graph.menu = Some(ContextMenu {
                 node: index,
                 position: point,
-                items: menu_items(&self.graph.nodes[index]),
+                items,
             });
         }
         (event::Status::Captured, Some(Message::GraphChanged))

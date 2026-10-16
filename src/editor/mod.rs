@@ -19,6 +19,7 @@ pub mod graph;
 pub mod knob;
 mod menus;
 mod meter;
+mod pack;
 pub mod piano;
 pub mod saved;
 mod shortcuts;

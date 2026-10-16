@@ -919,6 +919,27 @@ impl Graph {
         self.set_selection(nodes);
     }
 
+    /// Arranges the selected nodes by their wires, with `pack`. Wires to nodes outside the
+    /// selection do not count.
+    pub(super) fn auto_pack(&mut self) {
+        let group = self.selection();
+        let at: Vec<Point> = group.iter().map(|&n| self.nodes[n].position).collect();
+        let sizes: Vec<nih_plug_iced::Size> = group
+            .iter()
+            .map(|&n| self.nodes[n].bounds().size())
+            .collect();
+        let local = |node: usize| group.iter().position(|&g| g == node);
+        let wires: Vec<(usize, usize)> = self
+            .connections
+            .iter()
+            .filter_map(|c| Some((local(c.from)?, local(c.to)?)))
+            .collect();
+        let placed = super::pack::pack(&at, &sizes, &wires);
+        for (&node, position) in group.iter().zip(placed) {
+            self.nodes[node].position = position;
+        }
+    }
+
     /// Removes every selected node.
     pub(super) fn delete_selected(&mut self) {
         let mut nodes = self.selection();
