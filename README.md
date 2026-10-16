@@ -67,7 +67,8 @@ the sustain hold. A noise LFO has no dot.
 - Shift+click adds a node to the selection or drops it from it. Dragging over empty canvas draws a
   box that selects every node it touches, and Shift keeps the current selection under it. Dragging
   one selected node's header moves the whole group. Right-click on a selected node, then Delete or
-  Bypass, acts on the group. Only a single node splices into a wire.
+  Bypass, acts on the group. Auto pack, also in that menu, lines the group up in columns by its
+  wires, with sources on the left. Only a single node splices into a wire.
 - Fold the sections of a tall node, or collapse the whole node down to its pins.
 - `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
   in the right-click menu.
