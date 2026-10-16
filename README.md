@@ -64,6 +64,10 @@ the sustain hold. A noise LFO has no dot.
 **Editing.**
 
 - Click a node header to select it and drag it to move it. Drag a node onto a wire to splice it in.
+- Shift+click adds a node to the selection or drops it from it. Dragging over empty canvas draws a
+  box that selects every node it touches, and Shift keeps the current selection under it. Dragging
+  one selected node's header moves the whole group. Right-click on a selected node, then Delete or
+  Bypass, acts on the group. Only a single node splices into a wire.
 - Fold the sections of a tall node, or collapse the whole node down to its pins.
 - `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
   in the right-click menu.
@@ -159,8 +163,8 @@ built with `assert_process_allocs`, so a debug build panics on an allocation the
 patch that runs all seven effects with allocation forbidden.
 
 Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
-editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`) opens part
-of the interface or selects a node, `FLODE_PRESET_DIR` points the editor at another preset folder,
+editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`, `select:0,2`) opens part
+of the interface or selects nodes, `FLODE_PRESET_DIR` points the editor at another preset folder,
 and `FLODE_NOTE` (a MIDI note number) holds that note down from the start, so the viewers have a
 live signal. They are read once, at start. See `src/editor/demo.rs`.
 

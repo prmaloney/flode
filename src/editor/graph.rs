@@ -37,6 +37,11 @@ pub(super) enum Interaction {
         node: usize,
         grab: Vector,
     },
+    /// Dragging a selection box over empty canvas, in world coordinates.
+    Boxing {
+        start: Point,
+        cursor: Point,
+    },
     /// Dragging a wire from an output port. `cursor` is the current end of the wire.
     Wiring {
         from: usize,
@@ -181,7 +186,15 @@ pub struct Graph {
     pub(super) connections: Vec<Connection>,
     pub(super) interaction: Interaction,
     pub(super) piano: Piano,
+    /// The primary selected node: the last one picked. It is drawn on top and the shortcuts act
+    /// on it.
     pub(super) selected: Option<usize>,
+    /// The other nodes of a multiple selection. They move and delete with the primary one.
+    pub(super) also_selected: Vec<usize>,
+    /// The selection a box drag started from. A box with Shift held adds to it.
+    pub(super) box_base: Vec<usize>,
+    /// True while Shift is held, as the last keyboard event reported it.
+    pub(super) shift: bool,
     pub(super) menu: Option<ContextMenu>,
     /// The node whose dropdown list is open.
     pub(super) dropdown_menu: Option<(usize, usize)>,
@@ -318,6 +331,9 @@ impl Graph {
             interaction: Interaction::Idle,
             piano: Piano::default(),
             selected: None,
+            also_selected: Vec::new(),
+            box_base: Vec::new(),
+            shift: false,
             menu: None,
             dropdown_menu: None,
             link_target: None,
@@ -464,11 +480,13 @@ impl Graph {
         let view = self.view;
         let piano = std::mem::take(&mut self.piano);
         let computer_keys = self.computer_keys;
+        let shift = self.shift;
         let dir = self.preset_dir.clone();
         *self = fresh;
         self.view = view;
         self.piano = piano;
         self.computer_keys = computer_keys;
+        self.shift = shift;
         self.preset_dir = dir;
         for (index, &value) in macros.iter().enumerate() {
             self.macro_edits.push(MacroEdit::Begin(index));
@@ -820,8 +838,95 @@ impl Graph {
     pub(super) fn add_node(&mut self, kind: NodeKind, position: Point) -> usize {
         self.nodes.push(FlodeNode::new(kind, position));
         let index = self.nodes.len() - 1;
-        self.selected = Some(index);
+        self.select(index);
         index
+    }
+
+    /// Selects `index` alone.
+    pub(super) fn select(&mut self, index: usize) {
+        self.selected = Some(index);
+        self.also_selected.clear();
+    }
+
+    /// Every selected node, the primary one last.
+    pub(super) fn selection(&self) -> Vec<usize> {
+        let mut nodes = self.also_selected.clone();
+        nodes.extend(self.selected);
+        nodes
+    }
+
+    pub(super) fn is_selected(&self, index: usize) -> bool {
+        self.selected == Some(index) || self.also_selected.contains(&index)
+    }
+
+    pub(super) fn clear_selection(&mut self) {
+        self.selected = None;
+        self.also_selected.clear();
+    }
+
+    /// Selects exactly `nodes`. The last one becomes the primary node.
+    pub(super) fn set_selection(&mut self, mut nodes: Vec<usize>) {
+        self.selected = nodes.pop();
+        self.also_selected = nodes;
+    }
+
+    /// Adds an unselected node to the selection, or drops a selected one from it.
+    pub(super) fn toggle_selected(&mut self, index: usize) {
+        if !self.is_selected(index) {
+            self.also_selected.extend(self.selected);
+            self.selected = Some(index);
+            return;
+        }
+        let mut nodes = self.selection();
+        nodes.retain(|&node| node != index);
+        self.set_selection(nodes);
+    }
+
+    /// The nodes a menu entry on `node` acts on: the whole selection if `node` is in it, else
+    /// just `node`.
+    pub(super) fn menu_targets(&self, node: usize) -> Vec<usize> {
+        if self.is_selected(node) {
+            self.selection()
+        } else {
+            vec![node]
+        }
+    }
+
+    /// Moves every selected node by `delta`.
+    pub(super) fn move_selection(&mut self, delta: Vector) {
+        for index in self.selection() {
+            let position = &mut self.nodes[index].position;
+            *position = Point::new(position.x + delta.x, position.y + delta.y);
+        }
+    }
+
+    /// Selects the nodes the box between `a` and `b` touches, on top of the selection the box
+    /// started from.
+    pub(super) fn select_in_box(&mut self, a: Point, b: Point) {
+        let (left, right) = (a.x.min(b.x), a.x.max(b.x));
+        let (top, bottom) = (a.y.min(b.y), a.y.max(b.y));
+        let mut nodes = self.box_base.clone();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let rect = node.bounds();
+            let touches = rect.x <= right
+                && rect.x + rect.width >= left
+                && rect.y <= bottom
+                && rect.y + rect.height >= top;
+            if !nodes.contains(&index) && touches {
+                nodes.push(index);
+            }
+        }
+        self.set_selection(nodes);
+    }
+
+    /// Removes every selected node.
+    pub(super) fn delete_selected(&mut self) {
+        let mut nodes = self.selection();
+        nodes.sort_unstable();
+        // From the highest index down, so the lower ones keep their place.
+        for index in nodes.into_iter().rev() {
+            self.delete_node(index);
+        }
     }
 
     /// Makes `node` follow the cursor, centred on `point`, until the next press sets it down. A
@@ -829,7 +934,7 @@ impl Graph {
     pub(super) fn start_placing(&mut self, node: usize, point: Point) {
         let grab = Vector::new(NODE_WIDTH / 2.0, HEADER_HEIGHT / 2.0);
         self.nodes[node].position = Point::new(point.x - grab.x, point.y - grab.y);
-        self.selected = Some(node);
+        self.select(node);
         self.interaction = Interaction::Placing { node, grab };
     }
 
@@ -850,7 +955,7 @@ impl Graph {
         );
         self.nodes.push(original.duplicate(at));
         let copy = self.nodes.len() - 1;
-        self.selected = Some(copy);
+        self.select(copy);
         Some(copy)
     }
 
@@ -881,6 +986,12 @@ impl Graph {
             Some(selected) if selected > index => Some(selected - 1),
             other => other,
         };
+        self.also_selected.retain(|&node| node != index);
+        for node in &mut self.also_selected {
+            if *node > index {
+                *node -= 1;
+            }
+        }
         self.menu = None;
         self.dropdown_menu = None;
         self.interaction = Interaction::Idle;

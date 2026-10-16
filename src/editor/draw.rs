@@ -122,8 +122,12 @@ pub(super) fn draw_editor(
             }
         }
 
-        if let Some(index) = graph.selected {
+        for index in graph.selection() {
             draw_selection(frame, &graph.nodes[index]);
+        }
+
+        if let Interaction::Boxing { start, cursor } = graph.interaction {
+            draw_selection_box(frame, start, cursor);
         }
     });
 
@@ -313,7 +317,7 @@ pub(super) fn draw_node(
         (NODE_BODY_COLOR, NODE_HEADER_COLOR)
     };
     // The selected node sits higher, so its shadow is bigger.
-    let shadow = if graph.selected == Some(index) {
+    let shadow = if graph.is_selected(index) {
         LIFTED_SHADOW
     } else {
         NODE_SHADOW
@@ -1109,6 +1113,37 @@ pub(super) fn draw_selection(frame: &mut Frame, node: &FlodeNode) {
         Stroke::default()
             .with_color(SELECTION_COLOR)
             .with_width(SELECTION_WIDTH),
+    );
+}
+
+/// The box a drag over empty canvas selects with: a faint fill and a thin outline in the accent
+/// color.
+fn draw_selection_box(frame: &mut Frame, a: Point, b: Point) {
+    let area = Rectangle {
+        x: a.x.min(b.x),
+        y: a.y.min(b.y),
+        width: (a.x - b.x).abs(),
+        height: (a.y - b.y).abs(),
+    };
+    let path = Path::rectangle(
+        Point::new(area.x, area.y),
+        nih_plug_iced::Size::new(area.width, area.height),
+    );
+    frame.fill(
+        &path,
+        Color {
+            a: 0.08,
+            ..SELECTION_COLOR
+        },
+    );
+    frame.stroke(
+        &path,
+        Stroke::default()
+            .with_color(Color {
+                a: 0.6,
+                ..SELECTION_COLOR
+            })
+            .with_width(1.0),
     );
 }
 

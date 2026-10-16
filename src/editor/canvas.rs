@@ -83,10 +83,19 @@ impl<'a> NodeEditor<'a> {
                     MenuItem::Duplicate => {
                         self.duplicate_and_place(menu.node, point);
                     }
+                    // On a node of a group, bypass and delete act on the whole group.
                     MenuItem::Bypass => {
-                        self.graph.toggle_bypass(menu.node);
+                        for index in self.graph.menu_targets(menu.node) {
+                            self.graph.toggle_bypass(index);
+                        }
                     }
-                    MenuItem::Delete => self.graph.delete_node(menu.node),
+                    MenuItem::Delete => {
+                        if self.graph.is_selected(menu.node) {
+                            self.graph.delete_selected();
+                        } else {
+                            self.graph.delete_node(menu.node);
+                        }
+                    }
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
@@ -197,8 +206,14 @@ impl<'a> NodeEditor<'a> {
         // Walk nodes from the last drawn (top) to the first.
         for index in self.graph.draw_order().into_iter().rev() {
             let node = &self.graph.nodes[index];
+            // Shift+click adds the node to the selection, or drops it from it.
+            if self.graph.shift && node.bounds().contains(point) {
+                self.graph.toggle_selected(index);
+                self.graph.dropdown_menu = None;
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
             if let Some(end) = map_handle_at(node, point) {
-                self.graph.selected = Some(index);
+                self.graph.select(index);
                 self.graph.interaction = Interaction::MapHandle { node: index, end };
                 let node = &mut self.graph.nodes[index];
                 let current = node.value(MAP_IN[end]);
@@ -214,7 +229,7 @@ impl<'a> NodeEditor<'a> {
                 // A driven knob is greyed out, so pressing it does nothing to the knob.
                 let driven = slot.pinned && self.graph.is_driven(index, slot.id);
                 if !driven && knob::contains(slot.center, ROW_KNOB_DIAMETER, point) {
-                    self.graph.selected = Some(index);
+                    self.graph.select(index);
                     self.graph.interaction = Interaction::Knob {
                         node: index,
                         id: slot.id,
@@ -232,14 +247,14 @@ impl<'a> NodeEditor<'a> {
                 }
             }
             if node.toggle_bounds().contains(point) {
-                self.graph.selected = Some(index);
+                self.graph.select(index);
                 self.graph.dropdown_menu = None;
                 self.graph.nodes[index].collapsed = !self.graph.nodes[index].collapsed;
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
             // A section header folds or opens its section.
             if let Some(section) = node.section_header_at(point) {
-                self.graph.selected = Some(index);
+                self.graph.select(index);
                 self.graph.dropdown_menu = None;
                 self.graph.nodes[index].toggle_section(section);
                 return (event::Status::Captured, Some(Message::GraphChanged));
@@ -248,7 +263,7 @@ impl<'a> NodeEditor<'a> {
                 let labels = node.switch_labels();
                 let hit = (0..labels.len()).find(|&i| node.switch_bounds(i).contains(point));
                 if let (Some(hit), false) = (hit, node.collapsed) {
-                    self.graph.selected = Some(index);
+                    self.graph.select(index);
                     let node = &mut self.graph.nodes[index];
                     let on = !node.switch(hit);
                     node.set_switch(hit, on);
@@ -256,22 +271,35 @@ impl<'a> NodeEditor<'a> {
                 }
             }
             if let Some(which) = node.dropdown_at(point) {
-                self.graph.selected = Some(index);
+                self.graph.select(index);
                 self.graph.dropdown_menu = Some((index, which));
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
             if node.bounds().contains(point) {
-                self.graph.selected = Some(index);
-                if node.header_bounds().contains(point) {
-                    let grab = Vector::new(point.x - node.position.x, point.y - node.position.y);
+                let in_header = node.header_bounds().contains(point);
+                let grab = Vector::new(point.x - node.position.x, point.y - node.position.y);
+                // A node of the selection keeps its group, so its header drags all of it.
+                if !self.graph.is_selected(index) {
+                    self.graph.select(index);
+                }
+                if in_header {
                     self.graph.interaction = Interaction::MovingNode { node: index, grab };
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
 
-        // Empty canvas clears the selection.
-        self.graph.selected = None;
+        // Empty canvas starts a selection box. It clears the selection, unless Shift is held.
+        self.graph.box_base = if self.graph.shift {
+            self.graph.selection()
+        } else {
+            self.graph.clear_selection();
+            Vec::new()
+        };
+        self.graph.interaction = Interaction::Boxing {
+            start: point,
+            cursor: point,
+        };
         (event::Status::Captured, Some(Message::GraphChanged))
     }
 
@@ -476,7 +504,10 @@ impl<'a> NodeEditor<'a> {
         self.graph.menu = None;
         self.graph.dropdown_menu = None;
         if let Some(index) = self.graph.node_at(point) {
-            self.graph.selected = Some(index);
+            // A right press on a node of a group keeps the group, so the menu acts on all of it.
+            if !self.graph.is_selected(index) {
+                self.graph.select(index);
+            }
             self.graph.menu = Some(ContextMenu {
                 node: index,
                 position: point,
@@ -514,6 +545,10 @@ impl<'a> NodeEditor<'a> {
                 }
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
+            Interaction::Boxing { .. } => {
+                self.graph.box_base.clear();
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
             Interaction::Placing { .. } => (event::Status::Captured, None),
             Interaction::Idle => (event::Status::Ignored, None),
         }
@@ -522,8 +557,26 @@ impl<'a> NodeEditor<'a> {
     pub(super) fn drag(&mut self, point: Point, screen: Point) -> (event::Status, Option<Message>) {
         match self.graph.interaction {
             Interaction::MovingNode { node, grab } | Interaction::Placing { node, grab } => {
-                self.graph.nodes[node].position = Point::new(point.x - grab.x, point.y - grab.y);
-                self.graph.link_target = self.graph.link_under(node);
+                let target = Point::new(point.x - grab.x, point.y - grab.y);
+                let at = self.graph.nodes[node].position;
+                // The rest of a selection moves by as much as the dragged node does.
+                self.graph
+                    .move_selection(Vector::new(target.x - at.x, target.y - at.y));
+                self.graph.nodes[node].position = target;
+                // Only a lone node splices into a wire.
+                self.graph.link_target = if self.graph.selection().len() == 1 {
+                    self.graph.link_under(node)
+                } else {
+                    None
+                };
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::Boxing { start, .. } => {
+                self.graph.interaction = Interaction::Boxing {
+                    start,
+                    cursor: point,
+                };
+                self.graph.select_in_box(start, point);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::Wiring { from, out, .. } => {
@@ -578,6 +631,15 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         let mouse_event = match event {
             Event::Mouse(mouse_event) => mouse_event,
             Event::Keyboard(key_event) => {
+                // Shift+click and Shift+drag read the modifiers from the last key event.
+                match &key_event {
+                    keyboard::Event::KeyPressed { modifiers, .. }
+                    | keyboard::Event::KeyReleased { modifiers, .. }
+                    | keyboard::Event::ModifiersChanged(modifiers) => {
+                        self.graph.shift = modifiers.shift();
+                    }
+                    _ => {}
+                }
                 // The save box takes the keys while it is open.
                 if self.graph.name_entry.is_some() {
                     return self.name_entry_event(&key_event);

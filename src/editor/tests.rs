@@ -3198,3 +3198,246 @@ mod parallel_effects_tests {
         assert!(matches!(graph.hover_at(add), Some(Hover::Row { row, .. }) if row == 4));
     }
 }
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use nih_plug_iced::keyboard::{self, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    /// Three effects in a row, with nothing wired. They are nodes 0, 1 and 2.
+    fn row() -> Graph {
+        Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Reverb, Point::new(100.0, 150.0)),
+                FlodeNode::new(NodeKind::Delay, Point::new(400.0, 150.0)),
+                FlodeNode::new(NodeKind::Chorus, Point::new(700.0, 150.0)),
+            ],
+            Vec::new(),
+        )
+    }
+
+    fn send(graph: &mut Graph, event: Event, at: Point) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(event, BOUNDS, Cursor::Available(at));
+    }
+
+    fn mouse_event(graph: &mut Graph, event: mouse::Event, at: Point) {
+        send(graph, Event::Mouse(event), at);
+    }
+
+    fn press(graph: &mut Graph, at: Point) {
+        mouse_event(graph, mouse::Event::ButtonPressed(mouse::Button::Left), at);
+    }
+
+    fn move_to(graph: &mut Graph, at: Point) {
+        mouse_event(graph, mouse::Event::CursorMoved { position: at }, at);
+    }
+
+    fn release(graph: &mut Graph, at: Point) {
+        mouse_event(graph, mouse::Event::ButtonReleased(mouse::Button::Left), at);
+    }
+
+    fn hold_shift(graph: &mut Graph, held: bool) {
+        let modifiers = if held {
+            Modifiers::SHIFT
+        } else {
+            Modifiers::default()
+        };
+        send(
+            graph,
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)),
+            Point::new(0.0, 0.0),
+        );
+    }
+
+    fn header(graph: &Graph, node: usize) -> Point {
+        let bounds = graph.nodes[node].header_bounds();
+        Point::new(
+            bounds.x + bounds.width * 0.6,
+            bounds.y + bounds.height / 2.0,
+        )
+    }
+
+    /// Presses and releases the left button on a node's header.
+    fn click(graph: &mut Graph, node: usize) {
+        let at = header(graph, node);
+        press(graph, at);
+        release(graph, at);
+    }
+
+    fn sorted(mut nodes: Vec<usize>) -> Vec<usize> {
+        nodes.sort_unstable();
+        nodes
+    }
+
+    #[test]
+    fn shift_click_adds_and_drops_nodes() {
+        let mut graph = row();
+        click(&mut graph, 0);
+        hold_shift(&mut graph, true);
+        click(&mut graph, 2);
+        assert_eq!(sorted(graph.selection()), [0, 2]);
+        assert_eq!(graph.selected, Some(2));
+        // Shift+click on a selected node drops it.
+        click(&mut graph, 0);
+        assert_eq!(graph.selection(), vec![2]);
+    }
+
+    #[test]
+    fn shift_click_does_not_start_a_drag() {
+        let mut graph = row();
+        hold_shift(&mut graph, true);
+        let at = header(&graph, 1);
+        press(&mut graph, at);
+        assert!(matches!(graph.interaction, Interaction::Idle));
+    }
+
+    #[test]
+    fn a_plain_click_selects_one_node() {
+        let mut graph = row();
+        graph.set_selection(vec![0, 1]);
+        click(&mut graph, 2);
+        assert_eq!(graph.selection(), vec![2]);
+    }
+
+    #[test]
+    fn dragging_a_selected_node_moves_the_group() {
+        let mut graph = row();
+        graph.set_selection(vec![0, 1]);
+        let before: Vec<Point> = graph.nodes.iter().map(|n| n.position).collect();
+        let start = header(&graph, 1);
+        press(&mut graph, start);
+        let to = Point::new(start.x + 40.0, start.y + 30.0);
+        move_to(&mut graph, to);
+        release(&mut graph, to);
+        for node in [0, 1] {
+            assert_eq!(graph.nodes[node].position.x, before[node].x + 40.0);
+            assert_eq!(graph.nodes[node].position.y, before[node].y + 30.0);
+        }
+        assert_eq!(graph.nodes[2].position, before[2]);
+        assert_eq!(sorted(graph.selection()), [0, 1]);
+    }
+
+    #[test]
+    fn dragging_an_unselected_node_moves_only_it() {
+        let mut graph = row();
+        graph.set_selection(vec![0, 1]);
+        let before: Vec<Point> = graph.nodes.iter().map(|n| n.position).collect();
+        let start = header(&graph, 2);
+        press(&mut graph, start);
+        let to = Point::new(start.x, start.y + 50.0);
+        move_to(&mut graph, to);
+        release(&mut graph, to);
+        assert_eq!(graph.nodes[2].position.y, before[2].y + 50.0);
+        assert_eq!(graph.nodes[0].position, before[0]);
+        assert_eq!(graph.selection(), vec![2]);
+    }
+
+    #[test]
+    fn dragging_a_box_selects_the_nodes_it_touches() {
+        let mut graph = row();
+        let from = Point::new(20.0, 100.0);
+        press(&mut graph, from);
+        assert!(matches!(graph.interaction, Interaction::Boxing { .. }));
+        // The box reaches into the second node and stops short of the third.
+        let to = Point::new(450.0, 190.0);
+        move_to(&mut graph, to);
+        assert_eq!(sorted(graph.selection()), [0, 1]);
+        release(&mut graph, to);
+        assert!(matches!(graph.interaction, Interaction::Idle));
+        assert_eq!(sorted(graph.selection()), [0, 1]);
+    }
+
+    #[test]
+    fn a_box_drawn_back_up_and_left_selects_too() {
+        let mut graph = row();
+        press(&mut graph, Point::new(1000.0, 120.0));
+        move_to(&mut graph, Point::new(740.0, 190.0));
+        release(&mut graph, Point::new(740.0, 190.0));
+        assert_eq!(graph.selection(), vec![2]);
+    }
+
+    #[test]
+    fn a_box_shrinks_as_the_mouse_moves_back() {
+        let mut graph = row();
+        press(&mut graph, Point::new(20.0, 100.0));
+        move_to(&mut graph, Point::new(450.0, 190.0));
+        move_to(&mut graph, Point::new(150.0, 190.0));
+        assert_eq!(graph.selection(), vec![0]);
+    }
+
+    #[test]
+    fn a_click_on_empty_canvas_clears_the_selection() {
+        let mut graph = row();
+        graph.set_selection(vec![0, 1]);
+        press(&mut graph, Point::new(20.0, 100.0));
+        release(&mut graph, Point::new(20.0, 100.0));
+        assert!(graph.selection().is_empty());
+    }
+
+    #[test]
+    fn a_shift_box_adds_to_the_selection() {
+        let mut graph = row();
+        graph.select(2);
+        hold_shift(&mut graph, true);
+        press(&mut graph, Point::new(20.0, 100.0));
+        move_to(&mut graph, Point::new(150.0, 190.0));
+        release(&mut graph, Point::new(150.0, 190.0));
+        assert_eq!(sorted(graph.selection()), [0, 2]);
+    }
+
+    #[test]
+    fn the_menu_deletes_the_whole_selection() {
+        let mut graph = row();
+        graph.connect(0, Port::Audio, 1, Port::Audio);
+        graph.set_selection(vec![0, 1]);
+        let at = header(&graph, 0);
+        mouse_event(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+            at,
+        );
+        // A right press on a node of the group keeps the group.
+        assert_eq!(sorted(graph.selection()), [0, 1]);
+        let menu = graph.menu.expect("menu open");
+        // Delete is the last entry.
+        let area = menu_bounds(menu);
+        let delete = Point::new(area.x + 10.0, area.y + area.height - 4.0);
+        press(&mut graph, delete);
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, NodeKind::Chorus);
+        assert!(graph.connections.is_empty());
+        assert!(graph.selection().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_node_shifts_the_rest_of_the_selection_down() {
+        let mut graph = row();
+        graph.set_selection(vec![1, 2]);
+        graph.delete_node(0);
+        assert_eq!(sorted(graph.selection()), [0, 1]);
+    }
+
+    #[test]
+    fn a_right_press_on_an_unselected_node_selects_only_it() {
+        let mut graph = row();
+        graph.set_selection(vec![0, 1]);
+        let at = header(&graph, 2);
+        mouse_event(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Right),
+            at,
+        );
+        assert_eq!(graph.selection(), vec![2]);
+    }
+}

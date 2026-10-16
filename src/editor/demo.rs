@@ -61,11 +61,14 @@ pub(super) fn apply_with(
             }
         }
         Some(("save", _)) => graph.start_name_entry(),
-        Some(("select", index)) => {
-            graph.selected = index
-                .parse()
-                .ok()
-                .filter(|&index| index < graph.nodes.len());
+        // A comma list, such as `select:0,2`, selects several nodes.
+        Some(("select", indexes)) => {
+            let nodes = indexes
+                .split(',')
+                .filter_map(|index| index.parse().ok())
+                .filter(|&index| index < graph.nodes.len())
+                .collect();
+            graph.set_selection(nodes);
         }
         _ => {}
     }
@@ -133,6 +136,13 @@ mod tests {
         assert_eq!(graph.selected, Some(1));
         apply_with(&mut graph, None, None, Some("select:99"));
         assert_eq!(graph.selected, None);
+    }
+
+    #[test]
+    fn several_nodes_can_be_selected() {
+        let mut graph = Graph::default();
+        apply_with(&mut graph, None, None, Some("select:0,2"));
+        assert_eq!(graph.selection(), vec![0, 2]);
     }
 
     #[test]
