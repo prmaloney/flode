@@ -47,7 +47,8 @@ Flode is not affiliated with Blender or the Blender Foundation.
 - **Macro.** Four knobs that are host parameters, so your DAW can automate them. Each has a pin
   that can drive any knob in the graph.
 - **Output.** Up to four slots, each its own chain with its own gain, and a master gain. A level
-  meter sits in the corner.
+  meter sits in the corner. The MIDI light beside it flashes when a note reaches the plugin, from
+  the host or from the key strip, so a silent patch can be told from a note that never arrived.
 
 **Wires.** Wires come in three colors. Grey is audio, green is control (envelopes, LFOs, macros and
 controllers driving knobs), and purple is MIDI notes. A wire only joins ports of the same kind.
@@ -158,10 +159,10 @@ built with `assert_process_allocs`, so a debug build panics on an allocation the
 patch that runs all seven effects with allocation forbidden.
 
 Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
-editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`) opens part of the
-interface, `FLODE_PRESET_DIR` points the editor at another preset folder, and `FLODE_NOTE` (a MIDI
-note number) holds that note down in the standalone app, so the viewers have a live signal. They are
-read once, at start. See `src/editor/demo.rs`.
+editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`) opens part
+of the interface or selects a node, `FLODE_PRESET_DIR` points the editor at another preset folder,
+and `FLODE_NOTE` (a MIDI note number) holds that note down from the start, so the viewers have a
+live signal. They are read once, at start. See `src/editor/demo.rs`.
 
 ### Layout
 
