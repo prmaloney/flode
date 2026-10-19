@@ -1,8 +1,11 @@
 //! The graph model and its editing state: nodes, wires, and what the mouse is doing to them.
 
+use crate::dsp::analyzer::{BINS, FLOOR_DB};
 use crate::editor::piano::Piano;
+use crate::engine::POOL;
 use crate::nodes::connection::Connection;
-use crate::nodes::knobs::KnobId;
+use crate::nodes::eq;
+use crate::nodes::knobs::{self, KnobId};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::mix;
 use crate::nodes::output::MAX_SLOTS;
@@ -12,7 +15,7 @@ use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
 use crate::presets::{self, Library, Preset};
 use nih_plug_iced::keyboard::KeyCode;
-use nih_plug_iced::{Point, Vector};
+use nih_plug_iced::{Point, Rectangle, Vector};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -64,6 +67,11 @@ pub(super) enum Interaction {
     MapHandle {
         node: usize,
         end: usize,
+    },
+    /// Dragging one point of an EQ node's graph. `band` is 0 for the lowest.
+    EqPoint {
+        node: usize,
+        band: usize,
     },
 }
 
@@ -126,6 +134,22 @@ pub(super) fn without_unchanged_macros(
         })
         .collect()
 }
+
+/// The box for typing a knob's value, opened by a double click on the knob. The text starts as the
+/// knob's current value, selected, so the first key typed replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KnobEntry {
+    pub(super) node: usize,
+    pub(super) id: KnobId,
+    pub(super) text: String,
+    /// True until the text is edited. A box left alone changes nothing when it closes.
+    pub(super) fresh: bool,
+}
+
+/// The longest number the box takes.
+pub(super) const KNOB_ENTRY_MAX_LEN: usize = 12;
+/// The size of the box, and so how much it covers around the knob.
+pub(super) const KNOB_ENTRY_SIZE: (f32, f32) = (76.0, 22.0);
 
 /// The open preset list: what is saved, and the category whose submenu is open, if one is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +245,11 @@ pub struct Graph {
     pub(super) box_base: Vec<usize>,
     /// True while Shift is held, as the last keyboard event reported it.
     pub(super) shift: bool,
+    /// True while Alt (Option) is held, as the last keyboard event reported it. A click on a knob
+    /// with it held puts the knob back to its default.
+    pub(super) alt: bool,
+    /// The box for typing a knob's value, while one is open.
+    pub(super) knob_entry: Option<KnobEntry>,
     pub(super) menu: Option<ContextMenu>,
     /// The node whose dropdown list is open.
     pub(super) dropdown_menu: Option<(usize, usize)>,
@@ -233,6 +262,9 @@ pub struct Graph {
     pub(super) computer_keys: bool,
     /// How lit the MIDI indicator is, from 0.0 to 1.0. It jumps up when a note arrives and fades.
     pub(super) midi_light: f32,
+    /// What each EQ instance of the audio thread last measured, by pool number. The view copies
+    /// it in each frame.
+    pub(super) spectra: [[f32; BINS]; POOL],
     /// True while the cursor is inside the editor. Hover highlights use it, so one does not stay
     /// lit after the cursor leaves.
     pub(super) cursor_in: bool,
@@ -369,6 +401,7 @@ impl Graph {
             computer_keys: true,
             cursor_in: false,
             midi_light: 0.0,
+            spectra: [[FLOOR_DB; BINS]; POOL],
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
@@ -379,6 +412,8 @@ impl Graph {
             preset_category: String::new(),
             preset_list: None,
             name_entry: None,
+            knob_entry: None,
+            alt: false,
             pending_save: None,
             status: None,
         }
@@ -400,6 +435,66 @@ impl Graph {
             library,
             open: None,
         });
+    }
+
+    /// Flips a map's Bipolar switch. The values the new form shows are worked out from the old
+    /// ones, so the signal does not change. The knobs that go off show take their wires with them,
+    /// since a pin that is not there has nothing to end on.
+    pub(super) fn toggle_map_polarity(&mut self, node: usize) {
+        let on = !crate::nodes::map::bipolar(&self.nodes[node]);
+        let Some(left) = crate::nodes::map::set_bipolar(&mut self.nodes[node], on) else {
+            return;
+        };
+        self.connections
+            .retain(|c| !(c.to == node && left.iter().any(|&id| c.input == Port::Knob(id))));
+        self.refresh_slots();
+    }
+
+    /// Opens the box for typing knob `id` of `node`, with its value in the box and selected.
+    pub(super) fn open_knob_entry(&mut self, node: usize, id: KnobId) {
+        self.knob_entry = Some(KnobEntry {
+            node,
+            id,
+            text: self.nodes[node].knob_entry_text(id),
+            fresh: true,
+        });
+    }
+
+    /// Where the box for typing a knob's value sits, in editor coordinates: centered on the knob.
+    pub(super) fn knob_entry_bounds(&self) -> Option<Rectangle> {
+        let entry = self.knob_entry.as_ref()?;
+        let slot = self
+            .nodes
+            .get(entry.node)?
+            .knob_slots()
+            .into_iter()
+            .find(|slot| slot.id == entry.id)?;
+        let (width, height) = KNOB_ENTRY_SIZE;
+        Some(Rectangle {
+            x: slot.center.x - width / 2.0,
+            y: slot.center.y - height / 2.0,
+            width,
+            height,
+        })
+    }
+
+    /// Closes the box and sets the knob to the number typed in it. A number that does not read
+    /// leaves the knob as it was. Returns true if the knob changed.
+    pub(super) fn confirm_knob_entry(&mut self) -> bool {
+        let Some(entry) = self.knob_entry.take() else {
+            return false;
+        };
+        let Some(number) = knobs::parse_entry(&entry.text) else {
+            self.say("Type a number");
+            return false;
+        };
+        let (node, id) = (entry.node, entry.id);
+        // A macro knob is a host parameter, so the host hears this as one gesture.
+        self.macro_begin(node, id);
+        self.nodes[node].enter_knob_value(id, number);
+        self.macro_set(node, id);
+        self.macro_end(node, id);
+        true
     }
 
     /// Opens the save box. It starts with the current preset's name and category, so saving again
@@ -667,6 +762,20 @@ impl Graph {
         self.wiring().is_driven(node, id)
     }
 
+    /// The spectrum an EQ node's analyzer shows, or None while the analyzer is off or the node
+    /// plays in no slot. It reads the instance the compiler gave the node.
+    pub(super) fn eq_spectrum(&self, node: usize) -> Option<&[f32; BINS]> {
+        if !eq::analyzer(&self.nodes[node]) {
+            return None;
+        }
+        let (_, pool) = self
+            .wiring()
+            .eq_pools()
+            .into_iter()
+            .find(|(found, _)| *found == node)?;
+        self.spectra.get(usize::from(pool))
+    }
+
     /// The control route that drives a knob, if one does.
     pub fn control_route(&self, node: usize, id: KnobId) -> Option<Route> {
         self.wiring().control_route(node, id)
@@ -780,9 +889,9 @@ impl Graph {
         let behavior = dragged.kind.behavior();
         // Audio nodes splice into audio wires. A node with several audio inputs, such as a mix
         // node, takes the wire on its first one. A node with a control input and output, such as a
-        // map, splices into a wire that drives a knob.
+        // map or a math node, splices into a wire that drives a knob.
         let audio_node = behavior.audio_in() && behavior.audio_out();
-        let control_node = dragged.input_ports().contains(&Port::Shape)
+        let control_node = Self::control_splice_input(dragged).is_some()
             && dragged.output_ports().contains(&Port::Shape);
         if !(audio_node || control_node) {
             return None;
@@ -808,14 +917,29 @@ impl Graph {
         })
     }
 
+    /// The input pin that a control wire spliced into `node` ends on: a map's shape pin, or a math
+    /// node's A. None for a node that takes no control signal this way.
+    fn control_splice_input(node: &FlodeNode) -> Option<Port> {
+        if node.input_ports().contains(&Port::Shape) {
+            Some(Port::Shape)
+        } else if node.kind == NodeKind::Math {
+            Some(Port::Knob(KnobId::MathA))
+        } else {
+            None
+        }
+    }
+
     /// Splices `node` into the connection `link`: the old source feeds the node, and the node
-    /// feeds the old target. Control wires are spliced through the node's shape pins. An audio
-    /// wire goes into the node's first audio input, which is the top one on a node with several,
-    /// such as signal A on a mix.
+    /// feeds the old target. Control wires are spliced through the node's shape pins, or into A on
+    /// a math node. An audio wire goes into the node's first audio input, which is the top one on a
+    /// node with several, such as signal A on a mix.
     pub(super) fn insert_into(&mut self, node: usize, link: usize) {
         let old = self.connections[link];
         let (input, out) = if old.out.is_control_out() {
-            (Port::Shape, Port::Shape)
+            (
+                Self::control_splice_input(&self.nodes[node]).unwrap_or(Port::Shape),
+                Port::Shape,
+            )
         } else {
             let first_audio = self.nodes[node]
                 .input_ports()

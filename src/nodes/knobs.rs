@@ -37,6 +37,15 @@ pub enum KnobId {
     /// The map's input range, the low and high end.
     MapInMin,
     MapInMax,
+    /// A map's offset, from -1 to 1. It pushes the whole curve up or down.
+    MapOffset,
+    /// A map's output swing in its bipolar form: the middle of the swing, from 0 to 1, and how wide
+    /// it is, from -1 to 1. A negative width runs the swing backward, so the map inverts.
+    MapCenter,
+    MapRange,
+    /// The two inputs of a math node, from 0 to 1.
+    MathA,
+    MathB,
     LfoRate,
     LfoSync,
     /// How strongly an oscillator's warp bends its waveform, from 0 to 1.
@@ -86,6 +95,21 @@ pub enum KnobId {
     Center,
     /// A flanger's base delay in milliseconds.
     FlangerDelay,
+    /// An equalizer band's frequency in Hz. Band 1 is the lowest. The graph on the node sets it.
+    EqFreq1,
+    EqFreq2,
+    EqFreq3,
+    EqFreq4,
+    /// An equalizer band's gain in dB. The graph on the node sets it.
+    EqGain1,
+    EqGain2,
+    EqGain3,
+    EqGain4,
+    /// An equalizer band's Q.
+    EqQ1,
+    EqQ2,
+    EqQ3,
+    EqQ4,
     /// The four macro knobs, from 0 to 1. Each one is a host parameter, so the DAW can automate it.
     Macro1,
     Macro2,
@@ -104,7 +128,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 48;
+    pub const COUNT: usize = 65;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -139,6 +163,11 @@ impl KnobId {
         KnobId::MapMax,
         KnobId::MapInMin,
         KnobId::MapInMax,
+        KnobId::MapOffset,
+        KnobId::MapCenter,
+        KnobId::MapRange,
+        KnobId::MathA,
+        KnobId::MathB,
         KnobId::LfoRate,
         KnobId::LfoSync,
         KnobId::WarpAmount,
@@ -164,6 +193,18 @@ impl KnobId {
         KnobId::Feedback,
         KnobId::Center,
         KnobId::FlangerDelay,
+        KnobId::EqFreq1,
+        KnobId::EqFreq2,
+        KnobId::EqFreq3,
+        KnobId::EqFreq4,
+        KnobId::EqGain1,
+        KnobId::EqGain2,
+        KnobId::EqGain3,
+        KnobId::EqGain4,
+        KnobId::EqQ1,
+        KnobId::EqQ2,
+        KnobId::EqQ3,
+        KnobId::EqQ4,
         KnobId::Macro1,
         KnobId::Macro2,
         KnobId::Macro3,
@@ -192,6 +233,11 @@ impl KnobId {
             KnobId::MapMax => "Out max",
             KnobId::MapInMin => "In min",
             KnobId::MapInMax => "In max",
+            KnobId::MapOffset => "Offset",
+            KnobId::MapCenter => "Center",
+            KnobId::MapRange => "Range",
+            KnobId::MathA => "A",
+            KnobId::MathB => "B",
             KnobId::LfoRate => "Rate",
             KnobId::LfoSync => "Sync",
             KnobId::WarpAmount => "Warp",
@@ -217,6 +263,18 @@ impl KnobId {
             KnobId::Feedback => "Feedback",
             KnobId::Center => "Freq",
             KnobId::FlangerDelay => "Delay",
+            KnobId::EqFreq1 => "Freq 1",
+            KnobId::EqFreq2 => "Freq 2",
+            KnobId::EqFreq3 => "Freq 3",
+            KnobId::EqFreq4 => "Freq 4",
+            KnobId::EqGain1 => "Gain 1",
+            KnobId::EqGain2 => "Gain 2",
+            KnobId::EqGain3 => "Gain 3",
+            KnobId::EqGain4 => "Gain 4",
+            KnobId::EqQ1 => "Q 1",
+            KnobId::EqQ2 => "Q 2",
+            KnobId::EqQ3 => "Q 3",
+            KnobId::EqQ4 => "Q 4",
             KnobId::Macro1 => "Macro 1",
             KnobId::Macro2 => "Macro 2",
             KnobId::Macro3 => "Macro 3",
@@ -261,7 +319,14 @@ impl KnobId {
             KnobId::MapMin | KnobId::MapMax | KnobId::MapInMin | KnobId::MapInMax => {
                 FloatRange::Linear { min: 0.0, max: 1.0 }
             }
-            KnobId::WarpAmount => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::MapOffset | KnobId::MapRange => FloatRange::Linear {
+                min: -1.0,
+                max: 1.0,
+            },
+            KnobId::MapCenter => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::WarpAmount | KnobId::MathA | KnobId::MathB => {
+                FloatRange::Linear { min: 0.0, max: 1.0 }
+            }
             KnobId::Coarse => FloatRange::Linear {
                 min: -12.0,
                 max: 12.0,
@@ -336,6 +401,24 @@ impl KnobId {
                 max: 10.0,
                 factor: FloatRange::skew_factor(-1.5),
             },
+            KnobId::EqFreq1 | KnobId::EqFreq2 | KnobId::EqFreq3 | KnobId::EqFreq4 => {
+                FloatRange::Skewed {
+                    min: 20.0,
+                    max: 20000.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                }
+            }
+            KnobId::EqGain1 | KnobId::EqGain2 | KnobId::EqGain3 | KnobId::EqGain4 => {
+                FloatRange::Linear {
+                    min: -18.0,
+                    max: 18.0,
+                }
+            }
+            KnobId::EqQ1 | KnobId::EqQ2 | KnobId::EqQ3 | KnobId::EqQ4 => FloatRange::Skewed {
+                min: 0.1,
+                max: 10.0,
+                factor: FloatRange::skew_factor(-1.0),
+            },
             // Zero is free running. Each step past it is one of the note divisions.
             KnobId::LfoSync => FloatRange::Linear {
                 min: 0.0,
@@ -366,6 +449,11 @@ impl KnobId {
             KnobId::Glide => 0.0,
             KnobId::MapMin | KnobId::MapInMin => 0.0,
             KnobId::MapMax | KnobId::MapInMax => 1.0,
+            KnobId::MapOffset => 0.0,
+            // The full swing, from 0 to 1, as a center and a width.
+            KnobId::MapCenter => 0.5,
+            KnobId::MapRange => 1.0,
+            KnobId::MathA | KnobId::MathB => 0.5,
             KnobId::LfoRate => 1.0,
             KnobId::LfoSync => 0.0,
             KnobId::WarpAmount => 0.0,
@@ -389,6 +477,13 @@ impl KnobId {
             KnobId::Feedback => 0.4,
             KnobId::Center => 1000.0,
             KnobId::FlangerDelay => 2.0,
+            KnobId::EqFreq1 => 100.0,
+            KnobId::EqFreq2 => 500.0,
+            KnobId::EqFreq3 => 2500.0,
+            KnobId::EqFreq4 => 8000.0,
+            KnobId::EqGain1 | KnobId::EqGain2 | KnobId::EqGain3 | KnobId::EqGain4 => 0.0,
+            KnobId::EqQ1 | KnobId::EqQ4 => 0.71,
+            KnobId::EqQ2 | KnobId::EqQ3 => 1.0,
         }
     }
 
@@ -419,6 +514,49 @@ impl KnobId {
         }
     }
 
+    /// How many of the number a person types are one plain unit of this knob. A knob the node
+    /// shows as a percentage of a 0 to 1 value is typed as that percentage, so 75 means 0.75.
+    fn entry_scale(self) -> f32 {
+        match self {
+            KnobId::MapMin
+            | KnobId::MapMax
+            | KnobId::MapInMin
+            | KnobId::MapInMax
+            | KnobId::MapOffset
+            | KnobId::MapCenter
+            | KnobId::MapRange
+            | KnobId::MathA
+            | KnobId::MathB
+            | KnobId::WarpAmount
+            | KnobId::Mix
+            | KnobId::Pan
+            | KnobId::Spread
+            | KnobId::Drive
+            | KnobId::Tone
+            | KnobId::Depth
+            | KnobId::Size
+            | KnobId::Damp
+            | KnobId::Feedback
+            | KnobId::Macro1
+            | KnobId::Macro2
+            | KnobId::Macro3
+            | KnobId::Macro4 => 100.0,
+            _ => 1.0,
+        }
+    }
+
+    /// The number to show in a box for typing over a knob's value, in the units the node shows,
+    /// without the unit's name.
+    pub fn to_entry(self, normalized: f32) -> f32 {
+        self.to_plain(normalized) * self.entry_scale()
+    }
+
+    /// The normalized value for a number typed in those units. It stops at the ends of the
+    /// knob's range.
+    pub fn from_entry(self, number: f32) -> f32 {
+        self.snap(self.to_normalized(number / self.entry_scale()))
+    }
+
     /// The value as the node shows it, with its unit.
     pub fn format(self, normalized: f32) -> String {
         let plain = self.to_plain(normalized);
@@ -444,7 +582,11 @@ impl KnobId {
             KnobId::MapMin | KnobId::MapMax | KnobId::MapInMin | KnobId::MapInMax => {
                 format!("{:.0}%", plain * 100.0)
             }
-            KnobId::WarpAmount => format!("{:.0}%", plain * 100.0),
+            KnobId::WarpAmount | KnobId::MathA | KnobId::MathB => {
+                format!("{:.0}%", plain * 100.0)
+            }
+            KnobId::MapOffset => format!("{:+.0}%", plain * 100.0),
+            KnobId::MapCenter | KnobId::MapRange => format!("{:.0}%", plain * 100.0),
             KnobId::Coarse => format!("{:+} st", plain.round() as i32),
             KnobId::Fine => format!("{plain:+.0} ct"),
             KnobId::Octave => format!("{:+} oct", plain.round() as i32),
@@ -467,6 +609,13 @@ impl KnobId {
             KnobId::FlangerDelay => format!("{plain:.2} ms"),
             KnobId::ReverbDecay => format!("{plain:.2} s"),
             KnobId::Center => format!("{plain:.0} Hz"),
+            KnobId::EqFreq1 | KnobId::EqFreq2 | KnobId::EqFreq3 | KnobId::EqFreq4 => {
+                format!("{plain:.0} Hz")
+            }
+            KnobId::EqGain1 | KnobId::EqGain2 | KnobId::EqGain3 | KnobId::EqGain4 => {
+                format!("{plain:+.1} dB")
+            }
+            KnobId::EqQ1 | KnobId::EqQ2 | KnobId::EqQ3 | KnobId::EqQ4 => format!("{plain:.2}"),
             KnobId::Pan => match (plain * 100.0).round() as i32 {
                 0 => "C".to_string(),
                 side if side < 0 => format!("L {}", -side),
@@ -481,6 +630,42 @@ impl KnobId {
             },
         }
     }
+}
+
+/// A number as the entry box shows it, with trailing zeros dropped. Large numbers get fewer
+/// decimals, so the noise left by a trip through a skewed range does not show: a cutoff of 8000
+/// reads "8000" and not "8000.001".
+pub fn entry_text(number: f32) -> String {
+    let decimals = match number.abs() {
+        n if n >= 1000.0 => 0,
+        n if n >= 100.0 => 1,
+        n if n >= 10.0 => 2,
+        _ => 3,
+    };
+    let text = format!("{number:.decimals$}");
+    // Zeros only come off after a decimal point, or 8000 would read as 8.
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text.as_str()
+    };
+    if text.is_empty() || text == "-" || text == "-0" {
+        "0".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// The number a person typed in the entry box. "inf" and "-inf" are the ends of a knob that runs
+/// to silence, and anything else must be an ordinary finite number.
+pub fn parse_entry(text: &str) -> Option<f32> {
+    let text = text.trim();
+    match text.to_ascii_lowercase().as_str() {
+        "inf" | "+inf" => return Some(f32::INFINITY),
+        "-inf" => return Some(f32::NEG_INFINITY),
+        _ => {}
+    }
+    text.parse::<f32>().ok().filter(|n| n.is_finite())
 }
 
 #[cfg(test)]
@@ -558,5 +743,87 @@ mod pan_tests {
         assert_eq!(KnobId::Pan.format(0.0), "L 100");
         assert_eq!(KnobId::Pan.format(1.0), "R 100");
         assert_eq!(KnobId::Pan.format(KnobId::Pan.to_normalized(-0.25)), "L 25");
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+
+    /// A typed number is in the units the node shows, so every knob's own display value reads
+    /// back as the same value.
+    #[test]
+    fn every_knob_reads_back_what_it_shows() {
+        for id in KnobId::ALL {
+            let normalized = id.default_normalized();
+            let number = id.to_entry(normalized);
+            let back = id.from_entry(number);
+            assert!(
+                (back - normalized).abs() < 1e-4,
+                "{id:?}: {normalized} -> {number} -> {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_knobs_are_typed_as_percent() {
+        assert_eq!(KnobId::Mix.from_entry(75.0), 0.75);
+        assert_eq!(KnobId::Mix.to_entry(0.5), 50.0);
+        assert!((KnobId::Pan.from_entry(-25.0) - KnobId::Pan.to_normalized(-0.25)).abs() < 1e-6);
+        assert_eq!(KnobId::Macro1.from_entry(100.0), 1.0);
+    }
+
+    /// Units are the ones on the label: Hz, dB, seconds, milliseconds.
+    #[test]
+    fn other_knobs_are_typed_in_their_own_units() {
+        assert!((KnobId::Cutoff.to_plain(KnobId::Cutoff.from_entry(440.0)) - 440.0).abs() < 0.1);
+        assert!(
+            (KnobId::Threshold.to_plain(KnobId::Threshold.from_entry(-24.0)) + 24.0).abs() < 1e-3
+        );
+        assert!(
+            (KnobId::CompAttack.to_plain(KnobId::CompAttack.from_entry(5.0)) - 5.0).abs() < 1e-3
+        );
+        assert!((KnobId::Attack.to_plain(KnobId::Attack.from_entry(0.25)) - 0.25).abs() < 1e-4);
+    }
+
+    /// A number past the ends stops at them, and a stepped knob lands on a step.
+    #[test]
+    fn typed_numbers_stop_at_the_ends_and_snap() {
+        assert_eq!(KnobId::Cutoff.from_entry(1.0e9), 1.0);
+        assert_eq!(KnobId::Cutoff.from_entry(-5.0), 0.0);
+        assert_eq!(KnobId::Mix.from_entry(250.0), 1.0);
+        let unison = KnobId::Unison.from_entry(3.4);
+        assert_eq!(KnobId::Unison.to_plain(unison), 3.0);
+        assert_eq!(KnobId::Gain.from_entry(f32::NEG_INFINITY), 0.0);
+    }
+
+    #[test]
+    fn entry_text_is_short() {
+        assert_eq!(entry_text(8000.0), "8000");
+        assert_eq!(entry_text(8000.001), "8000");
+        assert_eq!(entry_text(440.04), "440");
+        assert_eq!(entry_text(440.5), "440.5");
+        assert_eq!(entry_text(12.345), "12.35");
+        assert_eq!(entry_text(0.5), "0.5");
+        assert_eq!(entry_text(-12.25), "-12.25");
+        assert_eq!(entry_text(0.001), "0.001");
+        assert_eq!(entry_text(0.0), "0");
+        assert_eq!(entry_text(8000.0), "8000");
+        assert_eq!(entry_text(20000.0), "20000");
+        assert_eq!(entry_text(100.0), "100");
+        assert_eq!(entry_text(-1000.0), "-1000");
+        assert_eq!(entry_text(-0.0001), "0");
+    }
+
+    #[test]
+    fn typed_text_parses_or_is_refused() {
+        assert_eq!(parse_entry("440"), Some(440.0));
+        assert_eq!(parse_entry(" -3.5 "), Some(-3.5));
+        assert_eq!(parse_entry("+2"), Some(2.0));
+        assert_eq!(parse_entry("-inf"), Some(f32::NEG_INFINITY));
+        assert_eq!(parse_entry("INF"), Some(f32::INFINITY));
+        for bad in ["", "-", ".", "1.2.3", "abc", "nan", "1e999"] {
+            assert_eq!(parse_entry(bad), None, "{bad:?}");
+        }
     }
 }

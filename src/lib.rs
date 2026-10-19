@@ -245,6 +245,7 @@ impl Plugin for Flode {
             active_notes: self.engine.active_notes(),
             output: self.engine.take_output_peak(),
             notes_in: self.notes_in,
+            spectra: self.engine.spectra(),
         });
 
         ProcessStatus::KeepAlive

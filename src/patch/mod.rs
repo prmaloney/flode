@@ -10,7 +10,7 @@ pub mod wiring;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::MAX_SLOTS;
-use control::{Param, MAX_ENVELOPES, MAX_LFOS};
+use control::{Param, SignalTable, MAX_ENVELOPES, MAX_LFOS};
 use stage::LaneGraph;
 
 /// An envelope node's settings. Each voice's copy of the envelope is set up from these once per
@@ -103,6 +103,8 @@ pub struct Patch {
     /// The LFO nodes in graph order, or None past the last one.
     pub lfos: [Option<LfoSettings>; MAX_LFOS],
     pub globals: Globals,
+    /// The map and math nodes, in the order to run them. A route can read any of them as a source.
+    pub signals: SignalTable,
 }
 
 impl Clone for Patch {
@@ -112,6 +114,7 @@ impl Clone for Patch {
             envelopes: self.envelopes,
             lfos: self.lfos,
             globals: self.globals,
+            signals: self.signals,
         }
     }
 
@@ -125,6 +128,7 @@ impl Clone for Patch {
         self.envelopes = source.envelopes;
         self.lfos = source.lfos;
         self.globals = source.globals;
+        self.signals = source.signals;
     }
 }
 
@@ -138,6 +142,7 @@ impl Patch {
             envelopes: [None; MAX_ENVELOPES],
             lfos: [None; MAX_LFOS],
             globals: Globals::default(),
+            signals: SignalTable::EMPTY,
         }
     }
 

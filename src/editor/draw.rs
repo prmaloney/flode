@@ -1,13 +1,15 @@
 //! Everything the editor paints: wires, nodes, knobs, dropdowns, the pill, and the lists.
 
+use crate::dsp::analyzer::{BINS, FLOOR_DB};
 use crate::editor::knob::{self};
 use crate::editor::piano::{self};
+use crate::nodes::eq;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::map;
 use crate::nodes::viewer::Live;
 use crate::nodes::{
     Category, FlodeNode, NodeKind, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT,
-    NODE_WIDTH, ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
+    ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
 };
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text};
@@ -45,13 +47,13 @@ pub(super) fn draw_editor(
             overlays.push(Rectangle {
                 x: node.position.x,
                 y: list.y,
-                width: NODE_WIDTH,
+                width: node.width(),
                 height: list.height,
             });
         }
     }
     if let Some(menu) = graph.menu {
-        overlays.push(menu_bounds(menu));
+        overlays.push(view.rect_to_world(menu_bounds(menu)));
     }
     if let Some(category) = graph.category_menu {
         overlays.push(view.rect_to_world(category_list_bounds(bounds, category)));
@@ -64,6 +66,10 @@ pub(super) fn draw_editor(
     }
     if let Some(entry) = &graph.name_entry {
         overlays.push(view.rect_to_world(name_box_bounds(bounds, &entry.categories)));
+    }
+    // The number box covers the label text of the node it sits on, which is in editor coordinates.
+    if let Some(rect) = graph.knob_entry_bounds() {
+        overlays.push(rect);
     }
 
     // The nodes and wires are drawn in editor coordinates, then the view scales and moves them.
@@ -124,6 +130,10 @@ pub(super) fn draw_editor(
 
         for index in graph.selection() {
             draw_selection(frame, &graph.nodes[index]);
+        }
+
+        if let (Some(entry), Some(rect)) = (&graph.knob_entry, graph.knob_entry_bounds()) {
+            draw_knob_entry(frame, entry, rect, view.zoom);
         }
 
         if let Interaction::AutoLinking {
@@ -228,20 +238,20 @@ pub(super) fn draw_editor(
                 );
             }
         }
-
-        if let Some(menu) = graph.menu {
-            if let Some(node) = graph.nodes.get(menu.node) {
-                // The menu is in editor coordinates, so the cursor is too.
-                let hovered_row = if graph.cursor_in {
-                    menu_item_at(menu, view.to_world(graph.last_screen))
-                        .and_then(|item| menu.items.iter().position(|&i| i == item))
-                } else {
-                    None
-                };
-                draw_menu(frame, menu, node, hovered_row, view.zoom);
-            }
-        }
     });
+
+    // The right-click menu is in screen coordinates, so it keeps one size at any zoom.
+    if let Some(menu) = graph.menu {
+        if let Some(node) = graph.nodes.get(menu.node) {
+            let hovered_row = if graph.cursor_in {
+                menu_item_at(menu, graph.last_screen)
+                    .and_then(|item| menu.items.iter().position(|&i| i == item))
+            } else {
+                None
+            };
+            draw_menu(&mut frame, menu, node, hovered_row);
+        }
+    }
 
     if let Some(category) = graph.category_menu {
         draw_category_list(&mut frame, bounds, category, graph);
@@ -427,7 +437,7 @@ pub(super) fn draw_node(
         let place = places[row_index];
         let y = node.position.y + place.y;
         let left = node.position.x;
-        let right = node.position.x + NODE_WIDTH;
+        let right = node.position.x + node.width();
 
         match place.shape {
             RowShape::Hidden => continue,
@@ -567,6 +577,10 @@ pub(super) fn draw_node(
         draw_viewer(frame, index, graph, levels);
     }
 
+    if node.eq_bounds().is_some() {
+        draw_eq(frame, index, graph, levels, covered, zoom);
+    }
+
     for slot in node.knob_slots() {
         let route = if slot.pinned {
             graph.control_route(index, slot.id)
@@ -603,7 +617,7 @@ pub(super) fn draw_section_header(
     let band = Rectangle {
         x: left + 6.0,
         y: y - SECTION_HEIGHT / 2.0 + 2.0,
-        width: NODE_WIDTH - 12.0,
+        width: node.width() - 12.0,
         height: SECTION_HEIGHT - 4.0,
     };
     frame.fill(&rounded_rect(band, DROPDOWN_CORNER_RADIUS), SECTION_COLOR);
@@ -748,7 +762,27 @@ pub(super) fn draw_map_curve(
         DROPDOWN_COLOR,
     );
 
-    let stage = map::stage(node);
+    // The curve reads the live values, so a value a wire drives moves it and its handle.
+    let live = live_knobs(graph, index, &levels);
+    let stage = map::live_stage(node, &live);
+    // A bipolar map is a center and a range, so a faint line marks the center of the swing.
+    if map::bipolar(node) {
+        let (low, high) = map::output_ends(node, &live);
+        let center = ((low + high) / 2.0 + map::offset(node, &live)).clamp(0.0, 1.0);
+        let y = bounds.y + (1.0 - center) * bounds.height;
+        frame.stroke(
+            &Path::line(
+                Point::new(bounds.x, y),
+                Point::new(bounds.x + bounds.width, y),
+            ),
+            Stroke::default()
+                .with_color(Color {
+                    a: 0.2,
+                    ..TEXT_COLOR
+                })
+                .with_width(1.0),
+        );
+    }
     let line = Path::new(|builder| {
         for i in 0..=CURVE_SAMPLES {
             let x = i as f32 / CURVE_SAMPLES as f32;
@@ -772,7 +806,7 @@ pub(super) fn draw_map_curve(
             .with_line_cap(LineCap::Round),
     );
 
-    for handle in map_handles(node) {
+    for handle in map_handles(node, &live) {
         frame.fill(&Path::circle(handle, 4.0), TEXT_COLOR);
     }
 
@@ -928,6 +962,240 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
         );
         frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
     }
+}
+
+/// The cubic Bézier segments of a smooth curve through `points`, as (first control, second control,
+/// end) for each step after the first point. It is a Catmull-Rom spline, so the curve passes
+/// through every point with no kink. A control point stays between `top` and `bottom`, so a sharp
+/// peak does not swing the curve out of the box.
+pub(super) fn smooth_segments(
+    points: &[Point],
+    top: f32,
+    bottom: f32,
+) -> Vec<(Point, Point, Point)> {
+    let at = |i: isize| points[i.clamp(0, points.len() as isize - 1) as usize];
+    let keep = |p: Point| Point::new(p.x, p.y.clamp(top, bottom));
+    (0..points.len().saturating_sub(1) as isize)
+        .map(|i| {
+            let (before, start, end, after) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+            let c1 = Point::new(
+                start.x + (end.x - before.x) / 6.0,
+                start.y + (end.y - before.y) / 6.0,
+            );
+            let c2 = Point::new(
+                end.x - (after.x - start.x) / 6.0,
+                end.y - (after.y - start.y) / 6.0,
+            );
+            (keep(c1), keep(c2), end)
+        })
+        .collect()
+}
+
+/// The EQ node's graph: a grid, the combined response of the four bands, and a numbered point for
+/// each band. The numbers match the Q knobs. Each band's toggle is drawn beside its Q knob.
+pub(super) fn draw_eq(
+    frame: &mut Frame,
+    index: usize,
+    graph: &Graph,
+    levels: ControlLevels,
+    covered: &[Rectangle],
+    zoom: f32,
+) {
+    let node = &graph.nodes[index];
+    let live = live_knobs(graph, index, &levels);
+    let (Some(bounds), Some(handles)) = (node.eq_bounds(), eq_handles(node, &live)) else {
+        return;
+    };
+    frame.fill(
+        &rounded_rect(bounds, DROPDOWN_CORNER_RADIUS),
+        DROPDOWN_COLOR,
+    );
+
+    let faint = |alpha: f32| {
+        Stroke::default()
+            .with_color(Color {
+                a: alpha,
+                ..TEXT_COLOR
+            })
+            .with_width(1.0)
+    };
+    // Lines at each decade of frequency, and a brighter one at 0 dB.
+    for freq in [100.0, 1000.0, 10000.0] {
+        let x = bounds.x + eq::position_of(freq) * bounds.width;
+        frame.stroke(
+            &Path::line(
+                Point::new(x, bounds.y),
+                Point::new(x, bounds.y + bounds.height),
+            ),
+            faint(0.08),
+        );
+    }
+    let mid = bounds.y + bounds.height / 2.0;
+    frame.stroke(
+        &Path::line(
+            Point::new(bounds.x, mid),
+            Point::new(bounds.x + bounds.width, mid),
+        ),
+        faint(0.2),
+    );
+
+    // The analyzer's spectrum sits behind the curve, as a filled shape on the same axes. Each band
+    // is one point, at its middle on the log axis, and its level maps from the floor to 0 dB.
+    if let Some(bins) = graph.eq_spectrum(index) {
+        let at = |i: usize, db: f32| {
+            let x = (i as f32 + 0.5) / BINS as f32;
+            let y = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
+            Point::new(
+                bounds.x + x * bounds.width,
+                bounds.y + (1.0 - y) * bounds.height,
+            )
+        };
+        let bottom = bounds.y + bounds.height;
+        let points: Vec<Point> = bins.iter().enumerate().map(|(i, db)| at(i, *db)).collect();
+        let area = Path::new(|builder| {
+            builder.move_to(Point::new(points[0].x, bottom));
+            builder.line_to(points[0]);
+            // A smooth curve through the points, so the bands do not read as straight facets.
+            for (c1, c2, end) in smooth_segments(&points, bounds.y, bottom) {
+                builder.bezier_curve_to(c1, c2, end);
+            }
+            builder.line_to(Point::new(points[BINS - 1].x, bottom));
+            builder.close();
+        });
+        frame.fill(&area, ANALYZER_COLOR);
+    }
+
+    // The response reads Q through the live values, so a wire that drives a Q moves the curve.
+    let params = eq::params(node, &live);
+    let samples = bounds.width as usize;
+    let curve = Path::new(|builder| {
+        for i in 0..=samples {
+            let x = i as f32 / samples as f32;
+            let db = crate::dsp::effects::eq::response_db(
+                &params,
+                eq::frequency_at(x),
+                eq::VIEW_SAMPLE_RATE,
+            );
+            let point = Point::new(
+                bounds.x + x * bounds.width,
+                bounds.y + (1.0 - eq::height_of(db)) * bounds.height,
+            );
+            if i == 0 {
+                builder.move_to(point);
+            } else {
+                builder.line_to(point);
+            }
+        }
+    });
+    frame.stroke(
+        &curve,
+        Stroke::default()
+            .with_color(TEXT_COLOR)
+            .with_width(1.5)
+            .with_line_cap(LineCap::Round),
+    );
+
+    for (band, handle) in handles.iter().enumerate() {
+        let held = graph.interaction == Interaction::EqPoint { node: index, band };
+        frame.fill(
+            &Path::circle(*handle, if held { 5.5 } else { 4.5 }),
+            TEXT_COLOR,
+        );
+        draw_text(
+            frame,
+            covered,
+            zoom,
+            Text {
+                content: (band + 1).to_string(),
+                position: Point::new(handle.x, (handle.y - 11.0).max(bounds.y + 6.0)),
+                color: DIM_TEXT_COLOR,
+                size: 10.0,
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            },
+        );
+    }
+
+    // Each toggle is a button with a small picture of what its band does now.
+    for (band, toggle) in node.eq_toggles() {
+        frame.fill(
+            &rounded_rect(toggle, DROPDOWN_CORNER_RADIUS),
+            DROPDOWN_COLOR,
+        );
+        let art = Rectangle {
+            x: toggle.x + 7.0,
+            y: toggle.y + 5.0,
+            width: toggle.width - 14.0,
+            height: toggle.height - 10.0,
+        };
+        let icon = Path::new(|builder| {
+            for (i, (x, y)) in eq::toggle_icon(node, band).into_iter().enumerate() {
+                let point = Point::new(art.x + x * art.width, art.y + y * art.height);
+                if i == 0 {
+                    builder.move_to(point);
+                } else {
+                    builder.line_to(point);
+                }
+            }
+        });
+        frame.stroke(
+            &icon,
+            Stroke::default()
+                .with_color(TEXT_COLOR)
+                .with_width(1.5)
+                .with_line_cap(LineCap::Round),
+        );
+    }
+}
+
+/// The box for typing a knob's value: the text with a caret, over the knob. The text is on a
+/// lighter ground while it is still selected, so it reads as the thing the next key replaces.
+pub(super) fn draw_knob_entry(frame: &mut Frame, entry: &KnobEntry, rect: Rectangle, zoom: f32) {
+    draw_shadow(frame, rect, DROPDOWN_CORNER_RADIUS, FLOAT_SHADOW);
+    frame.fill(&rounded_rect(rect, DROPDOWN_CORNER_RADIUS), DROPDOWN_COLOR);
+    frame.stroke(
+        &rounded_rect(rect, DROPDOWN_CORNER_RADIUS),
+        Stroke::default()
+            .with_color(SELECTION_COLOR)
+            .with_width(1.0),
+    );
+    let content = if entry.fresh {
+        entry.text.clone()
+    } else {
+        format!("{}|", entry.text)
+    };
+    if entry.fresh {
+        // A selection band behind the text.
+        let width = (entry.text.chars().count() as f32 * 7.0 + 8.0).min(rect.width - 8.0);
+        let band = Rectangle {
+            x: rect.x + (rect.width - width) / 2.0,
+            y: rect.y + 3.0,
+            width,
+            height: rect.height - 6.0,
+        };
+        frame.fill(
+            &rounded_rect(band, 3.0),
+            Color {
+                a: 0.45,
+                ..SELECTION_COLOR
+            },
+        );
+    }
+    draw_text(
+        frame,
+        &[],
+        zoom,
+        Text {
+            content,
+            position: Point::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+            color: TEXT_COLOR,
+            size: 13.0,
+            horizontal_alignment: alignment::Horizontal::Center,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        },
+    );
 }
 
 /// A switch: a box with a check when on, and its label. The output's "Always" is dimmed while
@@ -1618,7 +1886,6 @@ pub(super) fn draw_menu(
     menu: ContextMenu,
     node: &FlodeNode,
     hovered_row: Option<usize>,
-    zoom: f32,
 ) {
     let bounds = menu_bounds(menu);
     draw_shadow(frame, bounds, MENU_CORNER_RADIUS, FLOAT_SHADOW);
@@ -1634,7 +1901,7 @@ pub(super) fn draw_menu(
                 bounds.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
             ),
             color: TEXT_COLOR,
-            size: 14.0 * zoom,
+            size: 14.0,
             vertical_alignment: alignment::Vertical::Center,
             ..Text::default()
         });

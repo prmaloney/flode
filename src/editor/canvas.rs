@@ -3,6 +3,7 @@
 
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
+use crate::nodes::eq;
 use crate::nodes::{NodeKind, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{
@@ -78,7 +79,7 @@ impl<'a> NodeEditor<'a> {
         // An open menu takes the press. Its entry acts on the node. A press anywhere else closes
         // the menu and then goes through as usual.
         if let Some(menu) = self.graph.menu.take() {
-            if let Some(item) = menu_item_at(menu, point) {
+            if let Some(item) = menu_item_at(menu, screen) {
                 match item {
                     MenuItem::Duplicate => {
                         self.duplicate_and_place(menu.node, point);
@@ -101,6 +102,18 @@ impl<'a> NodeEditor<'a> {
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
+
+        // A press anywhere closes the number box. It keeps what was typed, if anything was, and
+        // then the press goes on as usual.
+        if self
+            .graph
+            .knob_entry
+            .as_ref()
+            .is_some_and(|entry| !entry.fresh)
+        {
+            self.graph.confirm_knob_entry();
+        }
+        self.graph.knob_entry = None;
 
         // The save box takes every press. A chip picks its category, and one outside the box
         // cancels it.
@@ -213,17 +226,40 @@ impl<'a> NodeEditor<'a> {
                 self.graph.dropdown_menu = None;
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
-            if let Some(end) = map_handle_at(node, point) {
+            let live = live_knobs(self.graph, index, &self.levels);
+            if let Some(end) = map_handle_at(&self.graph.nodes[index], &live, point) {
                 self.graph.select(index);
                 self.graph.interaction = Interaction::MapHandle { node: index, end };
                 let node = &mut self.graph.nodes[index];
                 let current = node.value(MAP_IN[end]);
                 let state = &mut node.knob_states[MAP_IN[end] as usize];
                 if let Press::Reset = knob::press(state, current, screen) {
-                    for id in MAP_IN.into_iter().chain(MAP_OUT) {
+                    for id in MAP_IN.into_iter().chain(MAP_OUT).chain(MAP_CENTER_RANGE) {
                         node.reset_value(id);
                     }
                 }
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            if let Some(band) = eq_handle_at(&self.graph.nodes[index], &live, point) {
+                self.graph.select(index);
+                self.graph.interaction = Interaction::EqPoint { node: index, band };
+                let node = &mut self.graph.nodes[index];
+                let current = node.value(eq::FREQ[band]);
+                let state = &mut node.knob_states[eq::FREQ[band] as usize];
+                if let Press::Reset = knob::press(state, current, screen) {
+                    // A double click puts the band back where a new node has it.
+                    for id in [eq::FREQ[band], eq::GAIN[band], eq::Q[band]] {
+                        node.reset_value(id);
+                    }
+                    self.graph.interaction = Interaction::Idle;
+                }
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            if let Some(band) = node.eq_toggle_at(point) {
+                self.graph.select(index);
+                let node = &mut self.graph.nodes[index];
+                let on = !node.switch(eq::band_switch(band));
+                node.set_switch(eq::band_switch(band), on);
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
             for slot in node.knob_slots() {
@@ -235,11 +271,18 @@ impl<'a> NodeEditor<'a> {
                         node: index,
                         id: slot.id,
                     };
+                    // Alt+click puts the knob back to its default, and the drag starts from there.
+                    let reset = self.graph.alt;
                     let node = &mut self.graph.nodes[index];
+                    if reset {
+                        node.reset_value(slot.id);
+                    }
                     let current = node.value(slot.id);
                     let state = &mut node.knob_states[slot.id as usize];
-                    if let Press::Reset = knob::press(state, current, screen) {
-                        node.reset_value(slot.id);
+                    // A double click opens a box to type the value.
+                    let typed = matches!(knob::press(state, current, screen), Press::Reset);
+                    if typed {
+                        self.graph.open_knob_entry(index, slot.id);
                     }
                     // A macro knob is a host parameter, so the host hears the whole gesture.
                     self.graph.macro_begin(index, slot.id);
@@ -265,6 +308,12 @@ impl<'a> NodeEditor<'a> {
                 let hit = (0..labels.len()).find(|&i| node.switch_bounds(i).contains(point));
                 if let (Some(hit), false) = (hit, node.collapsed) {
                     self.graph.select(index);
+                    // A map's Bipolar switch swaps two of its knobs, so it converts their values
+                    // and drops the wires of the pair that leaves.
+                    if self.graph.nodes[index].kind == NodeKind::Map && hit == 0 {
+                        self.graph.toggle_map_polarity(index);
+                        return (event::Status::Captured, Some(Message::GraphChanged));
+                    }
                     let node = &mut self.graph.nodes[index];
                     let on = !node.switch(hit);
                     node.set_switch(hit, on);
@@ -381,7 +430,7 @@ impl<'a> NodeEditor<'a> {
             }
         }
         if let Some(menu) = self.graph.menu {
-            if menu_bounds(menu).contains(point) {
+            if menu_bounds(menu).contains(screen) {
                 return true;
             }
         }
@@ -414,6 +463,66 @@ impl<'a> NodeEditor<'a> {
         let changed = open != menu.open;
         menu.open = open;
         changed
+    }
+
+    /// Handles a key event while the number box is open. It takes digits, a sign, a point, and
+    /// "inf" for the silent end of a gain, and the box takes every key, so the piano and the
+    /// shortcuts stay quiet. Enter sets the knob, and Escape closes the box. A key already held
+    /// when the box opened still gets its release, so no note sticks.
+    pub(super) fn knob_entry_event(
+        &mut self,
+        event: &keyboard::Event,
+    ) -> (event::Status, Option<Message>) {
+        match event {
+            keyboard::Event::CharacterReceived(c) => {
+                if let Some(entry) = self.graph.knob_entry.as_mut() {
+                    if "0123456789.+-infINF".contains(*c) {
+                        // The first key replaces the selected value.
+                        if entry.fresh {
+                            entry.text.clear();
+                            entry.fresh = false;
+                        }
+                        if entry.text.chars().count() < KNOB_ENTRY_MAX_LEN {
+                            entry.text.push(*c);
+                        }
+                    }
+                }
+                (event::Status::Captured, Some(Message::Hovered))
+            }
+            keyboard::Event::KeyPressed { key_code, .. } => match key_code {
+                keyboard::KeyCode::Backspace => {
+                    if let Some(entry) = self.graph.knob_entry.as_mut() {
+                        if entry.fresh {
+                            entry.text.clear();
+                            entry.fresh = false;
+                        } else {
+                            entry.text.pop();
+                        }
+                    }
+                    (event::Status::Captured, Some(Message::Hovered))
+                }
+                keyboard::KeyCode::Escape => {
+                    self.graph.knob_entry = None;
+                    (event::Status::Captured, Some(Message::Hovered))
+                }
+                keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
+                    let changed = self.graph.confirm_knob_entry();
+                    let message = if changed {
+                        Message::GraphChanged
+                    } else {
+                        Message::Hovered
+                    };
+                    (event::Status::Captured, Some(message))
+                }
+                _ => (event::Status::Captured, Some(Message::Hovered)),
+            },
+            keyboard::Event::KeyReleased { .. } => {
+                let note = self.graph.piano.handle(event.clone());
+                let note = note.filter(|_| self.graph.computer_keys);
+                (event::Status::Captured, note.map(Message::Note))
+            }
+            _ => (event::Status::Ignored, None),
+        }
     }
 
     /// Handles a key event while the save box is open. The box takes every key, so the piano and
@@ -503,7 +612,11 @@ impl<'a> NodeEditor<'a> {
 
     /// Right press: selects the node under the cursor and opens its menu. A right press
     /// anywhere else only closes the menus.
-    pub(super) fn secondary_press(&mut self, point: Point) -> (event::Status, Option<Message>) {
+    pub(super) fn secondary_press(
+        &mut self,
+        point: Point,
+        screen: Point,
+    ) -> (event::Status, Option<Message>) {
         self.graph.menu = None;
         self.graph.dropdown_menu = None;
         // Shift and right drag from a node wires it to the node the drag ends on.
@@ -530,7 +643,7 @@ impl<'a> NodeEditor<'a> {
             };
             self.graph.menu = Some(ContextMenu {
                 node: index,
-                position: point,
+                position: screen,
                 items,
             });
         }
@@ -579,6 +692,10 @@ impl<'a> NodeEditor<'a> {
             }
             Interaction::MapHandle { node, end } => {
                 knob::release(&mut self.graph.nodes[node].knob_states[MAP_IN[end] as usize]);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::EqPoint { node, band } => {
+                knob::release(&mut self.graph.nodes[node].knob_states[eq::FREQ[band] as usize]);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::MovingNode { node, .. } => {
@@ -641,13 +758,31 @@ impl<'a> NodeEditor<'a> {
             }
             Interaction::MapHandle { node, end } => {
                 // The handle follows the cursor over the curve box. Its x is the input, and its y
-                // is the output, so both ends move together.
-                let bounds = self.graph.nodes[node].curve_bounds();
-                let x = ((point.x - bounds.x) / bounds.width).clamp(0.0, 1.0);
-                let y = (1.0 - (point.y - bounds.y) / bounds.height).clamp(0.0, 1.0);
-                let node = &mut self.graph.nodes[node];
-                node.set_value(MAP_IN[end], x);
-                node.set_value(MAP_OUT[end], y);
+                // is the output. A value a wire drives stays where the wire puts it.
+                // A bipolar map sets its output from Center and Range together, so a wire on
+                // either one leaves the output alone.
+                let output_knobs = if crate::nodes::map::bipolar(&self.graph.nodes[node]) {
+                    MAP_CENTER_RANGE.to_vec()
+                } else {
+                    vec![MAP_OUT[end]]
+                };
+                let driven = MapDriven {
+                    input: self.graph.is_driven(node, MAP_IN[end]),
+                    output: output_knobs
+                        .into_iter()
+                        .any(|id| self.graph.is_driven(node, id)),
+                };
+                let live = live_knobs(self.graph, node, &self.levels);
+                let offset = crate::nodes::map::offset(&self.graph.nodes[node], &live);
+                drag_map_handle(&mut self.graph.nodes[node], end, point, offset, driven);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::EqPoint { node, band } => {
+                let driven = EqDriven {
+                    freq: self.graph.is_driven(node, eq::FREQ[band]),
+                    gain: self.graph.is_driven(node, eq::GAIN[band]),
+                };
+                drag_eq_point(&mut self.graph.nodes[node], band, point, driven);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::Knob { node, id } => {
@@ -689,8 +824,13 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                     | keyboard::Event::KeyReleased { modifiers, .. }
                     | keyboard::Event::ModifiersChanged(modifiers) => {
                         self.graph.shift = modifiers.shift();
+                        self.graph.alt = modifiers.alt();
                     }
                     _ => {}
+                }
+                // The number box takes the keys while it is open.
+                if self.graph.knob_entry.is_some() {
+                    return self.knob_entry_event(&key_event);
                 }
                 // The save box takes the keys while it is open.
                 if self.graph.name_entry.is_some() {
@@ -780,7 +920,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 if !cursor.is_over(&bounds) {
                     return (event::Status::Ignored, None);
                 }
-                self.secondary_press(point)
+                self.secondary_press(point, screen)
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point),
             mouse::Event::ButtonReleased(mouse::Button::Right) => self.release_secondary(point),

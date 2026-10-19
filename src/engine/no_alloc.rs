@@ -4,14 +4,18 @@
 
 use super::*;
 use crate::dsp::effects::distortion::DistortionKind;
+use crate::dsp::effects::eq::EqKind;
 use crate::dsp::mix::MixMode;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
+use crate::nodes::eq;
 use crate::nodes::knobs::KnobId;
-use crate::patch::control::Param;
+use crate::nodes::math::MathOp;
+use crate::patch::control::{MapNode, MapValue, MathNode, Param, Source};
 use crate::patch::stage::{
-    ChorusParams, CompressorParams, DelayParams, DistortionParams, FilterParams, FlangerParams,
-    MixParams, OscillatorParams, PhaserParams, ReverbParams, StageParams, StageSpec,
+    ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
+    FilterParams, FlangerParams, MixParams, OscillatorParams, PhaserParams, ReverbParams,
+    StageParams, StageSpec,
 };
 use crate::patch::{EnvelopeSettings, LfoSettings};
 use assert_no_alloc::assert_no_alloc;
@@ -144,6 +148,20 @@ fn busy_patch() -> Patch {
             spread: Param::default_of(KnobId::Spread),
             mix: Param::default_of(KnobId::Mix),
         }),
+        StageParams::Eq(EqParams {
+            // The analyzer runs under the guard too.
+            analyzer: true,
+            bands: std::array::from_fn(|band| EqBandParams {
+                kind: if band % 2 == 0 {
+                    EqKind::HighShelf
+                } else {
+                    EqKind::Peak
+                },
+                freq: Param::default_of(eq::FREQ[band]),
+                gain: Param::fixed(eq::GAIN[band], 9.0),
+                q: Param::default_of(eq::Q[band]),
+            }),
+        }),
         StageParams::Flanger(FlangerParams {
             rate: Param::default_of(KnobId::LfoRate),
             depth: Param::default_of(KnobId::Depth),
@@ -164,6 +182,51 @@ fn busy_patch() -> Patch {
         spec.pool = 0;
         patch.lanes[3].stages.push(spec);
     }
+    // Maps chain and read an envelope and an LFO, so the guard covers working them out per voice.
+    for map in [
+        MapNode {
+            input: Source::Envelope(0),
+            in_lo: MapValue::fixed(0.0),
+            in_hi: MapValue::fixed(1.0),
+            out_lo: MapValue::fixed(0.0),
+            out_hi: MapValue::fixed(1.0),
+            offset: MapValue {
+                value: 0.0,
+                source: Some(Source::Lfo(0)),
+            },
+            center_range: None,
+        },
+        // A bipolar map, with its range driven by the LFO.
+        MapNode {
+            input: Source::Signal(0),
+            in_lo: MapValue::fixed(0.0),
+            in_hi: MapValue::fixed(1.0),
+            out_lo: MapValue::fixed(0.0),
+            out_hi: MapValue::fixed(1.0),
+            offset: MapValue::fixed(0.0),
+            center_range: Some((
+                MapValue::fixed(0.5),
+                MapValue {
+                    value: 1.0,
+                    source: Some(Source::Lfo(0)),
+                },
+            )),
+        },
+    ] {
+        patch.signals.push(map);
+    }
+    // A math node that reads the second map and the LFO, so the guard covers it too.
+    patch.signals.push(MathNode {
+        op: MathOp::Power,
+        a: MapValue {
+            value: 0.0,
+            source: Some(Source::Signal(1)),
+        },
+        b: MapValue {
+            value: 0.5,
+            source: Some(Source::Lfo(0)),
+        },
+    });
     patch.envelopes[0] = Some(EnvelopeSettings::new());
     patch.lfos[0] = Some(LfoSettings::new());
     patch

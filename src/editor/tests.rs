@@ -91,14 +91,15 @@ mod tests {
 
         // The source's level passes through the first map, then the second.
         let route = graph.control_route(1, KnobId::Gain).unwrap();
+        let wiring = graph.wiring();
         let at = |envelope: f32| {
-            route.apply(&ControlLevels {
+            route.apply(&wiring.with_signals(ControlLevels {
                 envelope: [envelope; MAX_ENVELOPES],
                 ..ControlLevels::default()
-            })
+            }))
         };
-        assert!((at(0.0) - 0.6).abs() < 1e-6);
-        assert!((at(1.0) - 0.8).abs() < 1e-6);
+        assert!((at(0.0) - 0.6).abs() < 1e-5);
+        assert!((at(1.0) - 0.8).abs() < 1e-5);
         assert!(graph.is_driven(1, KnobId::Gain));
     }
 
@@ -407,8 +408,14 @@ mod input_node_tests {
         let map = graph.add_node(NodeKind::Map, Point::new(0.0, 0.0));
         graph.connect(input, Port::Midi(MidiSource::Velocity), map, Port::Shape);
         graph.connect(map, Port::Shape, 1, Port::Knob(KnobId::Gain));
+        // The knob follows the map, and the map reads the MIDI source.
         let route = graph.control_route(1, KnobId::Gain).unwrap();
-        assert_eq!(route.source, Source::Midi(MidiSource::Velocity));
+        assert_eq!(route.source, Source::Signal(0));
+        let table = graph.patch().signals;
+        assert_eq!(
+            table.nodes().next().unwrap().input(),
+            Some(Source::Midi(MidiSource::Velocity))
+        );
     }
 
     /// Every source survives a trip through the saved byte, so routes keep their meaning.
@@ -429,7 +436,11 @@ mod input_node_tests {
         assert_eq!(graph.connections[link].to, map);
         assert_eq!(graph.connections[link].input, Port::Shape);
         let route = graph.control_route(1, KnobId::Gain).unwrap();
-        assert_eq!(route.source, Source::Envelope(0));
+        assert_eq!(route.source, Source::Signal(0));
+        assert_eq!(
+            graph.patch().signals.nodes().next().unwrap().input(),
+            Some(Source::Envelope(0))
+        );
     }
 }
 
@@ -440,12 +451,7 @@ mod map_curve_tests {
     /// Inputs outside the input range hold at the ends, so the output is flat there.
     #[test]
     fn a_map_clamps_outside_its_input_range() {
-        let stage = MapStage {
-            in_lo: 0.25,
-            in_hi: 0.75,
-            out_lo: 0.0,
-            out_hi: 1.0,
-        };
+        let stage = MapStage::fixed(0.25, 0.75, 0.0, 1.0);
         assert_eq!(stage.apply(0.1), 0.0);
         assert!((stage.apply(0.5) - 0.5).abs() < 1e-6);
         assert_eq!(stage.apply(0.9), 1.0);
@@ -460,9 +466,402 @@ mod map_curve_tests {
         node.set_value(KnobId::MapInMax, 1.0);
         node.set_value(KnobId::MapMax, 1.0);
         let bounds = node.curve_bounds();
-        let handles = map_handles(&node);
+        let handles = map_handles(&node, &crate::nodes::viewer::Live::of(&node));
         assert!((handles[0].x - bounds.x).abs() < 1e-3);
         assert!((handles[1].y - bounds.y).abs() < 1e-3);
+    }
+
+    fn live_of(node: &FlodeNode) -> crate::nodes::viewer::Live {
+        crate::nodes::viewer::Live::of(node)
+    }
+
+    /// A handle follows a value that a wire drives, and a press finds it where it is drawn.
+    #[test]
+    fn a_handle_follows_a_driven_value() {
+        let node = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        let own = map_handles(&node, &live_of(&node))[1];
+        let live =
+            crate::nodes::viewer::Live::new(&node, |id| (id == KnobId::MapInMax).then_some(0.5));
+        let driven = map_handles(&node, &live)[1];
+        assert!(driven.x < own.x);
+        assert_eq!(map_handle_at(&node, &live, driven), Some(1));
+        assert_eq!(map_handle_at(&node, &live_of(&node), driven), None);
+    }
+
+    /// A drag moves the values a wire does not drive and leaves the others.
+    #[test]
+    fn a_drag_leaves_driven_map_values_alone() {
+        let mut node = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        let bounds = node.curve_bounds();
+        let target = Point::new(
+            bounds.x + bounds.width * 0.25,
+            bounds.y + bounds.height * 0.25,
+        );
+        drag_map_handle(
+            &mut node,
+            1,
+            target,
+            0.0,
+            MapDriven {
+                input: true,
+                output: false,
+            },
+        );
+        assert_eq!(node.value(KnobId::MapInMax), 1.0);
+        assert!((node.value(KnobId::MapMax) - 0.75).abs() < 1e-3);
+        drag_map_handle(
+            &mut node,
+            1,
+            target,
+            0.0,
+            MapDriven {
+                input: false,
+                output: true,
+            },
+        );
+        assert!((node.value(KnobId::MapInMax) - 0.25).abs() < 1e-3);
+        assert!((node.value(KnobId::MapMax) - 0.75).abs() < 1e-3);
+    }
+
+    /// An LFO wired to a map's In max moves the cut: the route through the map reads the LFO's
+    /// live level for that value.
+    #[test]
+    fn an_lfo_can_drive_a_maps_range() {
+        use crate::nodes::connection::Connection;
+        // An LFO drives the map's In max, and an envelope runs through the map into a knob.
+        let mut nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        nodes[2].set_value(KnobId::MapInMax, 1.0);
+        let links = vec![
+            Connection {
+                from: 1,
+                out: Port::Shape,
+                to: 2,
+                input: Port::Shape,
+            },
+            Connection {
+                from: 2,
+                out: Port::Shape,
+                to: 3,
+                input: Port::Knob(KnobId::Cutoff),
+            },
+            Connection {
+                from: 0,
+                out: Port::Shape,
+                to: 2,
+                input: Port::Knob(KnobId::MapInMax),
+            },
+        ];
+        let graph = Graph::with(nodes, links);
+        let wiring = graph.wiring();
+        let route = wiring
+            .control_route(3, KnobId::Cutoff)
+            .expect("a route to the cutoff");
+        assert_eq!(route.source, Source::Signal(0));
+        let at = |lfo: f32| {
+            route.apply(&wiring.with_signals(ControlLevels {
+                envelope: [0.4; MAX_ENVELOPES],
+                lfo: [lfo, 0.0],
+                ..ControlLevels::default()
+            }))
+        };
+        // With the LFO at 1.0 the map reads the full range, so 0.4 stays 0.4. With it at 0.5,
+        // 0.4 is 80 percent of the way through the range.
+        assert!((at(1.0) - 0.4).abs() < 1e-5);
+        assert!((at(0.5) - 0.8).abs() < 1e-5);
+        // The map's own knob reads as driven, and the others do not.
+        assert!(graph.is_driven(2, KnobId::MapInMax));
+        assert!(!graph.is_driven(2, KnobId::MapInMin));
+    }
+
+    /// A map's value can be driven through other maps, as any knob can. An LFO through a map into
+    /// another map's Offset follows the first map's curve.
+    #[test]
+    fn a_map_value_can_be_driven_through_another_map() {
+        use crate::nodes::connection::Connection;
+        // LFO, into map B, into the Offset of map A. An envelope runs through map A into a knob.
+        let mut nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        // Map B squeezes the LFO's 0 to 1 into 0.5 to 1.0, so the offset runs from 0 to +1.
+        nodes[1].set_value(KnobId::MapMin, KnobId::MapMin.to_normalized(0.5));
+        let link = |from, out, to, input| Connection {
+            from,
+            out,
+            to,
+            input,
+        };
+        let links = vec![
+            link(0, Port::Shape, 1, Port::Shape),
+            link(1, Port::Shape, 2, Port::Knob(KnobId::MapOffset)),
+            link(3, Port::Shape, 2, Port::Shape),
+            link(2, Port::Shape, 4, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        // The offset reads as driven, so its knob is greyed and its handle follows.
+        assert!(graph.is_driven(2, KnobId::MapOffset));
+        let wiring = graph.wiring();
+        let route = wiring.control_route(4, KnobId::Cutoff).unwrap();
+        let at = |lfo: f32, envelope: f32| {
+            route.apply(&wiring.with_signals(ControlLevels {
+                lfo: [lfo, 0.0],
+                envelope: [envelope; MAX_ENVELOPES],
+                ..ControlLevels::default()
+            }))
+        };
+        // LFO at 0: map B gives 0.5, so the offset is 0.5 * 2 - 1 = 0 and the envelope is as is.
+        assert!((at(0.0, 0.3) - 0.3).abs() < 1e-5);
+        // LFO at 1: map B gives 1.0, so the offset is +1 and the output stops at the top.
+        assert!((at(1.0, 0.3) - 1.0).abs() < 1e-5);
+        // LFO at 0.5: map B gives 0.75, so the offset is +0.5.
+        assert!((at(0.5, 0.3) - 0.8).abs() < 1e-5);
+    }
+
+    /// A map nothing feeds makes no signal, so a knob wired to it is not driven. A loop of maps
+    /// makes none either, and neither hangs the compiler.
+    #[test]
+    fn a_map_with_no_input_or_in_a_loop_drives_nothing() {
+        use crate::nodes::connection::Connection;
+        let link = |from, to, input| Connection {
+            from,
+            out: Port::Shape,
+            to,
+            input,
+        };
+        // Map 0 has no input. Maps 1 and 2 feed each other.
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(0, 3, Port::Knob(KnobId::Cutoff)),
+            link(1, 2, Port::Shape),
+            link(2, 1, Port::Shape),
+            link(1, 3, Port::Knob(KnobId::Resonance)),
+        ];
+        let graph = Graph::with(nodes, links);
+        assert!(!graph.is_driven(3, KnobId::Cutoff));
+        assert!(!graph.is_driven(3, KnobId::Resonance));
+        assert_eq!(graph.patch().signals.len(), 0);
+    }
+
+    /// A map that two knobs read is in the table once, and the table is in running order: a map
+    /// comes after the maps that feed it.
+    #[test]
+    fn the_table_runs_feeders_first_and_each_map_once() {
+        use crate::nodes::connection::Connection;
+        let link = |from, to, input| Connection {
+            from,
+            out: Port::Shape,
+            to,
+            input,
+        };
+        // The later node feeds the earlier one, so the table must reorder them.
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(2, 1, Port::Shape),
+            link(1, 0, Port::Shape),
+            link(0, 3, Port::Knob(KnobId::Cutoff)),
+            link(0, 3, Port::Knob(KnobId::Resonance)),
+        ];
+        let graph = Graph::with(nodes, links);
+        let table = graph.patch().signals;
+        assert_eq!(table.len(), 2);
+        let nodes: Vec<_> = table.nodes().collect();
+        // Map 1 reads the LFO and runs first. Map 0 reads map 1.
+        assert_eq!(nodes[0].input(), Some(Source::Lfo(0)));
+        assert_eq!(nodes[1].input(), Some(Source::Signal(0)));
+        let a = graph.control_route(3, KnobId::Cutoff).unwrap();
+        let b = graph.control_route(3, KnobId::Resonance).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.source, Source::Signal(1));
+    }
+
+    /// Each source kind reaches a map value, whatever its index.
+    #[test]
+    fn every_source_kind_can_drive_a_map_value() {
+        use crate::nodes::input::MidiSource;
+        use crate::patch::control::{MapNode, MapValue, SignalTable};
+        let mut levels = ControlLevels::default();
+        levels.envelope[7] = 0.1;
+        levels.lfo[1] = 0.2;
+        levels.midi[MidiSource::Aftertouch.index()] = 0.3;
+        levels.macros[3] = 0.4;
+        let cases = [
+            (Source::Envelope(7), 0.1),
+            (Source::Lfo(1), 0.2),
+            (Source::Midi(MidiSource::Aftertouch), 0.3),
+            (Source::Macro(3), 0.4),
+        ];
+        for (source, level) in cases {
+            // The source drives the output's high end, and the input is 1.0, so the output is
+            // the source's level.
+            let mut table = SignalTable::EMPTY;
+            table.push(MapNode {
+                input: Source::Macro(0),
+                in_lo: MapValue::fixed(0.0),
+                in_hi: MapValue::fixed(1.0),
+                out_lo: MapValue::fixed(0.0),
+                out_hi: MapValue {
+                    value: 0.9,
+                    source: Some(source),
+                },
+                offset: MapValue::fixed(0.0),
+                center_range: None,
+            });
+            levels.macros[0] = 1.0;
+            table.evaluate(&mut levels);
+            assert!((levels.signals[0] - level).abs() < 1e-6, "{source:?}");
+        }
+    }
+
+    /// A route is the source and nothing else, so it stays small.
+    #[test]
+    fn a_route_stays_small() {
+        use crate::patch::control::Route;
+        assert!(std::mem::size_of::<Route>() <= 4);
+    }
+
+    /// The offset pushes the whole curve up or down, and the output stays between 0 and 1.
+    #[test]
+    fn the_offset_pushes_the_curve_and_stays_in_range() {
+        let up = MapStage::IDENTITY.with_offset(0.25);
+        assert!((up.apply(0.0) - 0.25).abs() < 1e-6);
+        assert!((up.apply(0.5) - 0.75).abs() < 1e-6);
+        assert_eq!(up.apply(1.0), 1.0);
+        let down = MapStage::IDENTITY.with_offset(-0.25);
+        assert_eq!(down.apply(0.0), 0.0);
+        assert!((down.apply(1.0) - 0.75).abs() < 1e-6);
+        // No offset leaves a map as it was.
+        assert_eq!(MapStage::IDENTITY.apply(0.3), 0.3);
+    }
+
+    /// A source that drives the offset stretches 0 to 1 into -1 to 1, so 0.5 is no offset.
+    #[test]
+    fn a_driven_offset_is_centered_on_half() {
+        use crate::patch::control::{MapNode, MapValue, SignalTable};
+        let mut table = SignalTable::EMPTY;
+        table.push(MapNode {
+            input: Source::Macro(0),
+            in_lo: MapValue::fixed(0.0),
+            in_hi: MapValue::fixed(1.0),
+            out_lo: MapValue::fixed(0.0),
+            out_hi: MapValue::fixed(1.0),
+            offset: MapValue {
+                value: 0.0,
+                source: Some(Source::Lfo(0)),
+            },
+            center_range: None,
+        });
+        let mut levels = ControlLevels::default();
+        levels.macros[0] = 0.4;
+        for (lfo, expected) in [(0.5, 0.4), (0.75, 0.9), (0.0, 0.0)] {
+            levels.lfo[0] = lfo;
+            table.evaluate(&mut levels);
+            assert!((levels.signals[0] - expected).abs() < 1e-6, "lfo {lfo}");
+        }
+    }
+
+    /// The handles ride the curve's ends, so an offset moves them, and a drag puts the end of the
+    /// curve under the cursor whatever the offset is.
+    #[test]
+    fn the_handles_follow_the_offset() {
+        let mut node = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        let bounds = node.curve_bounds();
+        let flat = map_handles(&node, &live_of(&node));
+        node.set_value(KnobId::MapOffset, KnobId::MapOffset.to_normalized(0.25));
+        let pushed = map_handles(&node, &live_of(&node));
+        // The low end rose a quarter of the box, and the high end is already at the top.
+        assert!((flat[0].y - pushed[0].y - bounds.height * 0.25).abs() < 1e-2);
+        assert!((pushed[1].y - bounds.y).abs() < 1e-3);
+        // Dragging the low handle to the middle of the box sets an output under the offset.
+        let target = Point::new(bounds.x + 10.0, bounds.y + bounds.height / 2.0);
+        drag_map_handle(&mut node, 0, target, 0.25, MapDriven::default());
+        assert!((node.value(KnobId::MapMin) - 0.25).abs() < 1e-3);
+        let landed = map_handles(&node, &live_of(&node))[0];
+        assert!((landed.y - target.y).abs() < 1e-2);
+    }
+
+    /// The offset is an automatable knob with a pin, shows signed, and is typed as a percentage.
+    #[test]
+    fn the_offset_is_a_signed_pinned_knob() {
+        let mut node = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        assert!(node.input_ports().contains(&Port::Knob(KnobId::MapOffset)));
+        assert_eq!(node.plain(KnobId::MapOffset), 0.0);
+        assert_eq!(
+            KnobId::MapOffset.format(KnobId::MapOffset.to_normalized(0.25)),
+            "+25%"
+        );
+        assert_eq!(
+            KnobId::MapOffset.format(KnobId::MapOffset.to_normalized(-0.5)),
+            "-50%"
+        );
+        node.enter_knob_value(KnobId::MapOffset, -30.0);
+        assert!((node.plain(KnobId::MapOffset) + 0.3).abs() < 1e-4);
+        assert_eq!(node.knob_entry_text(KnobId::MapOffset), "-30");
+        // Bipolar changes the four range values, not the offset.
+        node.set_switch(0, true);
+        assert_eq!(node.knob_entry_text(KnobId::MapOffset), "-30");
+    }
+
+    /// An LFO on the offset moves a route through the map, and the offset moves the knob.
+    #[test]
+    fn an_lfo_can_drive_a_maps_offset() {
+        use crate::nodes::connection::Connection;
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            Connection {
+                from: 1,
+                out: Port::Shape,
+                to: 2,
+                input: Port::Shape,
+            },
+            Connection {
+                from: 2,
+                out: Port::Shape,
+                to: 3,
+                input: Port::Knob(KnobId::Cutoff),
+            },
+            Connection {
+                from: 0,
+                out: Port::Shape,
+                to: 2,
+                input: Port::Knob(KnobId::MapOffset),
+            },
+        ];
+        let graph = Graph::with(nodes, links);
+        let wiring = graph.wiring();
+        let route = wiring.control_route(3, KnobId::Cutoff).unwrap();
+        let at = |lfo: f32| {
+            route.apply(&wiring.with_signals(ControlLevels {
+                envelope: [0.4; MAX_ENVELOPES],
+                lfo: [lfo, 0.0],
+                ..ControlLevels::default()
+            }))
+        };
+        assert!((at(0.5) - 0.4).abs() < 1e-5);
+        assert!((at(0.6) - 0.6).abs() < 1e-5);
+        assert!(graph.is_driven(2, KnobId::MapOffset));
     }
 }
 
@@ -1008,7 +1407,8 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Lfo
                 | NodeKind::Input
                 | NodeKind::Macro
-                | NodeKind::Map => crate::nodes::Bypass::None,
+                | NodeKind::Map
+                | NodeKind::Math => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
             };
             assert_eq!(node.bypass(), expected, "{kind:?}");
@@ -3764,6 +4164,30 @@ mod splice_and_link_tests {
         assert!(matches!(graph.interaction, Interaction::Idle));
     }
 
+    /// Shift+right drag between two nodes, through the editor's real mouse events.
+    fn drag_link(graph: &mut Graph, from: usize, to: usize) {
+        shift(graph, true);
+        let (a, b) = (middle(graph, from), middle(graph, to));
+        mouse_at(graph, mouse::Event::ButtonPressed(mouse::Button::Right), a);
+        mouse_at(graph, mouse::Event::CursorMoved { position: b }, b);
+        mouse_at(graph, mouse::Event::ButtonReleased(mouse::Button::Right), b);
+        shift(graph, false);
+    }
+
+    #[test]
+    fn shift_right_drag_connects_a_math_node() {
+        // An LFO into the math node, then the math node onward into a filter.
+        let mut graph = node_graph(&[NodeKind::Lfo, NodeKind::Math, NodeKind::Filter]);
+        drag_link(&mut graph, 0, 1);
+        assert_eq!(graph.connections.len(), 1, "{:?}", graph.connections);
+        assert_eq!(graph.connections[0].to, 1);
+        assert_eq!(graph.connections[0].input, Port::Knob(KnobId::MathA));
+        drag_link(&mut graph, 1, 2);
+        assert_eq!(graph.connections.len(), 2, "{:?}", graph.connections);
+        assert!(graph.connections.iter().any(|c| c.from == 1 && c.to == 2));
+        assert!(graph.is_driven(2, KnobId::Cutoff));
+    }
+
     #[test]
     fn a_plain_right_click_still_opens_the_menu() {
         let mut graph = node_graph(&[NodeKind::Oscillator, NodeKind::Filter]);
@@ -3774,5 +4198,1417 @@ mod splice_and_link_tests {
             a,
         );
         assert!(graph.menu.is_some());
+    }
+}
+
+#[cfg(test)]
+mod eq_tests {
+    use super::*;
+    use crate::nodes::eq;
+    use crate::nodes::viewer::Live;
+
+    fn eq_node() -> FlodeNode {
+        FlodeNode::new(NodeKind::Eq, Point::new(40.0, 60.0))
+    }
+
+    /// The node is wider than the others, and everything it draws stays inside it.
+    #[test]
+    fn the_eq_node_is_wide_and_its_parts_fit() {
+        let node = eq_node();
+        assert!(node.width() > crate::nodes::NODE_WIDTH);
+        assert_eq!(node.bounds().width, node.width());
+        let graph = node.eq_bounds().expect("the graph is on show");
+        let inside = |r: Rectangle| {
+            r.x >= node.position.x
+                && r.x + r.width <= node.position.x + node.width()
+                && r.y >= node.position.y
+                && r.y + r.height <= node.position.y + node.height()
+        };
+        assert!(inside(graph));
+        let toggles = node.eq_toggles();
+        assert_eq!(toggles.len(), 4);
+        for (_, toggle) in toggles {
+            assert!(inside(toggle) && toggle.width > 30.0);
+            assert!(!super::overlaps(&toggle, &graph));
+        }
+        // The bands start folded, so the node is short, and a folded band's pins are still there.
+        assert!(node.height() < 440.0, "{}", node.height());
+        assert_eq!(node.input_ports().len(), 1 + 12);
+        // Another kind keeps the usual width.
+        let other = FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0));
+        assert_eq!(other.width(), crate::nodes::NODE_WIDTH);
+    }
+
+    #[test]
+    fn a_collapsed_eq_has_no_graph_to_grab() {
+        let mut node = eq_node();
+        let handle = eq_handles(&node, &Live::of(&node)).unwrap()[1];
+        assert_eq!(eq_handle_at(&node, &Live::of(&node), handle), Some(1));
+        node.collapsed = true;
+        assert!(eq_handles(&node, &Live::of(&node)).is_none());
+        assert_eq!(eq_handle_at(&node, &Live::of(&node), handle), None);
+        assert!(node.eq_toggles().is_empty());
+    }
+
+    #[test]
+    fn a_press_grabs_the_point_it_lands_on() {
+        let node = eq_node();
+        let handles = eq_handles(&node, &Live::of(&node)).unwrap();
+        for (band, handle) in handles.iter().enumerate() {
+            assert_eq!(eq_handle_at(&node, &Live::of(&node), *handle), Some(band));
+            assert_eq!(
+                eq_handle_at(
+                    &node,
+                    &Live::of(&node),
+                    Point::new(handle.x + 5.0, handle.y - 5.0)
+                ),
+                Some(band)
+            );
+        }
+        let far = Point::new(handles[1].x, handles[1].y - 40.0);
+        assert_eq!(eq_handle_at(&node, &Live::of(&node), far), None);
+    }
+
+    /// Dragging right raises the frequency and dragging up raises the gain, and the point lands
+    /// under the cursor.
+    #[test]
+    fn dragging_a_point_sets_frequency_and_gain() {
+        let mut node = eq_node();
+        let bounds = node.eq_bounds().unwrap();
+        let target = Point::new(
+            bounds.x + bounds.width * 0.75,
+            bounds.y + bounds.height * 0.25,
+        );
+        drag_eq_point(&mut node, 1, target, EqDriven::default());
+        let handle = eq_handles(&node, &Live::of(&node)).unwrap()[1];
+        assert!((handle.x - target.x).abs() < 0.5 && (handle.y - target.y).abs() < 0.5);
+        assert!(node.plain(eq::FREQ[1]) > 1000.0);
+        assert!((node.plain(eq::GAIN[1]) - 9.0).abs() < 0.1);
+        // The other bands did not move.
+        assert!((node.plain(eq::FREQ[2]) - eq::FREQ[2].default_plain()).abs() < 0.1);
+        assert_eq!(node.plain(eq::GAIN[2]), 0.0);
+    }
+
+    #[test]
+    fn a_drag_past_the_box_stops_at_its_edges() {
+        let mut node = eq_node();
+        drag_eq_point(
+            &mut node,
+            2,
+            Point::new(-500.0, -500.0),
+            EqDriven::default(),
+        );
+        assert!((node.plain(eq::FREQ[2]) - 20.0).abs() < 0.01);
+        assert!((node.plain(eq::GAIN[2]) - 18.0).abs() < 0.01);
+        drag_eq_point(
+            &mut node,
+            2,
+            Point::new(5000.0, 5000.0),
+            EqDriven::default(),
+        );
+        assert!((node.plain(eq::FREQ[2]) - 20000.0).abs() < 1.0);
+        assert!((node.plain(eq::GAIN[2]) + 18.0).abs() < 0.01);
+    }
+
+    /// A cut has no gain, so a vertical drag moves only its frequency.
+    #[test]
+    fn a_cut_point_moves_only_sideways() {
+        let mut node = eq_node();
+        node.set_switch(eq::band_switch(0), true);
+        let bounds = node.eq_bounds().unwrap();
+        drag_eq_point(
+            &mut node,
+            0,
+            Point::new(bounds.x + bounds.width * 0.3, bounds.y + 2.0),
+            EqDriven::default(),
+        );
+        assert_eq!(node.plain(eq::GAIN[0]), 0.0);
+        assert!(node.plain(eq::FREQ[0]) > 20.0);
+    }
+
+    #[test]
+    fn a_toggle_is_found_by_its_position() {
+        let node = eq_node();
+        for (band, toggle) in node.eq_toggles() {
+            let middle = Point::new(
+                toggle.x + toggle.width / 2.0,
+                toggle.y + toggle.height / 2.0,
+            );
+            assert_eq!(node.eq_toggle_at(middle), Some(band));
+        }
+        assert_eq!(node.eq_toggle_at(Point::new(0.0, 0.0)), None);
+    }
+
+    /// The graph, the toggles, and the points survive saving and loading.
+    #[test]
+    fn an_eq_survives_a_save() {
+        let mut graph = minimal_graph();
+        let index = graph.add_node(NodeKind::Eq, Point::new(300.0, 200.0));
+        {
+            let node = &mut graph.nodes[index];
+            let bounds = node.eq_bounds().unwrap();
+            drag_eq_point(
+                node,
+                2,
+                Point::new(bounds.x + 100.0, bounds.y + 20.0),
+                EqDriven::default(),
+            );
+            node.set_switch(eq::band_switch(3), true);
+        }
+        let freq = graph.nodes[index].plain(eq::FREQ[2]);
+        let saved = graph.to_saved();
+        let loaded = Graph::from_saved(&saved);
+        let node = &loaded.nodes[index];
+        assert_eq!(node.kind, NodeKind::Eq);
+        assert!((node.plain(eq::FREQ[2]) - freq).abs() < 0.01);
+        assert!(node.switch(eq::band_switch(3)));
+        assert!(!node.switch(eq::band_switch(0)));
+    }
+
+    /// The toggles sit in the section headers, so they stay on show while the sections are
+    /// folded, and open sections move them down with their rows.
+    #[test]
+    fn the_toggles_ride_the_section_headers() {
+        let mut node = eq_node();
+        let folded = node.eq_toggles();
+        assert!(node.section_collapsed(0));
+        node.toggle_section(0);
+        let open = node.eq_toggles();
+        assert_eq!(open.len(), 4);
+        assert_eq!(open[0].1.y, folded[0].1.y);
+        assert!(open[1].1.y > folded[1].1.y);
+    }
+
+    /// A band's point follows a wire that drives its frequency or gain, and the knob row shows
+    /// the same values the point is drawn from.
+    #[test]
+    fn a_driven_point_follows_its_wire() {
+        let node = eq_node();
+        let own = eq_handles(&node, &Live::of(&node)).unwrap()[1];
+        let live = Live::new(&node, |id| match id {
+            id if id == eq::FREQ[1] => Some(0.9),
+            id if id == eq::GAIN[1] => Some(1.0),
+            _ => None,
+        });
+        let driven = eq_handles(&node, &live).unwrap()[1];
+        assert!(driven.x > own.x && driven.y < own.y);
+        // Grabbing it by where it is drawn finds it.
+        assert_eq!(eq_handle_at(&node, &live, driven), Some(1));
+        assert_eq!(eq_handle_at(&node, &live, own), None);
+    }
+
+    /// Dragging a point leaves a driven value to its wire and moves the other.
+    #[test]
+    fn a_drag_leaves_driven_values_alone() {
+        let mut node = eq_node();
+        let bounds = node.eq_bounds().unwrap();
+        let target = Point::new(bounds.x + bounds.width * 0.8, bounds.y + 5.0);
+        let (freq, gain) = (node.value(eq::FREQ[1]), node.value(eq::GAIN[1]));
+        drag_eq_point(
+            &mut node,
+            1,
+            target,
+            EqDriven {
+                freq: true,
+                gain: false,
+            },
+        );
+        assert_eq!(node.value(eq::FREQ[1]), freq);
+        assert!(node.value(eq::GAIN[1]) > gain);
+        let freq_after = node.value(eq::FREQ[1]);
+        drag_eq_point(
+            &mut node,
+            1,
+            target,
+            EqDriven {
+                freq: false,
+                gain: true,
+            },
+        );
+        assert!(node.value(eq::FREQ[1]) > freq_after);
+    }
+
+    /// A knob moves the point, and a drag moves the knob, since both are one stored value.
+    #[test]
+    fn the_knobs_and_the_points_share_values() {
+        let mut node = eq_node();
+        node.set_value(eq::GAIN[2], eq::GAIN[2].to_normalized(12.0));
+        let handle = eq_handles(&node, &Live::of(&node)).unwrap()[2];
+        let bounds = node.eq_bounds().unwrap();
+        assert!(handle.y < bounds.y + bounds.height / 2.0);
+        drag_eq_point(
+            &mut node,
+            2,
+            Point::new(handle.x, bounds.y + bounds.height),
+            EqDriven::default(),
+        );
+        assert!((node.plain(eq::GAIN[2]) + 18.0).abs() < 0.01);
+    }
+
+    /// A graph with an oscillator through an EQ into the output.
+    fn eq_chain() -> (Graph, usize) {
+        let mut graph = minimal_graph();
+        let eq_node = graph.add_node(NodeKind::Eq, Point::new(300.0, 200.0));
+        graph.connect(0, Port::Audio, eq_node, Port::Audio);
+        graph.connect(eq_node, Port::Audio, 1, Port::Slot(0));
+        graph.refresh_slots();
+        (graph, eq_node)
+    }
+
+    /// The analyzer shows the spectrum of the instance the compiler gave the node, and only while
+    /// the checkbox is on.
+    #[test]
+    fn the_analyzer_reads_its_nodes_instance() {
+        use crate::dsp::analyzer::{BINS, FLOOR_DB};
+        let (mut graph, node) = eq_chain();
+        graph.spectra[0] = [-20.0; BINS];
+        graph.spectra[1] = [-50.0; BINS];
+        assert!(graph.eq_spectrum(node).is_none());
+        graph.nodes[node].set_switch(0, true);
+        assert_eq!(graph.eq_spectrum(node), Some(&[-20.0; BINS]));
+        assert_ne!(graph.eq_spectrum(node), Some(&[FLOOR_DB; BINS]));
+        // The checkbox reaches the stage, so the engine runs the analyzer.
+        let stage = graph.patch().lanes[0]
+            .stages
+            .iter()
+            .find_map(|s| match s.params {
+                StageParams::Eq(p) => Some(p),
+                _ => None,
+            });
+        assert!(stage.expect("an EQ stage").analyzer);
+    }
+
+    /// The checkbox sits just under the graph.
+    #[test]
+    fn the_analyzer_checkbox_is_under_the_graph() {
+        let node = eq_node();
+        let graph = node.eq_bounds().unwrap();
+        let checkbox = node.switch_bounds(0);
+        assert!(node.switch_shown(0));
+        assert!(checkbox.y >= graph.y + graph.height);
+        assert!(checkbox.y - (graph.y + graph.height) < 12.0);
+    }
+
+    /// The smoothed spectrum passes through every point and has one segment between each pair.
+    #[test]
+    fn the_smooth_curve_passes_through_its_points() {
+        let points: Vec<Point> = [10.0, 40.0, 5.0, 90.0, 60.0]
+            .iter()
+            .enumerate()
+            .map(|(i, y)| Point::new(i as f32 * 10.0, *y))
+            .collect();
+        let segments = smooth_segments(&points, 0.0, 100.0);
+        assert_eq!(segments.len(), points.len() - 1);
+        for (segment, point) in segments.iter().zip(&points[1..]) {
+            assert_eq!(segment.2, *point);
+        }
+        assert!(smooth_segments(&points[..1], 0.0, 100.0).is_empty());
+    }
+
+    /// A steep peak next to a floor stays inside the box, and a flat run stays flat.
+    #[test]
+    fn the_smooth_curve_stays_in_the_box() {
+        let points = [
+            Point::new(0.0, 100.0),
+            Point::new(10.0, 100.0),
+            Point::new(20.0, 0.0),
+            Point::new(30.0, 100.0),
+            Point::new(40.0, 100.0),
+        ];
+        for (c1, c2, _) in smooth_segments(&points, 0.0, 100.0) {
+            assert!((0.0..=100.0).contains(&c1.y) && (0.0..=100.0).contains(&c2.y));
+        }
+        let flat = [
+            Point::new(0.0, 50.0),
+            Point::new(10.0, 50.0),
+            Point::new(20.0, 50.0),
+        ];
+        assert!(smooth_segments(&flat, 0.0, 100.0)
+            .iter()
+            .all(|(c1, c2, end)| c1.y == 50.0 && c2.y == 50.0 && end.y == 50.0));
+    }
+}
+
+#[cfg(test)]
+mod knob_entry_tests {
+    use super::*;
+    use crate::editor::canvas::{Message, NodeEditor};
+    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    /// A graph with one node of `kind` set well clear of the other nodes, and where its knob `id`
+    /// is drawn.
+    fn graph_with(kind: NodeKind, id: KnobId) -> (Graph, usize, Point) {
+        let mut graph = minimal_graph();
+        let node = graph.add_node(kind, Point::new(300.0, 120.0));
+        let center = graph.nodes[node]
+            .knob_slots()
+            .into_iter()
+            .find(|slot| slot.id == id)
+            .expect("the knob is on show")
+            .center;
+        (graph, node, center)
+    }
+
+    fn editor(graph: &mut Graph) -> NodeEditor<'_> {
+        NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2])
+    }
+
+    fn press(editor: &mut NodeEditor, at: Point) -> Option<Message> {
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        editor.update(press, bounds(), Cursor::Available(at)).1
+    }
+
+    fn release(editor: &mut NodeEditor, at: Point) {
+        let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        editor.update(release, bounds(), Cursor::Available(at));
+    }
+
+    fn click(editor: &mut NodeEditor, at: Point) -> Option<Message> {
+        let message = press(editor, at);
+        release(editor, at);
+        message
+    }
+
+    fn double_click(editor: &mut NodeEditor, at: Point) {
+        click(editor, at);
+        click(editor, at);
+    }
+
+    fn type_text(editor: &mut NodeEditor, text: &str) {
+        for c in text.chars() {
+            let event = Event::Keyboard(keyboard::Event::CharacterReceived(c));
+            editor.update(event, bounds(), Cursor::Unavailable);
+        }
+    }
+
+    fn key(editor: &mut NodeEditor, key_code: KeyCode) -> Option<Message> {
+        let event = Event::Keyboard(keyboard::Event::KeyPressed {
+            key_code,
+            modifiers: Modifiers::default(),
+        });
+        editor.update(event, bounds(), Cursor::Unavailable).1
+    }
+
+    #[test]
+    fn a_double_click_opens_the_box_with_the_value_selected() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        click(&mut editor, at);
+        assert!(editor.graph.knob_entry.is_none(), "one click only drags");
+        click(&mut editor, at);
+        let entry = editor.graph.knob_entry.as_ref().expect("the box is open");
+        assert_eq!((entry.node, entry.id), (node, KnobId::Cutoff));
+        assert_eq!(entry.text, "8000");
+        assert!(entry.fresh);
+        // The double click did not reset the value, and the box sits over the knob.
+        assert_eq!(
+            editor.graph.nodes[node].plain(KnobId::Cutoff).round(),
+            8000.0
+        );
+        let rect = editor.graph.knob_entry_bounds().unwrap();
+        assert!(rect.contains(at));
+    }
+
+    #[test]
+    fn typing_a_number_and_pressing_enter_sets_the_value_exactly() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        type_text(&mut editor, "440");
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "440");
+        let message = key(&mut editor, KeyCode::Enter);
+        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert!(editor.graph.knob_entry.is_none());
+        let plain = editor.graph.nodes[node].plain(KnobId::Cutoff);
+        assert!((plain - 440.0).abs() < 0.1, "{plain}");
+    }
+
+    /// A number past the end of the range stops at the end.
+    #[test]
+    fn a_number_past_the_range_stops_at_the_end() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        type_text(&mut editor, "99999");
+        key(&mut editor, KeyCode::Enter);
+        assert_eq!(
+            editor.graph.nodes[node].plain(KnobId::Cutoff).round(),
+            20000.0
+        );
+    }
+
+    /// A knob the node shows as a percentage is typed as one.
+    #[test]
+    fn a_percent_knob_takes_a_percentage() {
+        let (mut graph, node, at) = graph_with(NodeKind::Reverb, KnobId::Mix);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        // A new reverb is 30 percent wet, and the box shows it as typed.
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "30");
+        type_text(&mut editor, "75");
+        key(&mut editor, KeyCode::Enter);
+        assert!((editor.graph.nodes[node].plain(KnobId::Mix) - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn escape_closes_the_box_and_changes_nothing() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let before = graph.nodes[node].value(KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        type_text(&mut editor, "440");
+        key(&mut editor, KeyCode::Escape);
+        assert!(editor.graph.knob_entry.is_none());
+        assert_eq!(editor.graph.nodes[node].value(KnobId::Cutoff), before);
+    }
+
+    /// Backspace edits, and on a selected value it clears the whole thing.
+    #[test]
+    fn backspace_edits_the_text() {
+        let (mut graph, _, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        key(&mut editor, KeyCode::Backspace);
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "");
+        type_text(&mut editor, "123");
+        key(&mut editor, KeyCode::Backspace);
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "12");
+    }
+
+    /// Letters that are not part of a number are ignored, and the text has a length limit.
+    #[test]
+    fn only_number_keys_are_taken() {
+        let (mut graph, _, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        type_text(&mut editor, "a1b2.5z");
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "12.5");
+        type_text(&mut editor, "99999999999999999999");
+        assert!(editor.graph.knob_entry.as_ref().unwrap().text.len() <= KNOB_ENTRY_MAX_LEN);
+    }
+
+    /// Text that is not a number closes the box and leaves the value.
+    #[test]
+    fn text_that_is_not_a_number_changes_nothing() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let before = graph.nodes[node].value(KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        type_text(&mut editor, "-");
+        let message = key(&mut editor, KeyCode::Enter);
+        assert!(matches!(message, Some(Message::Hovered)));
+        assert!(editor.graph.knob_entry.is_none());
+        assert_eq!(editor.graph.nodes[node].value(KnobId::Cutoff), before);
+    }
+
+    /// A press elsewhere keeps what was typed. A box nobody typed in changes nothing.
+    #[test]
+    fn clicking_away_keeps_what_was_typed() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let before = graph.nodes[node].value(KnobId::Cutoff);
+        let mut editor = editor(&mut graph);
+        let away = Point::new(700.0, 500.0);
+
+        double_click(&mut editor, at);
+        click(&mut editor, away);
+        assert!(editor.graph.knob_entry.is_none());
+        assert_eq!(editor.graph.nodes[node].value(KnobId::Cutoff), before);
+
+        double_click(&mut editor, at);
+        type_text(&mut editor, "1000");
+        click(&mut editor, away);
+        assert!(editor.graph.knob_entry.is_none());
+        assert!((editor.graph.nodes[node].plain(KnobId::Cutoff) - 1000.0).abs() < 0.1);
+    }
+
+    /// The box takes the keys, so a digit is not a piano note.
+    #[test]
+    fn the_box_keeps_the_keys_from_the_piano() {
+        let (mut graph, _, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        graph.computer_keys = true;
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        let event = Event::Keyboard(keyboard::Event::KeyPressed {
+            key_code: KeyCode::A,
+            modifiers: Modifiers::default(),
+        });
+        let (status, message) = editor.update(event, bounds(), Cursor::Unavailable);
+        assert_eq!(status, nih_plug_iced::event::Status::Captured);
+        assert!(!matches!(message, Some(Message::Note(_))));
+    }
+
+    /// A knob a control wire drives is greyed out, and a double click does nothing to it.
+    #[test]
+    fn a_driven_knob_has_no_box() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(40.0, 400.0));
+        graph.connect(lfo, Port::Shape, node, Port::Knob(KnobId::Cutoff));
+        assert!(graph.is_driven(node, KnobId::Cutoff));
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        assert!(editor.graph.knob_entry.is_none());
+    }
+
+    /// A macro knob is a host parameter, so setting it records one gesture for the host.
+    #[test]
+    fn a_macro_knob_reports_the_typed_value_to_the_host() {
+        let (mut graph, _, at) = graph_with(NodeKind::Macro, KnobId::Macro1);
+        let mut editor = editor(&mut graph);
+        double_click(&mut editor, at);
+        editor.graph.macro_edits.clear();
+        type_text(&mut editor, "75");
+        key(&mut editor, KeyCode::Enter);
+        let edits = &editor.graph.macro_edits;
+        assert_eq!(edits.first(), Some(&MacroEdit::Begin(0)));
+        assert!(edits.contains(&MacroEdit::Set(0, 0.75)));
+        assert_eq!(edits.last(), Some(&MacroEdit::End(0)));
+    }
+
+    /// Alt+click, which a double click used to do, puts a knob back to its default.
+    #[test]
+    fn alt_click_resets_a_knob() {
+        let (mut graph, node, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
+        graph.nodes[node].set_value(KnobId::Cutoff, 0.2);
+        let mut editor = editor(&mut graph);
+        let alt = Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::ALT));
+        editor.update(alt, bounds(), Cursor::Unavailable);
+        click(&mut editor, at);
+        assert_eq!(
+            editor.graph.nodes[node].value(KnobId::Cutoff),
+            KnobId::Cutoff.default_normalized()
+        );
+        assert!(editor.graph.knob_entry.is_none());
+        // With Alt up, a click leaves the value alone.
+        let up = Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::default()));
+        editor.update(up, bounds(), Cursor::Unavailable);
+        editor.graph.nodes[node].set_value(KnobId::Cutoff, 0.2);
+        click(&mut editor, at);
+        assert_eq!(editor.graph.nodes[node].value(KnobId::Cutoff), 0.2);
+    }
+
+    /// A bipolar map's Center is typed as a percentage, and its Range is signed, so a negative one
+    /// runs the swing backward.
+    #[test]
+    fn a_bipolar_maps_center_and_range_are_typed_as_percentages() {
+        let mut graph = minimal_graph();
+        let node = graph.add_node(NodeKind::Map, Point::new(300.0, 120.0));
+        graph.toggle_map_polarity(node);
+        graph.nodes[node].toggle_section(0);
+        let at = |graph: &Graph, id: KnobId| {
+            graph.nodes[node]
+                .knob_slots()
+                .into_iter()
+                .find(|slot| slot.id == id)
+                .expect("the section is open")
+                .center
+        };
+        let (center_at, range_at) = (at(&graph, KnobId::MapCenter), at(&graph, KnobId::MapRange));
+        let mut editor = editor(&mut graph);
+        // A new map is the full swing, centered at 50 and 100 wide.
+        double_click(&mut editor, center_at);
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "50");
+        type_text(&mut editor, "25");
+        key(&mut editor, KeyCode::Enter);
+        double_click(&mut editor, range_at);
+        assert_eq!(editor.graph.knob_entry.as_ref().unwrap().text, "100");
+        type_text(&mut editor, "-40");
+        key(&mut editor, KeyCode::Enter);
+        let node = &editor.graph.nodes[node];
+        assert!((node.plain(KnobId::MapCenter) - 0.25).abs() < 1e-4);
+        assert!((node.plain(KnobId::MapRange) + 0.4).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod menu_zoom_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use crate::editor::menus::menu_bounds;
+    use crate::editor::style::{MENU_ITEM_HEIGHT, MENU_WIDTH};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+    use nih_plug_iced::Vector;
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    fn mouse_at(graph: &mut Graph, button: mouse::Button, at: Point) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(button)),
+            bounds(),
+            Cursor::Available(at),
+        );
+    }
+
+    /// Where a node's header sits on screen at the graph's current view.
+    fn header_on_screen(graph: &Graph, node: usize) -> Point {
+        let n = &graph.nodes[node];
+        let world = Point::new(n.position.x + 80.0, n.position.y + 10.0);
+        Point::new(
+            world.x * graph.view.zoom + graph.view.offset.x,
+            world.y * graph.view.zoom + graph.view.offset.y,
+        )
+    }
+
+    /// The menu is as big, and where the click was, at every zoom and pan.
+    #[test]
+    fn the_menu_keeps_its_size_and_place_at_any_zoom() {
+        let mut sizes = Vec::new();
+        for (zoom, offset) in [
+            (1.0, Vector::new(0.0, 0.0)),
+            (0.4, Vector::new(30.0, 20.0)),
+            (2.5, Vector::new(-500.0, -50.0)),
+        ] {
+            let mut graph = minimal_graph();
+            graph.view.zoom = zoom;
+            graph.view.offset = offset;
+            let at = header_on_screen(&graph, 0);
+            mouse_at(&mut graph, mouse::Button::Right, at);
+            let menu = graph
+                .menu
+                .unwrap_or_else(|| panic!("no menu at zoom {zoom}, click {at:?}"));
+            // The menu's corner is the click, in screen coordinates.
+            assert_eq!(menu.position, at, "zoom {zoom}");
+            let area = menu_bounds(menu);
+            assert_eq!(area.width, MENU_WIDTH);
+            sizes.push(area.height);
+            assert_eq!(area.height, menu.items.len() as f32 * MENU_ITEM_HEIGHT);
+        }
+        assert!(sizes.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    /// Clicking an entry by where it is on screen works when zoomed and panned.
+    #[test]
+    fn an_entry_is_picked_by_its_screen_position() {
+        let mut graph = minimal_graph();
+        graph.view.zoom = 2.0;
+        graph.view.offset = Vector::new(-100.0, -40.0);
+        let nodes_before = graph.nodes.len();
+        let at = header_on_screen(&graph, 0);
+        mouse_at(&mut graph, mouse::Button::Right, at);
+        let menu = graph.menu.expect("the menu opens");
+        // Delete is the last entry. Its row on screen is the same height as at zoom 1.
+        let area = menu_bounds(menu);
+        let delete = Point::new(
+            area.x + 10.0,
+            area.y + (menu.items.len() as f32 - 0.5) * MENU_ITEM_HEIGHT,
+        );
+        mouse_at(&mut graph, mouse::Button::Left, delete);
+        assert_eq!(graph.nodes.len(), nodes_before - 1);
+        assert!(graph.menu.is_none());
+    }
+
+    /// A press on the menu is the menu's, wherever the world under it is.
+    #[test]
+    fn a_press_on_the_menu_does_not_reach_the_nodes_under_it() {
+        let mut graph = minimal_graph();
+        graph.view.zoom = 0.5;
+        let at = header_on_screen(&graph, 0);
+        mouse_at(&mut graph, mouse::Button::Right, at);
+        let menu = graph.menu.expect("the menu opens");
+        let area = menu_bounds(menu);
+        let editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let inside = Point::new(area.x + 5.0, area.y + 5.0);
+        let world = editor.graph.view.to_world(inside);
+        assert!(editor.overlay_at(world, inside, bounds()));
+        let outside = Point::new(area.x + area.width + 40.0, area.y + 5.0);
+        let world = editor.graph.view.to_world(outside);
+        assert!(!editor.overlay_at(world, outside, bounds()));
+    }
+}
+
+#[cfg(test)]
+mod math_node_tests {
+    use super::*;
+    use crate::nodes::connection::Connection;
+    use crate::nodes::math::MathOp;
+
+    fn link(from: usize, out: Port, to: usize, input: Port) -> Connection {
+        Connection {
+            from,
+            out,
+            to,
+            input,
+        }
+    }
+
+    fn math(op: MathOp) -> FlodeNode {
+        let mut node = FlodeNode::new(NodeKind::Math, Point::new(0.0, 0.0));
+        node.choose(0, MathOp::ALL.iter().position(|&o| o == op).unwrap());
+        node
+    }
+
+    /// The route to a knob through a math node, worked out at the given source levels.
+    fn level(graph: &Graph, node: usize, id: KnobId, levels: ControlLevels) -> f32 {
+        let wiring = graph.wiring();
+        let route = wiring.control_route(node, id).expect("a route");
+        route.apply(&wiring.with_signals(levels))
+    }
+
+    /// A math node with nothing wired in is a constant: its two knobs, combined. It is a source,
+    /// so a knob can follow it.
+    #[test]
+    fn a_math_node_with_nothing_wired_is_a_constant() {
+        let mut add = math(MathOp::Add);
+        add.set_value(KnobId::MathA, 0.25);
+        add.set_value(KnobId::MathB, 0.5);
+        let nodes = vec![add, FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0))];
+        let links = vec![link(0, Port::Shape, 1, Port::Knob(KnobId::Cutoff))];
+        let graph = Graph::with(nodes, links);
+        assert!(graph.is_driven(1, KnobId::Cutoff));
+        let at = level(&graph, 1, KnobId::Cutoff, ControlLevels::default());
+        assert!((at - 0.75).abs() < 1e-6, "{at}");
+    }
+
+    /// An LFO into A and a constant in B: the node combines the live signal with the knob.
+    #[test]
+    fn a_driver_in_a_and_a_constant_in_b() {
+        let mut multiply = math(MathOp::Multiply);
+        multiply.set_value(KnobId::MathB, 0.5);
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            multiply,
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(0, Port::Shape, 1, Port::Knob(KnobId::MathA)),
+            link(1, Port::Shape, 2, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        // Only A is driven.
+        assert!(graph.is_driven(1, KnobId::MathA));
+        assert!(!graph.is_driven(1, KnobId::MathB));
+        for lfo in [0.0, 0.4, 1.0] {
+            let levels = ControlLevels {
+                lfo: [lfo, 0.0],
+                ..ControlLevels::default()
+            };
+            let at = level(&graph, 2, KnobId::Cutoff, levels);
+            assert!((at - lfo * 0.5).abs() < 1e-6, "lfo {lfo}: {at}");
+        }
+    }
+
+    /// Two different drivers into the two inputs.
+    #[test]
+    fn two_drivers_combine() {
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 0.0)),
+            math(MathOp::Maximum),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(0, Port::Shape, 2, Port::Knob(KnobId::MathA)),
+            link(1, Port::Shape, 2, Port::Knob(KnobId::MathB)),
+            link(2, Port::Shape, 3, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        let levels = |lfo: f32, envelope: f32| ControlLevels {
+            lfo: [lfo, 0.0],
+            envelope: [envelope; MAX_ENVELOPES],
+            ..ControlLevels::default()
+        };
+        assert!((level(&graph, 3, KnobId::Cutoff, levels(0.3, 0.7)) - 0.7).abs() < 1e-6);
+        assert!((level(&graph, 3, KnobId::Cutoff, levels(0.9, 0.2)) - 0.9).abs() < 1e-6);
+    }
+
+    /// The chosen operation reaches the compiled node, and a change to the dropdown changes the
+    /// signal.
+    #[test]
+    fn the_dropdown_picks_the_operation_that_runs() {
+        for op in MathOp::ALL {
+            let mut node = math(op);
+            node.set_value(KnobId::MathA, 0.75);
+            node.set_value(KnobId::MathB, 0.25);
+            let nodes = vec![node, FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0))];
+            let links = vec![link(0, Port::Shape, 1, Port::Knob(KnobId::Cutoff))];
+            let graph = Graph::with(nodes, links);
+            let at = level(&graph, 1, KnobId::Cutoff, ControlLevels::default());
+            assert!((at - op.apply(0.75, 0.25)).abs() < 1e-6, "{op:?}: {at}");
+        }
+    }
+
+    /// Math nodes chain with each other and with maps, in any order in the graph. The nodes are
+    /// listed with the last link in the chain first, so the table must put them in running order.
+    #[test]
+    fn math_and_map_nodes_chain_in_any_order() {
+        // Filter <- map (inverts) <- math (A + B) <- lfo and a constant.
+        let mut invert = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        invert.set_value(KnobId::MapMin, 1.0);
+        invert.set_value(KnobId::MapMax, 0.0);
+        let mut add = math(MathOp::Add);
+        add.set_value(KnobId::MathB, 0.25);
+        let nodes = vec![
+            invert,
+            add,
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(1, Port::Shape, 0, Port::Shape),
+            link(2, Port::Shape, 1, Port::Knob(KnobId::MathA)),
+            link(0, Port::Shape, 3, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        let table = graph.patch().signals;
+        assert_eq!(table.len(), 2);
+        for lfo in [0.0, 0.25, 0.5] {
+            let levels = ControlLevels {
+                lfo: [lfo, 0.0],
+                ..ControlLevels::default()
+            };
+            let at = level(&graph, 3, KnobId::Cutoff, levels);
+            // The math node gives lfo + 0.25, and the map inverts it.
+            assert!((at - (1.0 - (lfo + 0.25))).abs() < 1e-6, "lfo {lfo}: {at}");
+        }
+    }
+
+    /// A math node can drive a map's own values, such as its Offset, and a map can drive a math
+    /// node's input.
+    #[test]
+    fn math_drives_a_map_value_and_a_map_drives_math() {
+        // Lfo -> math (Power) A. The math output drives a map's Offset. An envelope runs through
+        // the map into a knob.
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)),
+            math(MathOp::Minimum),
+            FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 0.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(0, Port::Shape, 1, Port::Knob(KnobId::MathA)),
+            link(1, Port::Shape, 2, Port::Knob(KnobId::MapOffset)),
+            link(3, Port::Shape, 2, Port::Shape),
+            link(2, Port::Shape, 4, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        assert!(graph.is_driven(2, KnobId::MapOffset));
+        let at = |lfo: f32| {
+            let levels = ControlLevels {
+                lfo: [lfo, 0.0],
+                envelope: [0.2; MAX_ENVELOPES],
+                ..ControlLevels::default()
+            };
+            level(&graph, 4, KnobId::Cutoff, levels)
+        };
+        // Min(lfo, 0.5) is the offset's source. At 0.5 the offset is 0, and above it stays 0.
+        assert!((at(0.5) - 0.2).abs() < 1e-6);
+        assert!((at(1.0) - 0.2).abs() < 1e-6);
+        // At lfo 0.25 the source is 0.25, so the offset is 0.25 * 2 - 1 = -0.5, which floors at 0.
+        assert_eq!(at(0.25), 0.0);
+    }
+
+    /// Two math nodes feeding each other do not hang the compiler. The loop is cut where it closes:
+    /// the node that would read itself back reads its own knob in place of that wire, so both
+    /// nodes still make a signal.
+    #[test]
+    fn math_nodes_in_a_loop_are_cut_where_it_closes() {
+        let nodes = vec![
+            math(MathOp::Add),
+            math(MathOp::Add),
+            FlodeNode::new(NodeKind::Filter, Point::new(0.0, 0.0)),
+        ];
+        let links = vec![
+            link(0, Port::Shape, 1, Port::Knob(KnobId::MathA)),
+            link(1, Port::Shape, 0, Port::Knob(KnobId::MathA)),
+            link(0, Port::Shape, 2, Port::Knob(KnobId::Cutoff)),
+        ];
+        let graph = Graph::with(nodes, links);
+        assert_eq!(graph.patch().signals.len(), 2);
+        // Node 1 compiles first, with its A held at its knob, since node 0 is mid-compile when
+        // node 1 asks for it. Node 0 then reads node 1.
+        let nodes: Vec<_> = graph.patch().signals.nodes().copied().collect();
+        let driven = |node: &crate::patch::control::SignalNode| match node {
+            crate::patch::control::SignalNode::Math(math) => math.a.source,
+            _ => panic!("not a math node"),
+        };
+        assert_eq!(driven(&nodes[0]), None);
+        assert_eq!(driven(&nodes[1]), Some(Source::Signal(0)));
+        // The cutoff follows node 0, which is the second in the table.
+        let route = graph.control_route(2, KnobId::Cutoff).unwrap();
+        assert_eq!(route.source, Source::Signal(1));
+    }
+
+    /// The node saves and loads, with its operation and constants.
+    #[test]
+    fn a_math_node_survives_saving() {
+        let mut graph = minimal_graph();
+        let node = graph.add_node(NodeKind::Math, Point::new(300.0, 200.0));
+        graph.nodes[node].choose(0, 4);
+        graph.nodes[node].set_value(KnobId::MathB, 0.8);
+        let loaded = Graph::from_saved(&graph.to_saved());
+        let loaded = &loaded.nodes[node];
+        assert_eq!(loaded.kind, NodeKind::Math);
+        assert_eq!(crate::nodes::math::operation(loaded), MathOp::Power);
+        assert!((loaded.value(KnobId::MathB) - 0.8).abs() < 1e-6);
+    }
+
+    /// A graph of the kinds in `kinds`, none of them wired.
+    fn graph_of(kinds: &[NodeKind]) -> Graph {
+        let nodes = kinds
+            .iter()
+            .map(|&kind| FlodeNode::new(kind, Point::new(0.0, 0.0)))
+            .collect();
+        Graph::with(nodes, Vec::new())
+    }
+
+    /// Auto connect wires a driver into the math node's first free input, and the second drag
+    /// takes the other one.
+    #[test]
+    fn auto_connect_wires_a_driver_into_a_math_input() {
+        let mut graph = graph_of(&[NodeKind::Lfo, NodeKind::Envelope, NodeKind::Math]);
+        assert!(graph.auto_connect(0, 2));
+        assert!(graph.is_driven(2, KnobId::MathA));
+        assert!(!graph.is_driven(2, KnobId::MathB));
+        assert!(graph.auto_connect(1, 2));
+        assert!(graph.is_driven(2, KnobId::MathB));
+    }
+
+    /// Dragging from the math node to a source that takes no control wire connects the other way
+    /// round, as it does for any pair. The macro node has outputs and no knob pins.
+    #[test]
+    fn auto_connect_works_from_the_math_node_too() {
+        let mut graph = graph_of(&[NodeKind::Macro, NodeKind::Math]);
+        assert!(graph.auto_connect(1, 0));
+        assert!(graph.is_driven(1, KnobId::MathA));
+    }
+
+    /// Dragging from the math node to a node that has knob pins wires the math output forward into
+    /// the first of them, since that way is valid.
+    #[test]
+    fn auto_connect_from_the_math_node_prefers_its_own_output() {
+        let mut graph = graph_of(&[NodeKind::Lfo, NodeKind::Math]);
+        assert!(graph.auto_connect(1, 0));
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 1 && c.to == 0 && c.out == Port::Shape));
+    }
+
+    /// The math node's output goes to a knob of another node, and to a map's input.
+    #[test]
+    fn auto_connect_wires_the_math_output_onward() {
+        let mut graph = graph_of(&[NodeKind::Math, NodeKind::Filter]);
+        assert!(graph.auto_connect(0, 1));
+        // The first free knob of the filter takes it.
+        assert!(graph.is_driven(1, KnobId::Cutoff));
+
+        let mut graph = graph_of(&[NodeKind::Math, NodeKind::Map]);
+        assert!(graph.auto_connect(0, 1));
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 0 && c.to == 1 && c.input == Port::Shape));
+    }
+
+    /// A map into a math node, and a math node into another.
+    #[test]
+    fn auto_connect_joins_math_with_maps_and_other_math() {
+        // A map has nothing feeding it here, so it makes no signal. The wire is still made.
+        let mut graph = graph_of(&[NodeKind::Map, NodeKind::Math]);
+        assert!(graph.auto_connect(0, 1));
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| { c.from == 0 && c.to == 1 && c.input == Port::Knob(KnobId::MathA) }));
+
+        let mut graph = graph_of(&[NodeKind::Math, NodeKind::Math]);
+        assert!(graph.auto_connect(0, 1));
+        assert!(graph.is_driven(1, KnobId::MathA));
+    }
+
+    /// Audio does not go to a math node. An oscillator's audio never ends on a math input. The
+    /// only wire the pair can make is the math output into one of the oscillator's knobs.
+    #[test]
+    fn auto_connect_never_sends_audio_into_a_math_node() {
+        let mut graph = graph_of(&[NodeKind::Oscillator, NodeKind::Math]);
+        graph.auto_connect(0, 1);
+        assert!(graph
+            .connections
+            .iter()
+            .all(|c| c.from == 1 && c.to == 0 && c.out == Port::Shape));
+    }
+
+    /// Dropping a math node on a wire that drives a knob splices it in: the old source feeds A, and
+    /// the node's output drives the knob. The signal then passes through the node.
+    #[test]
+    fn a_math_node_dropped_on_a_control_wire_is_spliced_in() {
+        let mut graph = minimal_graph();
+        let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
+        graph.connect(env, Port::Shape, 1, Port::Knob(KnobId::Gain));
+        let link = graph.connections.len() - 1;
+        let curve = graph.link_curve(&graph.connections[link]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        let node = graph.add_node(NodeKind::Math, Point::new(middle.x - 80.0, middle.y - 20.0));
+        graph.nodes[node].choose(
+            0,
+            MathOp::ALL
+                .iter()
+                .position(|&o| o == MathOp::Multiply)
+                .unwrap(),
+        );
+        graph.nodes[node].set_value(KnobId::MathB, 0.5);
+
+        assert_eq!(graph.link_under(node), Some(link));
+        graph.insert_into(node, link);
+        // The envelope feeds A, and the node feeds the gain.
+        assert_eq!(graph.connections[link].to, node);
+        assert_eq!(graph.connections[link].input, Port::Knob(KnobId::MathA));
+        let onward = graph.connections.last().unwrap();
+        assert_eq!((onward.from, onward.to), (node, 1));
+        assert_eq!(onward.input, Port::Knob(KnobId::Gain));
+        assert!(graph.is_driven(node, KnobId::MathA));
+        assert!(!graph.is_driven(node, KnobId::MathB));
+        // The envelope times one half.
+        let levels = ControlLevels {
+            envelope: [0.6; MAX_ENVELOPES],
+            ..ControlLevels::default()
+        };
+        let at = level(&graph, 1, KnobId::Gain, levels);
+        assert!((at - 0.3).abs() < 1e-6, "{at}");
+    }
+
+    /// A math node has no audio, so it does not splice into an audio wire. A node that already has
+    /// a wire does not splice either.
+    #[test]
+    fn a_math_node_does_not_splice_into_audio_or_when_wired() {
+        let mut graph = minimal_graph();
+        let curve = graph.link_curve(&graph.connections[0]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        let node = graph.add_node(NodeKind::Math, Point::new(middle.x - 80.0, middle.y - 20.0));
+        assert_eq!(graph.link_under(node), None);
+
+        let env = graph.add_node(NodeKind::Envelope, Point::new(0.0, 0.0));
+        graph.connect(env, Port::Shape, 1, Port::Knob(KnobId::Gain));
+        let link = graph.connections.len() - 1;
+        let curve = graph.link_curve(&graph.connections[link]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        graph.nodes[node].position = Point::new(middle.x - 80.0, middle.y - 20.0);
+        assert_eq!(graph.link_under(node), Some(link));
+        graph.connect(env, Port::Shape, node, Port::Knob(KnobId::MathB));
+        assert_eq!(graph.link_under(node), None);
+    }
+
+    /// The node is in the add menu with the utilities, and takes no audio.
+    #[test]
+    fn the_math_node_is_in_the_util_menu() {
+        assert!(Category::Util.kinds().contains(&NodeKind::Math));
+        let node = FlodeNode::new(NodeKind::Math, Point::new(0.0, 0.0));
+        assert!(!node.kind.behavior().audio_in() && !node.kind.behavior().audio_out());
+        // The knobs take control wires and the output makes one.
+        assert_eq!(node.output_ports(), vec![Port::Shape]);
+        assert!(node.output_ports()[0].is_control_out());
+    }
+}
+
+#[cfg(test)]
+mod map_polarity_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use crate::nodes::connection::Connection;
+    use crate::nodes::map;
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn link(from: usize, out: Port, to: usize, input: Port) -> Connection {
+        Connection {
+            from,
+            out,
+            to,
+            input,
+        }
+    }
+
+    fn level(graph: &Graph, node: usize, id: KnobId, levels: ControlLevels) -> f32 {
+        let wiring = graph.wiring();
+        let route = wiring.control_route(node, id).expect("a route");
+        route.apply(&wiring.with_signals(levels))
+    }
+
+    /// An envelope through a map into the filter's cutoff.
+    fn envelope_map_filter() -> Graph {
+        // The nodes sit apart, so a click on one cannot land on another.
+        let nodes = vec![
+            FlodeNode::new(NodeKind::Envelope, Point::new(0.0, 100.0)),
+            FlodeNode::new(NodeKind::Map, Point::new(300.0, 100.0)),
+            FlodeNode::new(NodeKind::Filter, Point::new(600.0, 100.0)),
+        ];
+        let links = vec![
+            link(0, Port::Shape, 1, Port::Shape),
+            link(1, Port::Shape, 2, Port::Knob(KnobId::Cutoff)),
+        ];
+        Graph::with(nodes, links)
+    }
+
+    fn at_envelope(graph: &Graph, envelope: f32) -> f32 {
+        let levels = ControlLevels {
+            envelope: [envelope; MAX_ENVELOPES],
+            ..ControlLevels::default()
+        };
+        level(graph, 2, KnobId::Cutoff, levels)
+    }
+
+    /// A 30 percent range centered at 50 gives 35 to 65 percent, as the five-node chain did.
+    #[test]
+    fn a_bipolar_map_is_a_range_around_a_center() {
+        let mut graph = envelope_map_filter();
+        graph.toggle_map_polarity(1);
+        graph.nodes[1].set_value(KnobId::MapCenter, KnobId::MapCenter.to_normalized(0.5));
+        graph.nodes[1].set_value(KnobId::MapRange, KnobId::MapRange.to_normalized(0.3));
+        assert!((at_envelope(&graph, 0.0) - 0.35).abs() < 1e-5);
+        assert!((at_envelope(&graph, 1.0) - 0.65).abs() < 1e-5);
+        assert!((at_envelope(&graph, 0.5) - 0.5).abs() < 1e-5);
+        // Moving the center slides the whole swing, and the range stays the same width.
+        graph.nodes[1].set_value(KnobId::MapCenter, KnobId::MapCenter.to_normalized(0.7));
+        assert!((at_envelope(&graph, 0.0) - 0.55).abs() < 1e-5);
+        assert!((at_envelope(&graph, 1.0) - 0.85).abs() < 1e-5);
+    }
+
+    /// A negative range runs the swing backward.
+    #[test]
+    fn a_negative_range_inverts() {
+        let mut graph = envelope_map_filter();
+        graph.toggle_map_polarity(1);
+        graph.nodes[1].set_value(KnobId::MapRange, KnobId::MapRange.to_normalized(-1.0));
+        assert!((at_envelope(&graph, 0.0) - 1.0).abs() < 1e-5);
+        assert!(at_envelope(&graph, 1.0).abs() < 1e-5);
+    }
+
+    /// Toggling leaves the signal as it was, in both directions, through the editor.
+    #[test]
+    fn toggling_keeps_the_signal() {
+        let mut graph = envelope_map_filter();
+        graph.nodes[1].set_value(KnobId::MapMin, KnobId::MapMin.to_normalized(0.2));
+        graph.nodes[1].set_value(KnobId::MapMax, KnobId::MapMax.to_normalized(0.6));
+        let samples = [0.0, 0.3, 0.7, 1.0];
+        let before: Vec<f32> = samples.iter().map(|&e| at_envelope(&graph, e)).collect();
+        graph.toggle_map_polarity(1);
+        assert!(map::bipolar(&graph.nodes[1]));
+        let bipolar: Vec<f32> = samples.iter().map(|&e| at_envelope(&graph, e)).collect();
+        graph.toggle_map_polarity(1);
+        assert!(!map::bipolar(&graph.nodes[1]));
+        let after: Vec<f32> = samples.iter().map(|&e| at_envelope(&graph, e)).collect();
+        for i in 0..samples.len() {
+            assert!((before[i] - bipolar[i]).abs() < 1e-5, "{i}");
+            assert!((before[i] - after[i]).abs() < 1e-5, "{i}");
+        }
+    }
+
+    /// The wires of the pair that leaves go with it, and the other pair's wires stay.
+    #[test]
+    fn toggling_drops_the_wires_of_the_pair_that_leaves() {
+        let mut graph = envelope_map_filter();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapMin));
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapInMin));
+        assert!(graph.is_driven(1, KnobId::MapMin));
+        graph.toggle_map_polarity(1);
+        // The Out min wire is gone. In min's stays.
+        assert!(!graph
+            .connections
+            .iter()
+            .any(|c| c.to == 1 && c.input == Port::Knob(KnobId::MapMin)));
+        assert!(graph.is_driven(1, KnobId::MapInMin));
+        // Every wire that is left still ends on a pin that exists.
+        assert!(graph.connections.iter().all(|c| c.is_valid(&graph.nodes)));
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapCenter));
+        graph.toggle_map_polarity(1);
+        assert!(!graph
+            .connections
+            .iter()
+            .any(|c| c.to == 1 && c.input == Port::Knob(KnobId::MapCenter)));
+        assert!(graph.connections.iter().all(|c| c.is_valid(&graph.nodes)));
+    }
+
+    /// A source on Range moves the swing's width live, and a source on Center moves its middle.
+    #[test]
+    fn center_and_range_can_be_driven() {
+        let mut graph = envelope_map_filter();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
+        graph.toggle_map_polarity(1);
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapRange));
+        assert!(graph.is_driven(1, KnobId::MapRange));
+        let levels = |lfo_level: f32| ControlLevels {
+            envelope: [1.0; MAX_ENVELOPES],
+            lfo: [lfo_level, 0.0],
+            ..ControlLevels::default()
+        };
+        // The range follows the source from -1 to +1, so the top of the swing is the center plus
+        // half of it. At 0.5 the range is 0, so the output is the center. At 1.0 it is 100 wide,
+        // and the top reaches 1. At 0.75 it is 50 wide, and the top is 0.75.
+        assert!((level(&graph, 2, KnobId::Cutoff, levels(0.5)) - 0.5).abs() < 1e-5);
+        assert!((level(&graph, 2, KnobId::Cutoff, levels(1.0)) - 1.0).abs() < 1e-5);
+        assert!((level(&graph, 2, KnobId::Cutoff, levels(0.75)) - 0.75).abs() < 1e-5);
+        // At 0.0 the range is -100, so a full input gives the bottom.
+        assert!(level(&graph, 2, KnobId::Cutoff, levels(0.0)).abs() < 1e-5);
+
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapCenter));
+        assert!(graph.is_driven(1, KnobId::MapCenter));
+    }
+
+    /// The hidden Out min and Out max are not read while bipolar, even if they hold other values.
+    #[test]
+    fn the_hidden_ends_are_ignored_while_bipolar() {
+        let mut graph = envelope_map_filter();
+        graph.toggle_map_polarity(1);
+        graph.nodes[1].set_value(KnobId::MapMin, 0.9);
+        graph.nodes[1].set_value(KnobId::MapMax, 0.9);
+        assert!((at_envelope(&graph, 0.0) - 0.0).abs() < 1e-5);
+        assert!((at_envelope(&graph, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// A bipolar map has no Offset: its pin goes with the wire on it, and a value the knob still
+    /// holds does not reach the signal.
+    #[test]
+    fn a_bipolar_map_has_no_offset() {
+        let mut graph = envelope_map_filter();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapOffset));
+        assert!(graph.is_driven(1, KnobId::MapOffset));
+        graph.toggle_map_polarity(1);
+        assert!(!graph
+            .connections
+            .iter()
+            .any(|c| c.to == 1 && c.input == Port::Knob(KnobId::MapOffset)));
+        assert!(!graph.nodes[1]
+            .input_ports()
+            .contains(&Port::Knob(KnobId::MapOffset)));
+        // A value left in the knob is not applied.
+        graph.nodes[1].set_value(KnobId::MapOffset, KnobId::MapOffset.to_normalized(0.4));
+        assert!(at_envelope(&graph, 0.0).abs() < 1e-5);
+        assert!((at_envelope(&graph, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// Going bipolar folds the offset into Center, so the signal stays what it was.
+    #[test]
+    fn going_bipolar_folds_the_offset_into_center() {
+        let mut graph = envelope_map_filter();
+        graph.nodes[1].set_value(KnobId::MapMax, KnobId::MapMax.to_normalized(0.5));
+        graph.nodes[1].set_value(KnobId::MapOffset, KnobId::MapOffset.to_normalized(0.25));
+        let samples = [0.0, 0.5, 1.0];
+        let before: Vec<f32> = samples.iter().map(|&e| at_envelope(&graph, e)).collect();
+        assert!((before[0] - 0.25).abs() < 1e-5 && (before[2] - 0.75).abs() < 1e-5);
+        graph.toggle_map_polarity(1);
+        // The swing from 25 to 75 is centered at 50 and 50 wide.
+        assert!((graph.nodes[1].plain(KnobId::MapCenter) - 0.5).abs() < 1e-5);
+        assert!((graph.nodes[1].plain(KnobId::MapRange) - 0.5).abs() < 1e-5);
+        for (i, &e) in samples.iter().enumerate() {
+            assert!((at_envelope(&graph, e) - before[i]).abs() < 1e-5, "{e}");
+        }
+    }
+
+    /// Dragging a handle on a bipolar map changes Center and Range, and the end under the cursor
+    /// follows it while the other end stays.
+    #[test]
+    fn dragging_a_handle_sets_center_and_range() {
+        use crate::editor::curve::{drag_map_handle, map_handles, MapDriven};
+        use crate::nodes::viewer::Live;
+        let mut node = FlodeNode::new(NodeKind::Map, Point::new(0.0, 0.0));
+        map::set_bipolar(&mut node, true);
+        let bounds = node.curve_bounds();
+        // Drag the low end up to 20 percent, with the high end at 100.
+        let target = Point::new(bounds.x + 10.0, bounds.y + bounds.height * 0.8);
+        drag_map_handle(&mut node, 0, target, 0.0, MapDriven::default());
+        let (low, high) = map::ends_of(node.plain(KnobId::MapCenter), node.plain(KnobId::MapRange));
+        assert!(
+            (low - 0.2).abs() < 1e-4 && (high - 1.0).abs() < 1e-4,
+            "{low} {high}"
+        );
+        assert!((node.plain(KnobId::MapCenter) - 0.6).abs() < 1e-4);
+        assert!((node.plain(KnobId::MapRange) - 0.8).abs() < 1e-4);
+        // The handle is where it was dragged to.
+        let handle = map_handles(&node, &Live::of(&node))[0];
+        assert!((handle.y - target.y).abs() < 1e-2);
+        // The hidden ends were not touched.
+        assert_eq!(node.plain(KnobId::MapMin), 0.0);
+        assert_eq!(node.plain(KnobId::MapMax), 1.0);
+        // A wire on Center or Range holds the output still.
+        let before = (node.value(KnobId::MapCenter), node.value(KnobId::MapRange));
+        let up = Point::new(bounds.x + 10.0, bounds.y + 2.0);
+        drag_map_handle(
+            &mut node,
+            1,
+            up,
+            0.0,
+            MapDriven {
+                input: false,
+                output: true,
+            },
+        );
+        assert_eq!(
+            before,
+            (node.value(KnobId::MapCenter), node.value(KnobId::MapRange))
+        );
+    }
+
+    /// Clicking the Bipolar checkbox through the editor converts the values and swaps the knobs.
+    #[test]
+    fn clicking_the_checkbox_toggles_the_polarity() {
+        let mut graph = envelope_map_filter();
+        graph.nodes[1].set_value(KnobId::MapMin, KnobId::MapMin.to_normalized(0.2));
+        graph.nodes[1].set_value(KnobId::MapMax, KnobId::MapMax.to_normalized(0.6));
+        let checkbox = graph.nodes[1].switch_bounds(0);
+        let at = Point::new(checkbox.x + 6.0, checkbox.y + checkbox.height / 2.0);
+        let click = |graph: &mut Graph| {
+            let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+            let bounds = Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1024.0,
+                height: 712.0,
+            };
+            editor.update(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                Cursor::Available(at),
+            );
+            editor.update(
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                bounds,
+                Cursor::Available(at),
+            );
+        };
+        click(&mut graph);
+        assert!(map::bipolar(&graph.nodes[1]));
+        assert!((graph.nodes[1].plain(KnobId::MapCenter) - 0.4).abs() < 1e-5);
+        assert!((graph.nodes[1].plain(KnobId::MapRange) - 0.4).abs() < 1e-5);
+        click(&mut graph);
+        assert!(!map::bipolar(&graph.nodes[1]));
+        assert!((graph.nodes[1].plain(KnobId::MapMin) - 0.2).abs() < 1e-5);
+        assert!((graph.nodes[1].plain(KnobId::MapMax) - 0.6).abs() < 1e-5);
+    }
+
+    /// A bipolar map saves and loads, with its wires on Center and Range intact.
+    #[test]
+    fn a_bipolar_map_survives_saving() {
+        let mut graph = envelope_map_filter();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 0.0));
+        graph.toggle_map_polarity(1);
+        graph.nodes[1].set_value(KnobId::MapCenter, KnobId::MapCenter.to_normalized(0.3));
+        graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::MapRange));
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert!(map::bipolar(&loaded.nodes[1]));
+        assert!((loaded.nodes[1].plain(KnobId::MapCenter) - 0.3).abs() < 1e-5);
+        assert!(loaded.is_driven(1, KnobId::MapRange));
+        assert_eq!(loaded.connections.len(), graph.connections.len());
     }
 }

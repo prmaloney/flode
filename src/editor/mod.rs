@@ -242,6 +242,7 @@ impl IcedEditor for FlodeEditor {
                 *saved = self.graph.to_saved();
             }
         }
+        self.graph.spectra = meters.spectra;
         let output = self.meter.update(meters.output, seconds);
 
         // The MIDI light flashes when the audio thread has taken in a note-on since the last frame,

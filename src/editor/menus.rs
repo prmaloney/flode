@@ -345,7 +345,8 @@ pub(super) fn group_menu_items(node: &FlodeNode) -> &'static [MenuItem] {
     }
 }
 
-/// The right-click menu for one node. `position` is its top-left corner.
+/// The right-click menu for one node. `position` is its top-left corner in screen coordinates, so
+/// the menu keeps one size and one place on screen whatever the zoom and pan are.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ContextMenu {
     pub(super) node: usize,

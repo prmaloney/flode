@@ -4,33 +4,58 @@
 //! into the patch for the audio thread. It holds no editing state.
 
 use super::control::{
-    ControlLevels, KnobValue, MapStage, Param, Route, Source, MAX_ENVELOPES, MAX_LFOS, MAX_MAPS,
+    ControlLevels, KnobValue, MapNode, MapValue, MathNode, Param, Route, SignalNode, SignalTable,
+    Source, MAX_ENVELOPES, MAX_LFOS,
 };
 use super::stage::{
-    ChorusParams, CompressorParams, DelayParams, DistortionParams, FilterParams, FlangerParams,
-    LaneGraph, MixParams, OscillatorParams, PhaserParams, ReverbParams, StageParams, StageSpec,
-    MAX_INPUTS, MAX_STAGES,
+    ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
+    FilterParams, FlangerParams, LaneGraph, MixParams, OscillatorParams, PhaserParams,
+    ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
 use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, filter, input, lfo, map, mix, oscillator, phaser, Bypass,
-    FlodeNode, NodeKind, Port,
+    compressor, delay, distortion, eq, filter, input, lfo, map, math, mix, oscillator, phaser,
+    Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
+use std::cell::OnceCell;
 
 /// The nodes and wires of a graph, borrowed for a query.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Wiring<'a> {
     nodes: &'a [FlodeNode],
     links: &'a [Connection],
+    /// The patch's map and math nodes, worked out the first time a query needs one.
+    signals: OnceCell<SignalBuild>,
+}
+
+/// The map and math nodes of a graph as the patch runs them, and which node is which.
+#[derive(Clone, Default)]
+struct SignalBuild {
+    table: SignalTable,
+    /// The graph node and its place in `table`, for each one that makes a signal.
+    nodes: Vec<(usize, u8)>,
+}
+
+impl SignalBuild {
+    fn index_of(&self, node: usize) -> Option<u8> {
+        self.nodes
+            .iter()
+            .find(|(found, _)| *found == node)
+            .map(|&(_, at)| at)
+    }
 }
 
 impl<'a> Wiring<'a> {
     pub fn new(nodes: &'a [FlodeNode], links: &'a [Connection]) -> Self {
-        Self { nodes, links }
+        Self {
+            nodes,
+            links,
+            signals: OnceCell::new(),
+        }
     }
 
     /// The wire into an input port. An input holds one wire.
@@ -102,107 +127,169 @@ impl<'a> Wiring<'a> {
         self.control_route(node, id).is_some()
     }
 
-    /// The control path to a knob: a source, and the maps its level passes through on the way.
-    /// The path is only valid if it ends at an envelope, an LFO, or a MIDI source. Returns None
-    /// for a knob without one.
+    /// The control route to a knob: the source that drives it. The source can be an envelope, an
+    /// LFO, a MIDI source, a macro, a map, or a math node, and a map or math node takes its own
+    /// input from any of those, so the chain behind a knob can be as long as the graph. Returns
+    /// None for a knob with no wire, or one whose chain does not end at a source.
     pub fn control_route(&self, node: usize, id: KnobId) -> Option<Route> {
-        let mut link = self
-            .links
+        let link = self.control_link(node, id)?;
+        self.source_at(link.from, link.out)
+            .map(|source| Route { source })
+    }
+
+    /// The control wire into a knob's pin.
+    fn control_link(&self, node: usize, id: KnobId) -> Option<&'a Connection> {
+        self.links
             .iter()
-            .find(|c| c.out.is_control_out() && c.to == node && c.input == Port::Knob(id))?;
-        // The maps on the path, from the knob back toward the source.
-        let mut maps: Vec<usize> = Vec::new();
-        // A graph can't have more links than nodes, so a longer walk means a loop.
-        for _ in 0..self.nodes.len() {
-            let source = link.from;
-            match self.nodes[source].kind {
-                NodeKind::Envelope => {
-                    let index = self.envelope_index(source)?;
-                    return self.compose(&maps, Source::Envelope(index));
-                }
-                NodeKind::Lfo => {
-                    let index = self.lfo_index(source)?;
-                    return self.compose(&maps, Source::Lfo(index));
-                }
-                NodeKind::Input => {
-                    // An input node's pins are the MIDI sources, so the wire says which one.
-                    let Port::Midi(midi) = link.out else {
-                        return None;
-                    };
-                    return self.compose(&maps, Source::Midi(midi));
-                }
-                NodeKind::Macro => {
-                    let Port::Macro(index) = link.out else {
-                        return None;
-                    };
-                    return self.compose(&maps, Source::Macro(index));
-                }
-                NodeKind::Map => {
-                    maps.push(source);
-                    link = self.input_link(source, Port::Shape)?;
-                }
-                _ => return None,
-            }
-        }
-        None
+            .find(|c| c.out.is_control_out() && c.to == node && c.input == Port::Knob(id))
     }
 
-    /// Applies the maps to a source in signal order, starting from the source.
-    fn compose(&self, maps: &[usize], source: Source) -> Option<Route> {
-        if maps.len() > MAX_MAPS {
-            return None;
-        }
-        // The maps are stored from the knob back toward the source, so reverse them to signal order.
-        let mut stages = [MapStage::IDENTITY; MAX_MAPS];
-        for (slot, &index) in maps.iter().rev().enumerate() {
-            stages[slot] = map::stage(&self.nodes[index]);
-        }
-        Some(Route {
-            source,
-            stages,
-            count: maps.len(),
-        })
-    }
-
-    /// The level of the signal on a control output, as the live control levels give it. Maps on
-    /// the way apply their curves.
-    pub fn control_level(
-        &self,
-        from: usize,
-        out: Port,
-        levels: &ControlLevels,
-        depth: usize,
-    ) -> Option<f32> {
-        if depth > self.nodes.len() {
-            return None;
-        }
+    /// The source on a control output, or None if the output makes no signal. A map or math node
+    /// is the one the patch runs, found by its node.
+    fn source_at(&self, from: usize, out: Port) -> Option<Source> {
         match self.nodes.get(from)?.kind {
-            NodeKind::Envelope => {
-                let index = self.envelope_index(from)?;
-                Some(levels.envelope[index])
-            }
-            NodeKind::Lfo => self.lfo_index(from).map(|index| levels.lfo[index]),
+            NodeKind::Map | NodeKind::Math => self.signals().index_of(from).map(Source::Signal),
+            _ => self.leaf_source(from, out),
+        }
+    }
+
+    /// The source a node makes, for every kind of node that is a source and not a map or math
+    /// node.
+    fn leaf_source(&self, from: usize, out: Port) -> Option<Source> {
+        match self.nodes.get(from)?.kind {
+            NodeKind::Envelope => self.envelope_index(from).map(|i| Source::Envelope(i as u8)),
+            NodeKind::Lfo => self.lfo_index(from).map(|i| Source::Lfo(i as u8)),
+            // An input node's pins are the MIDI sources, so the wire says which one.
             NodeKind::Input => match out {
-                Port::Midi(source) => Some(levels.midi[source.index()]),
+                Port::Midi(midi) => Some(Source::Midi(midi)),
                 _ => None,
             },
             NodeKind::Macro => match out {
-                Port::Macro(index) => levels.macros.get(index).copied(),
+                Port::Macro(index) => Some(Source::Macro(index as u8)),
                 _ => None,
             },
-            NodeKind::Map => {
-                let link = self.input_link(from, Port::Shape)?;
-                let input = self.control_level(link.from, link.out, levels, depth + 1)?;
-                Some(map::stage(&self.nodes[from]).apply(input))
-            }
             _ => None,
         }
+    }
+
+    /// The patch's map and math nodes. They are worked out once for this view of the graph.
+    fn signals(&self) -> &SignalBuild {
+        self.signals.get_or_init(|| {
+            let mut build = SignalBuild::default();
+            let mut path = Vec::new();
+            for node in 0..self.nodes.len() {
+                if matches!(self.nodes[node].kind, NodeKind::Map | NodeKind::Math) {
+                    self.compile_signal(node, &mut build, &mut path);
+                }
+            }
+            build
+        })
+    }
+
+    /// Adds map or math node `node` to the table, after the nodes that feed it, and returns its
+    /// place. A node already added keeps its place. None means the node makes no signal: a map
+    /// has nothing wired to its input, what feeds it is not a source, it is part of a loop, or the
+    /// table is full. A math node needs no wire, since an input with none is the knob's number.
+    fn compile_signal(
+        &self,
+        node: usize,
+        build: &mut SignalBuild,
+        path: &mut Vec<usize>,
+    ) -> Option<u8> {
+        if let Some(at) = build.index_of(node) {
+            return Some(at);
+        }
+        if path.contains(&node) {
+            return None;
+        }
+        path.push(node);
+        // What a wire into `from` carries: the place in the table of a map or math node, which
+        // compiles it first, or any other source.
+        let mut source_from = |from: usize, out: Port| match self.nodes[from].kind {
+            NodeKind::Map | NodeKind::Math => {
+                self.compile_signal(from, build, path).map(Source::Signal)
+            }
+            _ => self.leaf_source(from, out),
+        };
+        let value = |id: KnobId, source_from: &mut dyn FnMut(usize, Port) -> Option<Source>| {
+            MapValue {
+                value: self.nodes[node].plain(id),
+                // A value with a wire that makes no signal holds its own number.
+                source: self
+                    .control_link(node, id)
+                    .and_then(|link| source_from(link.from, link.out)),
+            }
+        };
+        let made: Option<SignalNode> = match self.nodes[node].kind {
+            NodeKind::Map => {
+                let input = self
+                    .input_link(node, Port::Shape)
+                    .and_then(|link| source_from(link.from, link.out));
+                let in_lo = value(KnobId::MapInMin, &mut source_from);
+                let in_hi = value(KnobId::MapInMax, &mut source_from);
+                // A bipolar map has the Center and Range knobs on show, and neither the output
+                // ends nor the offset are read, since Center does the offset's job. Otherwise the
+                // ends and the offset are read, and the other two are not.
+                let (out_lo, out_hi, offset, center_range) = if map::bipolar(&self.nodes[node]) {
+                    let center = value(KnobId::MapCenter, &mut source_from);
+                    let range = value(KnobId::MapRange, &mut source_from);
+                    (
+                        MapValue::fixed(self.nodes[node].plain(KnobId::MapMin)),
+                        MapValue::fixed(self.nodes[node].plain(KnobId::MapMax)),
+                        MapValue::fixed(0.0),
+                        Some((center, range)),
+                    )
+                } else {
+                    (
+                        value(KnobId::MapMin, &mut source_from),
+                        value(KnobId::MapMax, &mut source_from),
+                        value(KnobId::MapOffset, &mut source_from),
+                        None,
+                    )
+                };
+                input.map(|input| {
+                    SignalNode::Map(MapNode {
+                        input,
+                        in_lo,
+                        in_hi,
+                        out_lo,
+                        out_hi,
+                        offset,
+                        center_range,
+                    })
+                })
+            }
+            NodeKind::Math => Some(SignalNode::Math(MathNode {
+                op: math::operation(&self.nodes[node]),
+                a: value(KnobId::MathA, &mut source_from),
+                b: value(KnobId::MathB, &mut source_from),
+            })),
+            _ => None,
+        };
+        path.pop();
+        let at = build.table.push(made?)?;
+        build.nodes.push((node, at as u8));
+        Some(at as u8)
+    }
+
+    /// The level of the signal on a control output, as the live control levels give it. The levels
+    /// must have the map and math nodes worked out, as the engine's do.
+    pub fn control_level(&self, from: usize, out: Port, levels: &ControlLevels) -> Option<f32> {
+        self.source_at(from, out).map(|source| levels.level(source))
+    }
+
+    /// `levels` with every map and math node's output worked out from its sources, as the engine
+    /// does. A test sets the sources it wants and calls this to read what a route gives.
+    #[cfg(test)]
+    pub fn with_signals(&self, mut levels: ControlLevels) -> ControlLevels {
+        self.signals().table.evaluate(&mut levels);
+        levels
     }
 
     /// The level arriving at a map's input, if a control source feeds it.
     pub fn map_input_level(&self, node: usize, levels: &ControlLevels) -> Option<f32> {
         let link = self.input_link(node, Port::Shape)?;
-        self.control_level(link.from, link.out, levels, 0)
+        self.control_level(link.from, link.out, levels)
     }
 
     /// The index of the envelope wired to an oscillator's input, if one is.
@@ -309,6 +396,7 @@ impl<'a> Wiring<'a> {
     pub fn patch(&self) -> Patch {
         Patch {
             lanes: self.lane_graphs(),
+            signals: self.signals().table,
             envelopes: self.envelope_settings(),
             lfos: self.lfo_settings(),
             globals: self.globals(),
@@ -327,6 +415,28 @@ impl<'a> Wiring<'a> {
             }
             _ => LaneGraph::silent(self.slot_gain(output, slot)),
         })
+    }
+
+    /// Which engine instance each EQ node runs on, as (node, pool number) pairs, in the order the
+    /// compiler hands them out. The editor reads an EQ node's spectrum from its instance. A node
+    /// that plays in no slot, or a bypassed one, has no entry. An EQ node that two slots both play
+    /// has an entry for each.
+    pub fn eq_pools(&self) -> Vec<(usize, u8)> {
+        let Some(output) = self.first_output() else {
+            return Vec::new();
+        };
+        let mut pools = [0u8; EFFECT_KINDS];
+        let mut found = Vec::new();
+        for slot in 0..MAX_SLOTS.min(self.nodes[output].used) {
+            let Some(link) = self.input_link(output, Port::Slot(slot)) else {
+                continue;
+            };
+            let mut builder = LaneBuilder::new(&mut pools);
+            if builder.place(self, link.from).is_some() && !builder.overflowed {
+                found.extend(builder.eq_pools);
+            }
+        }
+        found
     }
 
     /// The gain knob of a slot, as a param.
@@ -440,7 +550,17 @@ impl<'a> Wiring<'a> {
                 spread: knob(KnobId::Spread),
                 mix: knob(KnobId::Mix),
             })),
+            NodeKind::Eq => Some(StageParams::Eq(EqParams {
+                analyzer: eq::analyzer(n),
+                bands: std::array::from_fn(|band| EqBandParams {
+                    kind: eq::kind(n, band),
+                    freq: knob(eq::FREQ[band]),
+                    gain: knob(eq::GAIN[band]),
+                    q: knob(eq::Q[band]),
+                }),
+            })),
             NodeKind::Map
+            | NodeKind::Math
             | NodeKind::Output
             | NodeKind::Lfo
             | NodeKind::Input
@@ -450,9 +570,9 @@ impl<'a> Wiring<'a> {
     }
 }
 
-/// The kinds of bus stage that keep memory, for counting how many of each a patch uses: the seven
+/// The kinds of bus stage that keep memory, for counting how many of each a patch uses: the eight
 /// effects, and the filter, which only runs on the bus when something on the bus feeds it.
-pub const EFFECT_KINDS: usize = 8;
+pub const EFFECT_KINDS: usize = 9;
 
 /// Which counter a bus stage uses, or None for a stage with no memory, such as a mix.
 fn pool_kind(params: &StageParams) -> Option<usize> {
@@ -465,6 +585,7 @@ fn pool_kind(params: &StageParams) -> Option<usize> {
         StageParams::Phaser(_) => Some(5),
         StageParams::Flanger(_) => Some(6),
         StageParams::Filter(_) => Some(7),
+        StageParams::Eq(_) => Some(8),
         StageParams::Oscillator(_) | StageParams::Mix(_) => None,
     }
 }
@@ -480,6 +601,8 @@ struct LaneBuilder<'p> {
     path: Vec<usize>,
     /// Set when the slot needs more stages than fit.
     overflowed: bool,
+    /// The EQ nodes placed so far and the instance each one took.
+    eq_pools: Vec<(usize, u8)>,
 }
 
 impl<'p> LaneBuilder<'p> {
@@ -490,6 +613,7 @@ impl<'p> LaneBuilder<'p> {
             placed: Vec::new(),
             path: Vec::new(),
             overflowed: false,
+            eq_pools: Vec::new(),
         }
     }
 
@@ -558,6 +682,9 @@ impl<'p> LaneBuilder<'p> {
             if let Some(kind) = pool_kind(&params) {
                 pool = self.pools[kind];
                 self.pools[kind] = pool.saturating_add(1);
+                if matches!(params, StageParams::Eq(_)) {
+                    self.eq_pools.push((node, pool));
+                }
             }
             // A per-voice stage that feeds the bus is added across the voices to feed it.
             for source in inputs.iter().flatten() {
@@ -689,14 +816,8 @@ mod tests {
         let mut levels = ControlLevels::default();
         levels.macros[2] = 1.0;
         assert_eq!(route.apply(&levels), 1.0);
-        assert_eq!(
-            wiring.control_level(0, Port::Macro(2), &levels, 0),
-            Some(1.0)
-        );
-        assert_eq!(
-            wiring.control_level(0, Port::Macro(1), &levels, 0),
-            Some(0.0)
-        );
+        assert_eq!(wiring.control_level(0, Port::Macro(2), &levels), Some(1.0));
+        assert_eq!(wiring.control_level(0, Port::Macro(1), &levels), Some(0.0));
     }
 
     /// Every stage reads only stages placed before it.
@@ -1002,6 +1123,7 @@ mod effect_tests {
             NodeKind::Chorus,
             NodeKind::Phaser,
             NodeKind::Flanger,
+            NodeKind::Eq,
         ];
         for kind in NodeKind::ALL {
             let nodes = vec![node(kind)];
@@ -1014,6 +1136,68 @@ mod effect_tests {
                 assert_eq!(ports.iter().filter(|p| p.is_audio()).count(), 1, "{kind:?}");
             }
         }
+    }
+
+    /// An EQ node's stage carries each band's kind from its toggle and each setting from its
+    /// knobs, and a Q that a wire drives has a route.
+    #[test]
+    fn an_eq_stage_carries_its_bands() {
+        let mut nodes = vec![node(NodeKind::Eq), node(NodeKind::Lfo)];
+        nodes[0].set_switch(eq::band_switch(0), true);
+        nodes[0].set_value(eq::GAIN[1], eq::GAIN[1].to_normalized(6.0));
+        let links = [Connection {
+            from: 1,
+            out: Port::Shape,
+            to: 0,
+            input: Port::Knob(eq::Q[2]),
+        }];
+        let Some(StageParams::Eq(params)) = Wiring::new(&nodes, &links).stage_params(0) else {
+            panic!("an EQ node makes an EQ stage");
+        };
+        let levels = ControlLevels::default();
+        assert_eq!(
+            params.bands[0].kind,
+            crate::dsp::effects::eq::EqKind::HighPass
+        );
+        assert_eq!(params.bands[1].kind, crate::dsp::effects::eq::EqKind::Peak);
+        assert_eq!(
+            params.bands[3].kind,
+            crate::dsp::effects::eq::EqKind::HighShelf
+        );
+        assert!((params.bands[1].gain.plain(&levels) - 6.0).abs() < 1e-3);
+        assert!((params.bands[3].freq.plain(&levels) - eq::FREQ[3].default_plain()).abs() < 0.1);
+        assert_ne!(
+            params.bands[2].q,
+            Wiring::new(&nodes, &[])
+                .stage_params(0)
+                .map_or(params.bands[2].q, |p| match p {
+                    StageParams::Eq(p) => p.bands[2].q,
+                    _ => unreachable!(),
+                })
+        );
+    }
+
+    /// The compiler's pool numbers for EQ nodes are what the editor reads spectra by. Two EQ nodes
+    /// in a chain take instances 0 and 1 in signal order, and an EQ wired to nothing takes none.
+    #[test]
+    fn eq_nodes_report_their_pool_instances() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Eq),
+            node(NodeKind::Eq),
+            node(NodeKind::Eq),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 4, Port::Slot(0)),
+        ];
+        nodes[4].used = 1;
+        let mut links = links.to_vec();
+        super::tests::with_notes(&mut nodes, &mut links);
+        let pools = Wiring::new(&nodes, &links).eq_pools();
+        assert_eq!(pools, vec![(1, 0), (2, 1)]);
     }
 
     /// An oscillator through a reverb is two stages. The oscillator is tapped, so the engine sums

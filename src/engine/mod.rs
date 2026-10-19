@@ -3,6 +3,7 @@
 //! stages of the current patch for every sounding voice.
 
 mod effects;
+pub use effects::POOL;
 mod lane;
 mod lfo;
 #[cfg(test)]
@@ -144,14 +145,18 @@ impl Engine {
 
     /// Every control source's level right now. Knobs read their route from these.
     pub fn levels(&self) -> ControlLevels {
-        ControlLevels {
+        let mut levels = ControlLevels {
             envelope: self.env_levels,
             lfo: self.lfos.levels(),
             midi: self.midi_levels,
             macros: self.macro_levels,
             envelope_phase: self.env_phases,
             lfo_phase: self.lfos.phases(),
-        }
+            ..ControlLevels::default()
+        };
+        // The map and math nodes read the sources, so they come last.
+        self.patch.signals.evaluate(&mut levels);
+        levels
     }
 
     /// Sets the macro knobs' levels, from the host parameters. The plugin calls it each sample.
@@ -350,6 +355,7 @@ impl Engine {
                 lfo_levels: levels.lfo,
                 midi_levels: levels.midi,
                 macro_levels: levels.macros,
+                signals: &self.patch.signals,
                 envelopes_active: self.envelopes_active,
                 sample_rate: self.sample_rate,
                 smooth: self.smooth,
@@ -411,6 +417,11 @@ impl Engine {
         self.output_peak[0] = self.output_peak[0].max(result.l.abs());
         self.output_peak[1] = self.output_peak[1].max(result.r.abs());
         result
+    }
+
+    /// The spectrum each EQ instance last measured, for the editor's analyzer display.
+    pub fn spectra(&self) -> [[f32; crate::dsp::analyzer::BINS]; effects::POOL] {
+        self.effects.spectra()
     }
 
     /// The loudest left and right sample since the last call, as linear amplitude. The meter

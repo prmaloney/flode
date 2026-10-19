@@ -5,7 +5,7 @@ use super::*;
 use crate::dsp::envelope::EnvPhase;
 use crate::dsp::mix::MixMode;
 use crate::nodes::knobs::KnobId;
-use crate::patch::control::{KnobValue, MapStage, Param, Route, Source, MAX_MAPS};
+use crate::patch::control::{KnobValue, MapNode, MapValue, Param, Route, Source};
 use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageParams, StageSpec};
 use crate::patch::EnvelopeSettings;
 use std::sync::OnceLock;
@@ -106,8 +106,6 @@ fn a_macro_level_drives_a_knob() {
         value: 0.0,
         route: Some(Route {
             source: Source::Macro(2),
-            stages: [MapStage::IDENTITY; MAX_MAPS],
-            count: 0,
         }),
     };
     let quiet_then_loud = OscillatorParams {
@@ -332,8 +330,6 @@ fn a_driven_cutoff_follows_each_voices_own_envelope() {
         value: 0.0,
         route: Some(Route {
             source: Source::Envelope(0),
-            stages: [MapStage::IDENTITY; MAX_MAPS],
-            count: 0,
         }),
     };
     let filter = StageSpec::new(StageParams::Filter(FilterParams {
@@ -343,6 +339,188 @@ fn a_driven_cutoff_follows_each_voices_own_envelope() {
     .with_input(0, 0);
     let mut patch = patch_with(0, &[osc(OscillatorParams::default()), filter]);
     // A slow attack, so a note a moment old sits far below one a second old.
+    patch.envelopes[0] = Some(EnvelopeSettings {
+        attack: Param::fixed(KnobId::Attack, 4.0),
+        ..envelope(0.5, 1.0)
+    });
+    let mut engine = engine_on(&patch);
+
+    engine.note_on(60, 1.0);
+    render(&mut engine, 44100);
+    engine.note_on(64, 1.0);
+    render(&mut engine, 4410);
+
+    let cutoffs: Vec<f32> = engine.lanes[0]
+        .voices()
+        .map(|voice| match voice.stages[1] {
+            StageState::Filter(state) => state.cutoff_hz(),
+            _ => panic!("not a filter"),
+        })
+        .collect();
+    assert_eq!(cutoffs.len(), 2);
+    assert!(cutoffs[0] > cutoffs[1] * 2.0, "{cutoffs:?}");
+}
+
+/// A map that inverts its input: 1.0 in gives 0.0 out.
+fn inverting_map(input: Source) -> MapNode {
+    MapNode {
+        input,
+        in_lo: MapValue::fixed(0.0),
+        in_hi: MapValue::fixed(1.0),
+        out_lo: MapValue::fixed(1.0),
+        out_hi: MapValue::fixed(0.0),
+        offset: MapValue::fixed(0.0),
+        center_range: None,
+    }
+}
+
+/// A knob driven through a map follows the map's curve, not the source. With the macro up the
+/// inverted map is down, so the oscillator is quiet then and loud with the macro down.
+#[test]
+fn a_knob_driven_through_a_map_follows_the_maps_curve() {
+    let driven = KnobValue {
+        value: 0.0,
+        route: Some(Route {
+            source: Source::Signal(0),
+        }),
+    };
+    let params = OscillatorParams {
+        level: Param::new(KnobId::OscGain, driven),
+        ..OscillatorParams::default()
+    };
+    let mut patch = patch_with(0, &[osc(params)]);
+    patch.signals.push(inverting_map(Source::Macro(2)));
+    let mut engine = engine_on(&patch);
+    engine.note_on(60, 1.0);
+
+    engine.set_macros([0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(engine.levels().signals[0], 0.0);
+    let quiet = peak(&render(&mut engine, 2000));
+    engine.set_macros([0.0; 4]);
+    assert_eq!(engine.levels().signals[0], 1.0);
+    let loud = peak(&render(&mut engine, 2000));
+    assert!(loud > 0.05 && quiet < loud * 0.1, "{quiet} {loud}");
+}
+
+/// A map can read another map, so two inverting maps in a row give the source back.
+#[test]
+fn maps_chain_in_the_engine() {
+    let mut patch = Patch::silent();
+    patch.signals.push(inverting_map(Source::Macro(1)));
+    patch.signals.push(inverting_map(Source::Signal(0)));
+    let mut engine = engine_on(&patch);
+    for level in [0.0, 0.25, 1.0] {
+        engine.set_macros([0.0, level, 0.0, 0.0]);
+        let levels = engine.levels();
+        assert!((levels.signals[0] - (1.0 - level)).abs() < 1e-6);
+        assert!((levels.signals[1] - level).abs() < 1e-6, "{level}");
+    }
+}
+
+/// A math node in the engine combines two sources, and a map can read it. Macro 1 plus macro 2,
+/// then inverted by a map.
+#[test]
+fn a_math_node_runs_in_the_engine_and_a_map_reads_it() {
+    use crate::nodes::math::MathOp;
+    use crate::patch::control::MathNode;
+    let mut patch = Patch::silent();
+    patch.signals.push(MathNode {
+        op: MathOp::Add,
+        a: MapValue {
+            value: 0.0,
+            source: Some(Source::Macro(1)),
+        },
+        b: MapValue {
+            value: 0.0,
+            source: Some(Source::Macro(2)),
+        },
+    });
+    patch.signals.push(inverting_map(Source::Signal(0)));
+    let mut engine = engine_on(&patch);
+    for (a, b) in [(0.0, 0.0), (0.25, 0.5), (0.75, 0.75)] {
+        engine.set_macros([0.0, a, b, 0.0]);
+        let levels = engine.levels();
+        let sum = (a + b).min(1.0);
+        assert!((levels.signals[0] - sum).abs() < 1e-6, "{a} + {b}");
+        assert!((levels.signals[1] - (1.0 - sum)).abs() < 1e-6, "{a} + {b}");
+    }
+}
+
+/// A math node that reads an envelope follows each voice's own envelope too, since the voice works
+/// the node out from its own levels.
+#[test]
+fn a_math_node_of_an_envelope_follows_each_voices_own_envelope() {
+    use crate::nodes::math::MathOp;
+    use crate::patch::control::MathNode;
+    let driven = KnobValue {
+        value: 0.0,
+        route: Some(Route {
+            source: Source::Signal(0),
+        }),
+    };
+    let filter = StageSpec::new(StageParams::Filter(FilterParams {
+        cutoff: Param::new(KnobId::Cutoff, driven),
+        ..FilterParams::default()
+    }))
+    .with_input(0, 0);
+    let mut patch = patch_with(0, &[osc(OscillatorParams::default()), filter]);
+    // The envelope times one, so the node passes the envelope through.
+    patch.signals.push(MathNode {
+        op: MathOp::Multiply,
+        a: MapValue {
+            value: 0.0,
+            source: Some(Source::Envelope(0)),
+        },
+        b: MapValue::fixed(1.0),
+    });
+    patch.envelopes[0] = Some(EnvelopeSettings {
+        attack: Param::fixed(KnobId::Attack, 4.0),
+        ..envelope(0.5, 1.0)
+    });
+    let mut engine = engine_on(&patch);
+
+    engine.note_on(60, 1.0);
+    render(&mut engine, 44100);
+    engine.note_on(64, 1.0);
+    render(&mut engine, 4410);
+
+    let cutoffs: Vec<f32> = engine.lanes[0]
+        .voices()
+        .map(|voice| match voice.stages[1] {
+            StageState::Filter(state) => state.cutoff_hz(),
+            _ => panic!("not a filter"),
+        })
+        .collect();
+    assert_eq!(cutoffs.len(), 2);
+    assert!(cutoffs[0] > cutoffs[1] * 2.0, "{cutoffs:?}");
+}
+
+/// A map that reads an envelope follows each voice's own envelope, as a knob wired to the envelope
+/// directly does.
+#[test]
+fn a_map_of_an_envelope_follows_each_voices_own_envelope() {
+    let driven = KnobValue {
+        value: 0.0,
+        route: Some(Route {
+            source: Source::Signal(0),
+        }),
+    };
+    let filter = StageSpec::new(StageParams::Filter(FilterParams {
+        cutoff: Param::new(KnobId::Cutoff, driven),
+        ..FilterParams::default()
+    }))
+    .with_input(0, 0);
+    let mut patch = patch_with(0, &[osc(OscillatorParams::default()), filter]);
+    // A map that passes the envelope through.
+    patch.signals.push(MapNode {
+        input: Source::Envelope(0),
+        in_lo: MapValue::fixed(0.0),
+        in_hi: MapValue::fixed(1.0),
+        out_lo: MapValue::fixed(0.0),
+        out_hi: MapValue::fixed(1.0),
+        offset: MapValue::fixed(0.0),
+        center_range: None,
+    });
     patch.envelopes[0] = Some(EnvelopeSettings {
         attack: Param::fixed(KnobId::Attack, 4.0),
         ..envelope(0.5, 1.0)

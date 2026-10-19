@@ -29,7 +29,9 @@ pub(super) fn build() -> Preset {
         filter,
         KnobId::Cutoff,
         (300.0, 9000.0),
-        SHAPING,
+        // The Shaping and Controls columns are full, and a collapsed map keeps a pin for each of
+        // its range knobs, so this one sits in the Effects column next to the other map.
+        EFFECTS,
     );
 
     let phaser = b.add(NodeKind::Phaser, EFFECTS);

@@ -66,6 +66,8 @@ pub(super) const NODE_OFF_HEADER_COLOR: Color = Color::from_rgb(0.225, 0.23, 0.2
 /// reads against a dark background.
 pub(super) const SELECTION_COLOR: Color = Color::from_rgb(0.42, 0.68, 1.0);
 pub(super) const SELECTION_WIDTH: f32 = 2.0;
+/// The spectrum the EQ's analyzer draws behind its curve.
+pub(super) const ANALYZER_COLOR: Color = Color::from_rgba(0.19, 0.50, 0.90, 0.40);
 pub(super) const TEXT_COLOR: Color = Color::WHITE;
 pub(super) const DIM_TEXT_COLOR: Color = Color::from_rgb(0.55, 0.55, 0.58);
 pub(super) const TERMINAL_COLOR: Color = Color::from_rgb(0.75, 0.75, 0.80);

@@ -5,6 +5,7 @@
 
 use super::control::Param;
 use crate::dsp::effects::distortion::DistortionKind;
+use crate::dsp::effects::eq::{EqKind, BANDS};
 use crate::dsp::mix::MixMode;
 use crate::dsp::noise::NoiseType;
 use crate::dsp::svf::FilterType;
@@ -172,6 +173,23 @@ pub struct FlangerParams {
     pub mix: Param,
 }
 
+/// One band of an EQ stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqBandParams {
+    pub kind: EqKind,
+    pub freq: Param,
+    pub gain: Param,
+    pub q: Param,
+}
+
+/// An EQ stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EqParams {
+    pub bands: [EqBandParams; BANDS],
+    /// True to measure the output for the node's spectrum display.
+    pub analyzer: bool,
+}
+
 /// What kind of stage this is, with its settings. Adding an audio node means adding a variant
 /// here and its implementation in `engine::stage`, or in `engine::effects` for an effect.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -186,6 +204,7 @@ pub enum StageParams {
     Chorus(ChorusParams),
     Phaser(PhaserParams),
     Flanger(FlangerParams),
+    Eq(EqParams),
 }
 
 impl StageParams {

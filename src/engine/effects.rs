@@ -7,10 +7,12 @@
 //! This module reads the knobs and passes plain numbers to the effects in `dsp::effects`. It does
 //! no signal processing of its own, apart from combining the two signals of a mix.
 
+use crate::dsp::analyzer::{BINS as SPECTRUM_BINS, FLOOR_DB};
 use crate::dsp::effects::chorus::{Chorus, ChorusParams};
 use crate::dsp::effects::compressor::{Compressor, CompressorParams};
 use crate::dsp::effects::delay::{Delay, DelayParams};
 use crate::dsp::effects::distortion::{Distortion, DistortionParams};
+use crate::dsp::effects::eq::{Eq, EqBand, EqParams, BANDS};
 use crate::dsp::effects::flanger::{Flanger, FlangerParams};
 use crate::dsp::effects::phaser::{Phaser, PhaserParams};
 use crate::dsp::effects::reverb::{Reverb, ReverbParams};
@@ -37,6 +39,7 @@ pub struct Effects {
     chorus: Vec<Chorus>,
     phaser: Vec<Phaser>,
     flanger: Vec<Flanger>,
+    eq: Vec<Eq>,
     /// The filters that run on the bus. One starts at its knob values the first time it plays,
     /// so it holds `None` until then.
     filter: Vec<Option<FilterState>>,
@@ -56,7 +59,18 @@ impl Effects {
             chorus: (0..POOL).map(|_| Chorus::new(sample_rate)).collect(),
             phaser: (0..POOL).map(|_| Phaser::new(sample_rate)).collect(),
             flanger: (0..POOL).map(|_| Flanger::new(sample_rate)).collect(),
+            eq: (0..POOL).map(|_| Eq::new(sample_rate)).collect(),
         }
+    }
+
+    /// The spectrum each EQ instance last measured, by pool number. An instance that is not
+    /// analyzing reads the floor.
+    pub fn spectra(&self) -> [[f32; SPECTRUM_BINS]; POOL] {
+        std::array::from_fn(|pool| {
+            self.eq
+                .get(pool)
+                .map_or([FLOOR_DB; SPECTRUM_BINS], |eq| *eq.spectrum())
+        })
     }
 
     /// Clears every tail and filter memory.
@@ -68,6 +82,7 @@ impl Effects {
         self.chorus.iter_mut().for_each(Chorus::reset);
         self.phaser.iter_mut().for_each(Phaser::reset);
         self.flanger.iter_mut().for_each(Flanger::reset);
+        self.eq.iter_mut().for_each(Eq::reset);
         self.filter.iter_mut().for_each(|filter| *filter = None);
     }
 
@@ -215,6 +230,21 @@ impl Effects {
                         delay_ms: p.delay.plain(levels),
                         spread: p.spread.plain(levels),
                         mix: p.mix.plain(levels),
+                    },
+                ),
+                None => input,
+            },
+            StageParams::Eq(p) => match self.eq.get_mut(pool) {
+                Some(fx) => fx.process(
+                    input,
+                    &EqParams {
+                        bands: std::array::from_fn::<_, BANDS, _>(|band| EqBand {
+                            kind: p.bands[band].kind,
+                            freq_hz: p.bands[band].freq.plain(levels),
+                            gain_db: p.bands[band].gain.plain(levels),
+                            q: p.bands[band].q.plain(levels),
+                        }),
+                        analyzer: p.analyzer,
                     },
                 ),
                 None => input,

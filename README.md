@@ -36,12 +36,36 @@ Flode is not affiliated with Blender or the Blender Foundation.
   asymmetry, flip, mirror, quantize). Each has its own level and pan.
 - **Envelope, LFO and Map.** An envelope shapes an oscillator's amplitude or drives any knob. The
   LFO runs free or locks to the host's tempo. A map rescales a control signal through a curve you
-  can drag.
+  can drag. The curve's four values and an Offset, which pushes the whole curve up or down, are
+  also knobs in a folded Range section, and a control wire can drive any of them, so the handles
+  follow it. Maps chain to any depth, including into another map's values. The Bipolar checkbox
+  gives the output as a center and a range in place of Out min and Out max. Center is the middle
+  of the swing, and Range is how wide it is, so a 30 percent range centered at 50 gives 35 to 65.
+  A negative range runs the swing backward and inverts the map. Both knobs take control wires. The
+  curve's handles still drag the two ends, and they set Center and Range. A bipolar map has no
+  Offset, since Center moves the swing the same way. Switching converts the values, with any
+  offset folded into Center, so the signal does not change, but the wires on the knobs that go
+  away are dropped.
+- **Math.** Does arithmetic on two control signals and makes one, like Blender's Math node. A
+  dropdown picks the operation: add, subtract, multiply, divide, power, minimum, maximum,
+  difference, average, greater than, less than, or modulo. A and B are knobs with pins. Wire a
+  driver into a pin to use it as that input, or leave it unwired to use the knob's number as a
+  constant. Signals run from 0 to 1 and the result stays in that range. Divide and modulo by zero
+  give 0. Power raises A to a power that B sets, a quarter with B at 0, 1 at 50 percent, and 4 at
+  100 percent. The output can drive any knob, including a map's values or another math node.
 - **Filter.** Low pass, high pass and band pass, run once per voice, so a filter envelope follows
   each note on its own.
 - **Mix.** Crossfade, AM, ring modulation, FM, or Add between two signals.
 - **Effects.** Distortion (soft, hard, tube, fold, crush), compressor with a multiband mode,
   reverb, delay with tempo sync and ping pong, chorus, phaser, and flanger.
+- **EQ.** Four bands on a graph. Drag a point to set that band's frequency (left and right) and
+  gain (up and down). Each band also has a folded section with Freq, Gain and Q knobs, which are
+  the same values as the point, so a knob moves the point and a drag turns the knob. Every knob
+  has a pin, and a point follows a wire that drives it. The icon in each section header switches
+  the two outer bands between a shelf and a cut, and the two inner bands between a peak and a
+  notch. A cut and a notch have no gain, so their points move sideways only. Double click a point
+  to reset its band. The Analyzer checkbox under the graph draws the spectrum of the EQ's output
+  behind the curve.
 - **MIDI Input.** Sends notes to oscillators, and holds mono, glide, and the pitch wheel, mod wheel,
   velocity and aftertouch controllers.
 - **Macro.** Four knobs that are host parameters, so your DAW can automate them. Each has a pin
@@ -53,6 +77,10 @@ Flode is not affiliated with Blender or the Blender Foundation.
 **Wires.** Wires come in three colors. Grey is audio, green is control (envelopes, LFOs, macros and
 controllers driving knobs), and purple is MIDI notes. A wire only joins ports of the same kind.
 A knob with a green pin can be driven by any control wire, and it then shows the live value.
+
+**Knobs.** Drag a knob up or down to turn it. Double click it to type an exact value in the
+units the node shows, such as Hz, dB, or a percentage. Enter sets it, Escape cancels, and a click
+elsewhere keeps what you typed. Option (Alt) and click puts a knob back to its default.
 
 **Viewers.** The oscillator, envelope, LFO and filter each draw a small picture of their shape: the
 waveform, the ADSR curve, and the filter's response from 20 Hz to 20 kHz. The picture follows the
@@ -69,6 +97,10 @@ the sustain hold. A noise LFO has no dot.
   one selected node's header moves the whole group. Right-click on a selected node, then Delete or
   Bypass, acts on the group. Auto pack, also in that menu, lines the group up in columns by its
   wires, with sources on the left. Only a single node splices into a wire.
+- A map or math node splices into a wire that drives a knob. The old source feeds the map's shape
+  pin, or input A on a math node, and the node's output drives the knob. A math node keeps its
+  other input at its knob's number, so splicing one in changes the signal, unlike a map at its
+  defaults.
 - A node dropped on a wire needs room. If the two nodes on that wire are closer than the new node
   and a margin on each side, the node after it, and everything that node feeds, ease to the right.
 - Shift and right drag from one node to another connects them. The orange line follows the cursor,
@@ -168,7 +200,8 @@ cargo test
 The tests cover the graph model, the compiler that turns a graph into a patch, the engine, every
 effect, and the editor's input handling. The audio thread must never allocate, and `nih-plug` is
 built with `assert_process_allocs`, so a debug build panics on an allocation there. A test plays a
-patch that runs all seven effects with allocation forbidden.
+patch that runs all eight effects, the EQ's analyzer, and chained map and math nodes with
+allocation forbidden.
 
 Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
 editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`, `select:0,2`) opens part
@@ -181,9 +214,10 @@ live signal. They are read once, at start. See `src/editor/demo.rs`.
 ```
 src/
   lib.rs          the plugin: host events and buffers in, calls on the engine out
-  dsp/            filters, oscillators, wavetables, envelopes, and the effects
+  dsp/            filters, oscillators, wavetables, envelopes, the spectrum analyzer, and the effects
   engine/         voices, lanes, the stage arena, LFOs, and the effect pool
-  patch/          what the editor hands the audio thread: stages, control routes, the compiler
+  patch/          what the editor hands the audio thread: stages, control routes, the table of
+                  map and math signals, and the compiler
   nodes/          the node kinds: their rows, knobs, ports, and layout
   editor/         the canvas, drawing, menus, shortcuts, saving, and the factory presets
   presets.rs      preset files and the folder they live in
@@ -207,6 +241,10 @@ allocation on the audio thread, but how it sounds is still being tuned by ear. K
 
 - There are four instances of each effect kind, and four filters that run after an effect. A fifth
   passes its input through.
+- A patch runs up to 24 map and math nodes together. One past that makes no signal, so a knob wired
+  to it is not driven. A map with nothing wired to its input makes no signal either, and a loop of
+  maps makes none. A loop of math nodes is cut where it closes, and the node that would read itself
+  uses its own knob instead.
 - The distortion adds about 15 samples of latency when its mix is above zero. Parallel chains are
   not delay compensated, so a distorted chain merged with a clean one can comb filter a little.
 - The FM mix delays the signal by a few cycles of the note, so that knob moves do not bend the

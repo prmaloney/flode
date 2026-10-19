@@ -16,6 +16,7 @@ pub mod chorus;
 pub mod compressor;
 pub mod delay;
 pub mod distortion;
+pub mod eq;
 pub mod flanger;
 pub mod phaser;
 pub mod reverb;

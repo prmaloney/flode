@@ -8,7 +8,7 @@ use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::MIDI_SOURCE_COUNT;
 use crate::nodes::macros::MACRO_COUNT;
-use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES, MAX_LFOS};
+use crate::patch::control::{ControlLevels, SignalTable, ENV_SLOTS, MAX_ENVELOPES, MAX_LFOS};
 use crate::patch::stage::{LaneGraph, MAX_STAGES};
 
 /// What a voice reads from the engine for one sample.
@@ -17,6 +17,8 @@ pub struct RenderEnv<'a> {
     pub lfo_levels: [f32; MAX_LFOS],
     pub midi_levels: [f32; MIDI_SOURCE_COUNT],
     pub macro_levels: [f32; MACRO_COUNT],
+    /// The patch's map and math nodes, which each voice works out again from its own envelopes.
+    pub signals: &'a SignalTable,
     /// True while any envelope node is in the patch.
     pub envelopes_active: bool,
     pub sample_rate: f32,
@@ -97,13 +99,15 @@ impl Voice {
         taps: &mut [Frame; MAX_STAGES],
     ) -> Frame {
         // A voice's own envelopes drive its knobs, so each note moves on its own.
-        let levels = ControlLevels {
+        let mut levels = ControlLevels {
             envelope: self.env_levels(),
             lfo: env.lfo_levels,
             midi: env.midi_levels,
             macros: env.macro_levels,
             ..ControlLevels::default()
         };
+        // A map or math node that reads an envelope follows this voice's own envelope.
+        env.signals.evaluate(&mut levels);
         let mut tick = Tick {
             levels: &levels,
             envs: &self.envs,

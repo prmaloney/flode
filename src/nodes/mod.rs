@@ -13,6 +13,7 @@ pub mod connection;
 pub mod delay;
 pub mod distortion;
 pub mod envelope;
+pub mod eq;
 pub mod filter;
 pub mod flanger;
 pub mod input;
@@ -20,6 +21,7 @@ pub mod knobs;
 pub mod lfo;
 pub mod macros;
 pub mod map;
+pub mod math;
 pub mod mix;
 pub mod oscillator;
 pub mod output;
@@ -35,6 +37,8 @@ use viewer::{Live, Trace, TRACE_SAMPLES};
 pub use knobs::KnobId;
 
 pub const NODE_WIDTH: f32 = 160.0;
+/// The EQ node is wider, so its points can be placed more finely.
+pub const EQ_WIDTH: f32 = 280.0;
 pub const HEADER_HEIGHT: f32 = 28.0;
 /// The collapse arrow sits in the header, and the title starts to its right.
 pub const ARROW_CENTER_X: f32 = 20.0;
@@ -60,6 +64,18 @@ pub const VIEWER_HEIGHT: f32 = 56.0;
 /// The space a viewer row takes in the stack: the box and a margin above and below it. Rows after
 /// it start below this.
 pub const VIEWER_ROW: f32 = VIEWER_HEIGHT + 8.0;
+/// The EQ node's graph, where its points are dragged. It is taller than the viewer so the points
+/// have room.
+pub const EQ_HEIGHT: f32 = 100.0;
+/// The space the graph takes in the stack, with the same margin as a viewer.
+pub const EQ_ROW: f32 = EQ_HEIGHT + 8.0;
+/// The space the EQ's analyzer checkbox takes in the stack.
+pub const EQ_SWITCH_ROW: f32 = 28.0;
+/// The shelf, cut, peak, or notch toggle at the right end of each band's section header, and its
+/// gap to the node's edge.
+pub const EQ_TOGGLE_WIDTH: f32 = 34.0;
+pub const EQ_TOGGLE_HEIGHT: f32 = 18.0;
+pub const EQ_TOGGLE_INSET: f32 = 10.0;
 
 /// The header row of a section: its arrow and title.
 pub const SECTION_HEIGHT: f32 = 22.0;
@@ -117,6 +133,8 @@ pub enum NodeKind {
     Chorus,
     Phaser,
     Flanger,
+    Eq,
+    Math,
     Macro,
 }
 
@@ -147,11 +165,13 @@ impl Category {
             Category::Util => &[
                 NodeKind::Output,
                 NodeKind::Map,
+                NodeKind::Math,
                 NodeKind::Input,
                 NodeKind::Mix,
             ],
             Category::Effects => &[
                 NodeKind::Filter,
+                NodeKind::Eq,
                 NodeKind::Distortion,
                 NodeKind::Compressor,
                 NodeKind::Reverb,
@@ -167,7 +187,7 @@ impl Category {
 impl NodeKind {
     /// Every kind. The tests walk them.
     #[cfg(test)]
-    pub const ALL: [NodeKind; 16] = [
+    pub const ALL: [NodeKind; 18] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
@@ -183,6 +203,8 @@ impl NodeKind {
         NodeKind::Chorus,
         NodeKind::Phaser,
         NodeKind::Flanger,
+        NodeKind::Eq,
+        NodeKind::Math,
         NodeKind::Macro,
     ];
 
@@ -210,6 +232,8 @@ impl NodeKind {
             NodeKind::Chorus => &chorus::Chorus,
             NodeKind::Phaser => &phaser::Phaser,
             NodeKind::Flanger => &flanger::Flanger,
+            NodeKind::Eq => &eq::Eq,
+            NodeKind::Math => &math::Math,
             NodeKind::Macro => &macros::Macros,
         }
     }
@@ -317,6 +341,8 @@ pub enum Control {
     /// A box that draws the node's shape, such as its waveform. It cannot be edited. The kind's
     /// `trace` says what it shows.
     Viewer,
+    /// The EQ node's graph. Its points are dragged, and the node's kind says what they set.
+    Eq,
     /// The header of section number `n`. The rows after it, up to the next header, fold with it.
     Section(usize),
 }
@@ -389,6 +415,11 @@ pub trait NodeBehavior: Sync {
     /// The rows from top to bottom. Some kinds depend on the node's own state, such as the output
     /// node's slot count.
     fn rows(&self, node: &FlodeNode) -> Vec<Row>;
+
+    /// The node's width. Most kinds are `NODE_WIDTH`.
+    fn width(&self) -> f32 {
+        NODE_WIDTH
+    }
 
     /// True if sound enters this kind of node.
     fn audio_in(&self) -> bool {
@@ -569,6 +600,11 @@ impl FlodeNode {
         self.kind.title()
     }
 
+    /// How wide the node is.
+    pub fn width(&self) -> f32 {
+        self.kind.behavior().width()
+    }
+
     /// The node's rows, top to bottom.
     pub fn rows(&self) -> Vec<Row> {
         self.kind.behavior().rows(self)
@@ -646,11 +682,14 @@ impl FlodeNode {
                 }
                 let folded = self.collapsed || section.is_some_and(|n| self.section_collapsed(n));
                 if !folded {
-                    // A viewer is taller than a row, and the rows below it start under it.
-                    let pitch = if row.control == Some(Control::Viewer) {
-                        VIEWER_ROW
-                    } else {
-                        ROW_PITCH
+                    // A viewer or a graph is taller than a row, and the rows below it start under it.
+                    let pitch = match row.control {
+                        Some(Control::Viewer) => VIEWER_ROW,
+                        Some(Control::Eq) => EQ_ROW,
+                        Some(Control::Curve) => CURVE_HEIGHT,
+                        // The EQ's analyzer checkbox sits close under its graph.
+                        Some(Control::Switch(_)) if self.kind == NodeKind::Eq => EQ_SWITCH_ROW,
+                        _ => ROW_PITCH,
                     };
                     let y = top + pitch / 2.0;
                     top += pitch;
@@ -688,13 +727,26 @@ impl FlodeNode {
                     let header = Rectangle {
                         x: self.position.x,
                         y: self.position.y + place.y - SECTION_HEIGHT / 2.0,
-                        width: NODE_WIDTH,
+                        width: self.width(),
                         height: SECTION_HEIGHT,
                     };
                     header.contains(point).then_some(n)
                 }
                 _ => None,
             })
+    }
+
+    /// The number shown in the box for typing over knob `id`: its value in the units the knob
+    /// reads in.
+    pub fn knob_entry_text(&self, id: KnobId) -> String {
+        knobs::entry_text(id.to_entry(self.value(id)))
+    }
+
+    /// Sets knob `id` from a number typed in the units `knob_entry_text` uses. The value stops at
+    /// the ends of the knob's range.
+    pub fn enter_knob_value(&mut self, id: KnobId, number: f32) {
+        let normalized = id.from_entry(number);
+        self.set_value(id, if normalized.is_nan() { 0.0 } else { normalized });
     }
 
     /// The labels of this node's switches, top to bottom.
@@ -740,7 +792,7 @@ impl FlodeNode {
                     bounds: Rectangle {
                         x: self.position.x + DROPDOWN_INSET,
                         y: self.position.y + places[index].y - DROPDOWN_HEIGHT / 2.0,
-                        width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
+                        width: self.width() - 2.0 * DROPDOWN_INSET,
                         height: DROPDOWN_HEIGHT,
                     },
                 })
@@ -823,8 +875,9 @@ impl FlodeNode {
                 RowShape::Packed => place.y + PACKED_PITCH / 2.0,
                 RowShape::SectionHeader(_) => place.y + SECTION_HEIGHT / 2.0,
                 RowShape::Full => match row.control {
-                    Some(Control::Curve) => place.y - ROW_PITCH / 2.0 + CURVE_HEIGHT,
+                    Some(Control::Curve) => place.y + CURVE_HEIGHT / 2.0,
                     Some(Control::Viewer) => place.y + VIEWER_ROW / 2.0,
+                    Some(Control::Eq) => place.y + EQ_ROW / 2.0,
                     Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
                         place.y + SWITCH_ROW_HEIGHT / 2.0
                     }
@@ -851,7 +904,7 @@ impl FlodeNode {
         Rectangle {
             x: self.position.x,
             y: self.position.y,
-            width: NODE_WIDTH,
+            width: self.width(),
             height: self.height(),
         }
     }
@@ -860,7 +913,7 @@ impl FlodeNode {
         Rectangle {
             x: self.position.x,
             y: self.position.y,
-            width: NODE_WIDTH,
+            width: self.width(),
             height: HEADER_HEIGHT,
         }
     }
@@ -875,8 +928,8 @@ impl FlodeNode {
         let places = self.row_places();
         Rectangle {
             x: self.position.x + DROPDOWN_INSET,
-            y: self.position.y + places.get(index).map_or(PIN_ROW0_Y, |p| p.y) - ROW_PITCH / 2.0,
-            width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
+            y: self.position.y + places.get(index).map_or(PIN_ROW0_Y, |p| p.y) - CURVE_HEIGHT / 2.0,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
             height: CURVE_HEIGHT,
         }
     }
@@ -905,9 +958,60 @@ impl FlodeNode {
         Some(Rectangle {
             x: self.position.x + DROPDOWN_INSET,
             y: self.position.y + place.y - VIEWER_HEIGHT / 2.0,
-            width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
             height: VIEWER_HEIGHT,
         })
+    }
+
+    /// The EQ graph's box, centered on its row. None if the node has no graph, or it is folded
+    /// away.
+    pub fn eq_bounds(&self) -> Option<Rectangle> {
+        let rows = self.rows();
+        let index = rows
+            .iter()
+            .position(|row| row.control == Some(Control::Eq))?;
+        let place = self.places_of(&rows).get(index).copied()?;
+        if place.shape != RowShape::Full {
+            return None;
+        }
+        Some(Rectangle {
+            x: self.position.x + DROPDOWN_INSET,
+            y: self.position.y + place.y - EQ_HEIGHT / 2.0,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
+            height: EQ_HEIGHT,
+        })
+    }
+
+    /// The toggle in each band's section header of an EQ node, as the band it flips and where it
+    /// sits. The header stays on show when its section is folded. A node folded as a whole, and
+    /// every other kind, has none.
+    pub fn eq_toggles(&self) -> Vec<(usize, Rectangle)> {
+        if self.kind != NodeKind::Eq || self.collapsed {
+            return Vec::new();
+        }
+        self.row_places()
+            .iter()
+            .filter_map(|place| match place.shape {
+                RowShape::SectionHeader(band) => Some((
+                    band,
+                    Rectangle {
+                        x: self.position.x + self.width() - EQ_TOGGLE_INSET - EQ_TOGGLE_WIDTH,
+                        y: self.position.y + place.y - EQ_TOGGLE_HEIGHT / 2.0,
+                        width: EQ_TOGGLE_WIDTH,
+                        height: EQ_TOGGLE_HEIGHT,
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The band whose toggle is under `point`, if any.
+    pub fn eq_toggle_at(&self, point: Point) -> Option<usize> {
+        self.eq_toggles()
+            .into_iter()
+            .find(|(_, bounds)| bounds.contains(point))
+            .map(|(band, _)| band)
     }
 
     /// What the node's viewer draws right now, from knob values in `live`.
@@ -928,7 +1032,7 @@ impl FlodeNode {
         Rectangle {
             x: self.position.x + DROPDOWN_INSET,
             y: self.position.y + place.map_or(PIN_ROW0_Y, |p| p.y) - SWITCH_ROW_HEIGHT / 2.0,
-            width: NODE_WIDTH - 2.0 * DROPDOWN_INSET,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
             height: if shown { SWITCH_ROW_HEIGHT } else { 0.0 },
         }
     }
@@ -972,7 +1076,7 @@ impl FlodeNode {
             .iter()
             .position(|row| row.output == Some(port))?;
         Some(Point::new(
-            self.position.x + NODE_WIDTH,
+            self.position.x + self.width(),
             self.position.y + self.pin_offset(row),
         ))
     }

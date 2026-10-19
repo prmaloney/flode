@@ -8,11 +8,13 @@
 
 use super::control::ControlLevels;
 use super::Patch;
+use crate::dsp::analyzer::{BINS, FLOOR_DB};
+use crate::engine::POOL;
 use std::sync::{Arc, Mutex};
 use triple_buffer::{triple_buffer, Input, Output};
 
 /// What the audio thread reports back, for the editor to show.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Meters {
     /// The live level of every control source, shown on the knobs they drive.
     pub levels: ControlLevels,
@@ -25,6 +27,21 @@ pub struct Meters {
     /// The editor lights its MIDI indicator when this changes, so it shows that notes arrive
     /// whatever the patch does with them.
     pub notes_in: u32,
+    /// What each EQ instance measured, in dB per band, by pool number. An EQ node whose analyzer
+    /// is on draws its instance's.
+    pub spectra: [[f32; BINS]; POOL],
+}
+
+impl Default for Meters {
+    fn default() -> Self {
+        Self {
+            levels: ControlLevels::default(),
+            active_notes: [0; 2],
+            output: [0.0; 2],
+            notes_in: 0,
+            spectra: [[FLOOR_DB; BINS]; POOL],
+        }
+    }
 }
 
 /// The editor's ends of the two channels.

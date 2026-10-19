@@ -1,7 +1,7 @@
 # Effects: plan and requirements
 
-Seven effects are wired into the graph as nodes: distortion, compressor, reverb, delay, chorus,
-phaser, and flanger. Each one's DSP is in `src/dsp/effects/`. This document is the plan they were
+Eight effects are wired into the graph as nodes: distortion, compressor, reverb, delay, chorus,
+phaser, flanger, and EQ. Each one's DSP is in `src/dsp/effects/`. This document is the plan they were
 built from. It says how the pieces fit and what each effect has to do.
 
 ## How effects run
@@ -217,3 +217,31 @@ Params: `rate_hz` (0.05 to 200), `depth` (0 to 1), `feedback` (0 to 0.95), `dela
   only a few samples long and linear interpolation darkens it audibly.
 - Different from the chorus: shorter delay, feedback, and a comb sound. Do not share code that
   couples the two, since each file is built on its own.
+
+## EQ
+
+A four band equalizer, edited on a graph.
+
+Params: four bands, each with `kind`, `freq_hz` (20 to 20000), `gain_db` (-18 to 18), and `q`
+(0.1 to 10).
+
+- Band 1 is a low shelf or a high pass. Bands 2 and 3 are a peak or a notch. Band 4 is a high
+  shelf or a low pass. A cut is second order, so it falls 12 dB per octave, and its Q sets the
+  resonance at the corner. A cut and a notch ignore gain.
+- Each band is an RBJ biquad in transposed direct form II, run in series, with its own memory for
+  each side. Flat bands pass the input unchanged.
+- Frequency, gain, and Q ease over about 10 ms. A band recomputes its coefficients only while a
+  value is moving.
+- `response_db` gives the combined gain at any frequency, with the same clamps as the effect. The
+  node's graph draws it.
+- On the node, each band has a section with Freq, Gain, and Q knobs, each with a pin. A point on
+  the graph and its knobs are one stored value, and a point follows a knob a wire drives. The kind
+  of each band is an icon toggle in its section header.
+- The analyzer is a checkbox on the node. It measures the EQ's output, so it shows the effect of
+  the bands. `dsp::analyzer` keeps 1024 samples, takes a Hann windowed FFT every 1024 samples, and
+  folds it into 32 log spaced bands from 20 Hz to 20 kHz. A band rises at once and falls 2.5 dB per
+  update. It makes no allocation, and it runs only while the checkbox is on, so an EQ without it
+  pays nothing. A band that is asked for the same settings as last time skips its clamp, `log2`,
+  and easing, so a still EQ costs two biquads per band per sample.
+- The spectra travel to the editor in `Meters`, one per engine instance. The compiler's
+  `Wiring::eq_pools` says which instance each EQ node got.
