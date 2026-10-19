@@ -4,7 +4,7 @@
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
 use crate::nodes::eq;
-use crate::nodes::{NodeKind, ROW_KNOB_DIAMETER};
+use crate::nodes::{NodeKind, Port, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{
     event::{self, Event},
@@ -65,7 +65,7 @@ impl<'a> NodeEditor<'a> {
             if let Some(open) = self.graph.quick_add.take() {
                 let area = quick_add_bounds(bounds, open.screen, results.len());
                 if let Some(row) = quick_add_row_at(area, screen, results.len()) {
-                    self.place(results[row], open.world);
+                    self.place_fed(results[row], open.world, open.feed);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 if area.contains(screen) {
@@ -230,6 +230,14 @@ impl<'a> NodeEditor<'a> {
                     };
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
+                // An input with no wire starts one from the input end. Dropping it on an output
+                // joins them, and dropping it on empty canvas offers the nodes that can feed it.
+                self.graph.interaction = Interaction::BackWiring {
+                    to,
+                    input,
+                    cursor: point,
+                };
+                return (event::Status::Captured, None);
             }
             None => {}
         }
@@ -517,11 +525,11 @@ impl<'a> NodeEditor<'a> {
                     }
                     keyboard::KeyCode::Escape => self.graph.quick_add = None,
                     keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
-                        let world = open.world;
+                        let (world, feed) = (open.world, open.feed);
                         let kind = results.get(open.selected).copied();
                         self.graph.quick_add = None;
                         if let Some(kind) = kind {
-                            self.place(kind, world);
+                            self.place_fed(kind, world, feed);
                             return (event::Status::Captured, Some(Message::GraphChanged));
                         }
                     }
@@ -691,6 +699,22 @@ impl<'a> NodeEditor<'a> {
         self.graph.start_placing(node, point);
     }
 
+    /// `place`, and when the node is for an input a wire was dragged back from, wires its output
+    /// to that input. The wire stays on the node while it follows the cursor.
+    pub(super) fn place_fed(&mut self, kind: NodeKind, point: Point, feed: Option<(usize, Port)>) {
+        let before = self.graph.nodes.len();
+        self.place(kind, point);
+        let Some((to, input)) = feed else {
+            return;
+        };
+        if self.graph.nodes.len() == before {
+            return;
+        }
+        if let Some(out) = self.graph.feeding_port(kind, to, input) {
+            self.graph.connect(before, out, to, input);
+        }
+    }
+
     /// Copies a node and makes the copy follow the cursor, like a node just added from the pill,
     /// until the next press sets it down. Returns false for a node that can't be copied.
     pub(super) fn duplicate_and_place(&mut self, index: usize, point: Point) -> bool {
@@ -766,7 +790,11 @@ impl<'a> NodeEditor<'a> {
         )
     }
 
-    pub(super) fn release(&mut self, point: Point) -> (event::Status, Option<Message>) {
+    pub(super) fn release(
+        &mut self,
+        point: Point,
+        bounds: Rectangle,
+    ) -> (event::Status, Option<Message>) {
         // Placing ends on the next press, not on the release of the press that started it.
         if let Interaction::Placing { .. } = self.graph.interaction {
             return (event::Status::Captured, None);
@@ -776,6 +804,24 @@ impl<'a> NodeEditor<'a> {
             Interaction::Wiring { from, out, .. } => {
                 if let Some(Terminal::In(to, input)) = self.graph.terminal_at(point) {
                     self.graph.connect(from, out, to, input);
+                }
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::BackWiring { to, input, .. } => {
+                match self.graph.terminal_at(point) {
+                    Some(Terminal::Out(from, out)) => self.graph.connect(from, out, to, input),
+                    // Over another pin, or over a node, nothing happens.
+                    Some(Terminal::In(..)) => {}
+                    None if self.graph.node_at(point).is_some() => {}
+                    // Empty canvas. The cursor is where the box opens and the node lands.
+                    None => {
+                        let screen = self.graph.last_screen;
+                        if !self.overlay_at(point, screen, bounds)
+                            && !piano::strip_bounds(bounds).contains(screen)
+                        {
+                            self.graph.open_quick_add_feeding(to, input, point);
+                        }
+                    }
                 }
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
@@ -846,6 +892,14 @@ impl<'a> NodeEditor<'a> {
                 self.graph.interaction = Interaction::Wiring {
                     from,
                     out,
+                    cursor: point,
+                };
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::BackWiring { to, input, .. } => {
+                self.graph.interaction = Interaction::BackWiring {
+                    to,
+                    input,
                     cursor: point,
                 };
                 (event::Status::Captured, Some(Message::GraphChanged))
@@ -1020,7 +1074,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 }
                 self.secondary_press(point, screen)
             }
-            mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point),
+            mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point, bounds),
             mouse::Event::ButtonReleased(mouse::Button::Right) => self.release_secondary(point),
             mouse::Event::CursorMoved { .. } => {
                 let mut submenu_changed = self.hover_preset_menu(bounds, screen);

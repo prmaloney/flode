@@ -7,6 +7,7 @@ use super::control::Param;
 use crate::dsp::effects::distortion::DistortionKind;
 use crate::dsp::effects::eq::{EqKind, BANDS};
 use crate::dsp::mix::MixMode;
+use crate::dsp::monitor::MonitorMode;
 use crate::dsp::noise::NoiseType;
 use crate::dsp::svf::FilterType;
 use crate::dsp::warp::WarpMode;
@@ -190,6 +191,13 @@ pub struct EqParams {
     pub analyzer: bool,
 }
 
+/// A monitor stage: one audio input and no output. It passes its input on unchanged and measures
+/// it for the node's display.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MonitorParams {
+    pub mode: MonitorMode,
+}
+
 /// What kind of stage this is, with its settings. Adding an audio node means adding a variant
 /// here and its implementation in `engine::stage`, or in `engine::effects` for an effect.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -205,6 +213,7 @@ pub enum StageParams {
     Phaser(PhaserParams),
     Flanger(FlangerParams),
     Eq(EqParams),
+    Monitor(MonitorParams),
 }
 
 impl StageParams {

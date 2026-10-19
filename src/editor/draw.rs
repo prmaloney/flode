@@ -139,6 +139,18 @@ pub(super) fn draw_editor(
             }
         }
 
+        // A wire dragged back from an input runs from the cursor to the input.
+        if let Interaction::BackWiring { to, input, cursor } = graph.interaction {
+            if let Some(end) = graph.nodes[to].input_point(input) {
+                let color = match input.signal() {
+                    Signal::Audio => PENDING_WIRE_COLOR,
+                    Signal::Control => CONTROL_COLOR,
+                    Signal::Notes => NOTES_COLOR,
+                };
+                draw_curve(frame, &wire_curve(cursor, end), color, 2.0);
+            }
+        }
+
         for index in graph.selection() {
             draw_selection(frame, &graph.nodes[index]);
         }
@@ -596,6 +608,10 @@ pub(super) fn draw_node(
 
     if node.eq_bounds().is_some() {
         draw_eq(frame, index, graph, levels, covered, zoom);
+    }
+
+    if node.monitor_bounds().is_some() {
+        super::monitor::draw_monitor(frame, index, graph, covered, zoom);
     }
 
     for slot in node.knob_slots() {

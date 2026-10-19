@@ -4,9 +4,12 @@ use super::stage::StageState;
 use super::*;
 use crate::dsp::envelope::EnvPhase;
 use crate::dsp::mix::MixMode;
+use crate::dsp::monitor::{MonitorData, MonitorMode};
 use crate::nodes::knobs::KnobId;
 use crate::patch::control::{KnobValue, MapNode, MapValue, Param, Route, Source};
-use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageParams, StageSpec};
+use crate::patch::stage::{
+    FilterParams, MixParams, MonitorParams, OscillatorParams, StageParams, StageSpec,
+};
 use crate::patch::EnvelopeSettings;
 use std::sync::OnceLock;
 
@@ -825,4 +828,85 @@ fn the_output_peak_reports_and_resets() {
     engine.take_output_peak();
     render_stereo(&mut engine, 100);
     assert_eq!(engine.take_output_peak(), [0.0, 0.0]);
+}
+
+/// A monitor stage that listens to the stage at `source`.
+fn monitor_stage(mode: MonitorMode, source: u8) -> StageSpec {
+    StageSpec::new(StageParams::Monitor(MonitorParams { mode })).with_input(0, source)
+}
+
+/// A chord through `stages` in slot 0, with a release, as stereo frames.
+fn play_chord(stages: &[StageSpec]) -> Vec<Frame> {
+    let mut engine = engine_on(&patch_with(0, stages));
+    for note in [48, 55, 64] {
+        engine.note_on(note, 0.9);
+    }
+    let mut out = render_stereo(&mut engine, 6000);
+    engine.note_off(55);
+    out.extend(render_stereo(&mut engine, 6000));
+    out
+}
+
+fn wide_saw() -> StageSpec {
+    osc(OscillatorParams {
+        waveform: crate::dsp::wavetable::Waveform::Saw,
+        unison: Param::fixed(KnobId::Unison, 3.0),
+        pan: Param::fixed(KnobId::Pan, 0.4),
+        ..OscillatorParams::default()
+    })
+}
+
+/// A monitor never changes the sound, wherever it sits: after a per-voice root, in the middle of
+/// a per-voice chain, or after a bus effect.
+#[test]
+fn a_monitor_leaves_the_sound_unchanged() {
+    let filter = || StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 0);
+    let tapped = |mut spec: StageSpec| {
+        spec.tap = true;
+        spec
+    };
+
+    // A per-voice root with a monitor after it, which the bus then plays.
+    let plain = play_chord(&[wide_saw(), filter()]);
+    let on_root = play_chord(&[
+        wide_saw(),
+        tapped(filter()),
+        monitor_stage(MonitorMode::Levels, 1),
+    ]);
+    assert_eq!(plain, on_root);
+
+    // A monitor in the middle of a per-voice chain, off to the side of the root.
+    let beside = play_chord(&[
+        tapped(wide_saw()),
+        monitor_stage(MonitorMode::Scope, 0),
+        filter(),
+    ]);
+    assert_eq!(plain, beside);
+
+    // A bus effect as the root, and a monitor on it and on the source.
+    let dry = play_chord(&[tapped(wide_saw()), clear_effect(0)]);
+    let watched = play_chord(&[
+        tapped(wide_saw()),
+        monitor_stage(MonitorMode::Spectrum, 0),
+        clear_effect(0),
+        monitor_stage(MonitorMode::Vectorscope, 2),
+    ]);
+    assert_eq!(dry, watched);
+    assert!(peak(&plain.iter().map(|f| f.l).collect::<Vec<_>>()) > 0.05);
+}
+
+/// The engine hands out what each monitor instance measured, by pool number, and an instance with
+/// no stage keeps its starting values.
+#[test]
+fn the_engine_reports_what_a_monitor_measured() {
+    let mut watcher = monitor_stage(MonitorMode::Levels, 0);
+    watcher.pool = 1;
+    let mut engine = engine_on(&patch_with(0, &[tapped_source(), watcher]));
+    engine.note_on(60, 1.0);
+    render_stereo(&mut engine, 8192);
+    let monitors = engine.monitors();
+    assert!(monitors[1].levels[0] > -40.0, "{}", monitors[1].levels[0]);
+    assert_eq!(monitors[0], MonitorData::default());
+    engine.reset();
+    assert_eq!(engine.monitors()[1], MonitorData::default());
 }

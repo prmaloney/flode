@@ -68,6 +68,17 @@ pub(super) const SELECTION_COLOR: Color = Color::from_rgb(0.42, 0.68, 1.0);
 pub(super) const SELECTION_WIDTH: f32 = 2.0;
 /// The spectrum the EQ's analyzer draws behind its curve.
 pub(super) const ANALYZER_COLOR: Color = Color::from_rgba(0.19, 0.50, 0.90, 0.40);
+/// The monitor node's screen, darker than a dropdown so the picture stands out.
+pub(super) const MONITOR_SCREEN_COLOR: Color = Color::from_rgb(0.06, 0.065, 0.09);
+/// The left and right channel traces of a monitor.
+pub(super) const MONITOR_LEFT_COLOR: Color = SELECTION_COLOR;
+pub(super) const MONITOR_RIGHT_COLOR: Color = AUTO_LINK_COLOR;
+/// The zones of a level bar, and the clip light.
+pub(super) const LEVEL_GREEN_COLOR: Color = CONTROL_COLOR;
+pub(super) const LEVEL_YELLOW_COLOR: Color = Color::from_rgb(0.95, 0.82, 0.25);
+pub(super) const LEVEL_RED_COLOR: Color = Color::from_rgb(0.92, 0.28, 0.25);
+/// The points of a vectorscope, soft so a dense cloud builds up.
+pub(super) const VECTORSCOPE_DOT_COLOR: Color = Color::from_rgba(0.35, 0.85, 0.45, 0.55);
 pub(super) const TEXT_COLOR: Color = Color::WHITE;
 pub(super) const DIM_TEXT_COLOR: Color = Color::from_rgb(0.55, 0.55, 0.58);
 pub(super) const TERMINAL_COLOR: Color = Color::from_rgb(0.75, 0.75, 0.80);

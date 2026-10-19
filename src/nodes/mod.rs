@@ -23,6 +23,7 @@ pub mod macros;
 pub mod map;
 pub mod math;
 pub mod mix;
+pub mod monitor;
 pub mod oscillator;
 pub mod output;
 pub mod phaser;
@@ -71,6 +72,11 @@ pub const EQ_HEIGHT: f32 = 100.0;
 pub const EQ_ROW: f32 = EQ_HEIGHT + 8.0;
 /// The space the EQ's analyzer checkbox takes in the stack.
 pub const EQ_SWITCH_ROW: f32 = 28.0;
+/// The monitor node is wide and its screen tall, so a trace or a spectrum has room to read.
+pub const MONITOR_WIDTH: f32 = 280.0;
+pub const MONITOR_HEIGHT: f32 = 150.0;
+/// The space the screen takes in the stack, with the same margin as a viewer.
+pub const MONITOR_ROW: f32 = MONITOR_HEIGHT + 8.0;
 /// The shelf, cut, peak, or notch toggle at the right end of each band's section header, and its
 /// gap to the node's edge.
 pub const EQ_TOGGLE_WIDTH: f32 = 34.0;
@@ -135,6 +141,7 @@ pub enum NodeKind {
     Flanger,
     Eq,
     Math,
+    Monitor,
     Macro,
 }
 
@@ -166,6 +173,7 @@ impl Category {
                 NodeKind::Output,
                 NodeKind::Map,
                 NodeKind::Math,
+                NodeKind::Monitor,
                 NodeKind::Input,
                 NodeKind::Mix,
             ],
@@ -186,7 +194,7 @@ impl Category {
 
 impl NodeKind {
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 18] = [
+    pub const ALL: [NodeKind; 19] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
@@ -204,6 +212,7 @@ impl NodeKind {
         NodeKind::Flanger,
         NodeKind::Eq,
         NodeKind::Math,
+        NodeKind::Monitor,
         NodeKind::Macro,
     ];
 
@@ -233,6 +242,7 @@ impl NodeKind {
             NodeKind::Flanger => &flanger::Flanger,
             NodeKind::Eq => &eq::Eq,
             NodeKind::Math => &math::Math,
+            NodeKind::Monitor => &monitor::Monitor,
             NodeKind::Macro => &macros::Macros,
         }
     }
@@ -342,6 +352,8 @@ pub enum Control {
     Viewer,
     /// The EQ node's graph. Its points are dragged, and the node's kind says what they set.
     Eq,
+    /// The monitor node's screen. It draws what the audio thread measured and takes no input.
+    Monitor,
     /// The header of section number `n`. The rows after it, up to the next header, fold with it.
     Section(usize),
 }
@@ -685,6 +697,7 @@ impl FlodeNode {
                     let pitch = match row.control {
                         Some(Control::Viewer) => VIEWER_ROW,
                         Some(Control::Eq) => EQ_ROW,
+                        Some(Control::Monitor) => MONITOR_ROW,
                         Some(Control::Curve) => CURVE_HEIGHT,
                         // The EQ's analyzer checkbox sits close under its graph.
                         Some(Control::Switch(_)) if self.kind == NodeKind::Eq => EQ_SWITCH_ROW,
@@ -877,6 +890,7 @@ impl FlodeNode {
                     Some(Control::Curve) => place.y + CURVE_HEIGHT / 2.0,
                     Some(Control::Viewer) => place.y + VIEWER_ROW / 2.0,
                     Some(Control::Eq) => place.y + EQ_ROW / 2.0,
+                    Some(Control::Monitor) => place.y + MONITOR_ROW / 2.0,
                     Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
                         place.y + SWITCH_ROW_HEIGHT / 2.0
                     }
@@ -978,6 +992,25 @@ impl FlodeNode {
             y: self.position.y + place.y - EQ_HEIGHT / 2.0,
             width: self.width() - 2.0 * DROPDOWN_INSET,
             height: EQ_HEIGHT,
+        })
+    }
+
+    /// The monitor screen's box, centered on its row. None if the node has no screen, or it is
+    /// folded away.
+    pub fn monitor_bounds(&self) -> Option<Rectangle> {
+        let rows = self.rows();
+        let index = rows
+            .iter()
+            .position(|row| row.control == Some(Control::Monitor))?;
+        let place = self.places_of(&rows).get(index).copied()?;
+        if place.shape != RowShape::Full {
+            return None;
+        }
+        Some(Rectangle {
+            x: self.position.x + DROPDOWN_INSET,
+            y: self.position.y + place.y - MONITOR_HEIGHT / 2.0,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
+            height: MONITOR_HEIGHT,
         })
     }
 

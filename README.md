@@ -68,6 +68,13 @@ Flode is not affiliated with Blender or the Blender Foundation.
   notch. A cut and a notch have no gain, so their points move sideways only. Double click a point
   to reset its band. The Analyzer checkbox under the graph draws the spectrum of the EQ's output
   behind the curve.
+- **Monitor.** Listens to one audio wire and shows it on a screen, with no output and no knobs. A
+  dropdown picks the mode. Scope draws the left and right waveform, held steady on a rising zero
+  crossing. Spectrum draws the level of each band on a log axis from 20 Hz to 20 kHz. Spectrogram
+  scrolls the spectrum over time, with level as color. Levels shows the RMS and peak of each
+  channel on a bar, a clip light that stays lit for a second, and a strip of the last few seconds.
+  Vectorscope plots left against right, with a correlation bar from -1 to +1 under it. A monitor
+  shows nothing until its wire leads to an output slot.
 - **MIDI Input.** Sends notes to oscillators, and holds mono, glide, and the pitch wheel, mod wheel,
   velocity and aftertouch controllers.
 - **Macro.** Four knobs that are host parameters, so your DAW can automate them. Each has a pin
@@ -105,6 +112,11 @@ the sustain hold. A noise LFO has no dot.
   defaults.
 - A node dropped on a wire needs room. If the two nodes on that wire are closer than the new node
   and a margin on each side, the node after it, and everything that node feeds, ease to the right.
+- Drag from an input pin that has no wire and drop on an output pin to wire the two from the
+  input end. Drop on empty canvas instead and the search box from `Shift+A` opens, with only the
+  nodes that can feed that input. The one you pick is added and wired to it, and follows the
+  cursor until you click to place it. An input that already has a wire still detaches it when you
+  drag from it.
 - Shift and right drag from one node to another connects them. The orange line follows the cursor,
   and the node it would connect to is outlined. Only pins that carry the same kind of signal can
   join. A pair with the same name wins, such as Shape to Shape. Otherwise the first pair whose
@@ -208,8 +220,8 @@ cargo test
 The tests cover the graph model, the compiler that turns a graph into a patch, the engine, every
 effect, and the editor's input handling. The audio thread must never allocate, and `nih-plug` is
 built with `assert_process_allocs`, so a debug build panics on an allocation there. A test plays a
-patch that runs all eight effects, the EQ's analyzer, and chained map and math nodes with
-allocation forbidden.
+patch that runs all eight effects, the EQ's analyzer, monitors in every mode, and chained map and
+math nodes with allocation forbidden.
 
 Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
 editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`, `select:0,2`) opens part
@@ -248,7 +260,9 @@ Flode is young. The DSP is covered by tests for level, stability, filter and del
 allocation on the audio thread, but how it sounds is still being tuned by ear. Known limits:
 
 - There are four instances of each effect kind, and four filters that run after an effect. A fifth
-  passes its input through.
+  passes its input through. The same goes for monitors, which show nothing past the fourth.
+- A monitor takes one stage of its slot's 16. If the monitors push a slot past the limit, that slot
+  runs without them rather than going silent.
 - A patch runs up to 24 map and math nodes together. One past that makes no signal, so a knob wired
   to it is not driven. A map with nothing wired to its input makes no signal either, and a loop of
   maps makes none. A loop of math nodes is cut where it closes, and the node that would read itself

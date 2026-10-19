@@ -1,7 +1,7 @@
 //! The pill of add buttons, the category lists, dropdown lists, and the right-click menu: the
 //! chrome that floats above the nodes.
 
-use crate::nodes::{Bypass, Category, FlodeNode, NodeKind};
+use crate::nodes::{Bypass, Category, FlodeNode, NodeKind, Port};
 use crate::presets::Library;
 use nih_plug_iced::{Point, Rectangle};
 
@@ -451,6 +451,10 @@ pub(super) struct QuickAdd {
     pub(super) screen: Point,
     /// Where the node goes, in editor coordinates. It is where the cursor was when the box opened.
     pub(super) world: Point,
+    /// The input a wire was dragged back from, as its node and port, when the box opened from
+    /// that drag. The box then lists only the kinds that can feed the input, and the node it adds
+    /// is wired to it.
+    pub(super) feed: Option<(usize, Port)>,
     /// True until the first key after opening. The A that opened the box also arrives as a typed
     /// character, and this drops it.
     pub(super) skip_char: bool,

@@ -1408,7 +1408,8 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Input
                 | NodeKind::Macro
                 | NodeKind::Map
-                | NodeKind::Math => crate::nodes::Bypass::None,
+                | NodeKind::Math
+                | NodeKind::Monitor => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
             };
             assert_eq!(node.bypass(), expected, "{kind:?}");
@@ -5763,5 +5764,464 @@ mod quick_add_flow_tests {
         open(&mut graph);
         typed(&mut graph, "output");
         assert!(!graph.quick_add_results().contains(&NodeKind::Output));
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    use crate::dsp::monitor::{MonitorData, MonitorMode};
+    use crate::editor::canvas::NodeEditor;
+    use crate::editor::monitor::{draw_screen, MonitorHistory};
+    use crate::nodes::monitor;
+    use crate::nodes::{Control, MONITOR_HEIGHT, MONITOR_ROW};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Frame, Program};
+    use std::time::Instant;
+
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    fn monitor_in(mode: MonitorMode) -> FlodeNode {
+        let mut node = FlodeNode::new(NodeKind::Monitor, Point::new(300.0, 200.0));
+        node.choose(0, mode as usize);
+        node
+    }
+
+    #[test]
+    fn the_screen_sits_inside_the_node_below_the_dropdown() {
+        let node = monitor_in(MonitorMode::Scope);
+        let screen = node.monitor_bounds().expect("a monitor has a screen");
+        let bounds = node.bounds();
+        assert_eq!(screen.height, MONITOR_HEIGHT);
+        assert!(screen.x >= bounds.x && screen.x + screen.width <= bounds.x + bounds.width);
+        assert!(screen.y + screen.height <= bounds.y + bounds.height);
+        let dropdown = node.dropdowns().remove(0).bounds;
+        assert!(dropdown.y + dropdown.height <= screen.y);
+        // The screen adds its row to the node's height.
+        let rows = node.rows();
+        assert!(rows.iter().any(|row| row.control == Some(Control::Monitor)));
+        assert!(bounds.height > MONITOR_ROW);
+    }
+
+    #[test]
+    fn a_collapsed_monitor_hides_its_screen() {
+        let mut node = monitor_in(MonitorMode::Scope);
+        node.collapsed = true;
+        assert!(node.monitor_bounds().is_none());
+    }
+
+    #[test]
+    fn a_monitor_has_no_output_and_one_audio_input() {
+        let node = monitor_in(MonitorMode::Scope);
+        assert_eq!(node.input_ports(), vec![Port::Audio]);
+        assert!(node.output_ports().is_empty());
+    }
+
+    #[test]
+    fn saving_and_loading_keeps_every_mode() {
+        for mode in MonitorMode::ALL {
+            let mut graph = Graph::with(vec![monitor_in(mode)], Vec::new());
+            graph.refresh_slots();
+            let loaded = Graph::from_saved(&graph.to_saved());
+            assert_eq!(loaded.nodes.len(), 1);
+            assert_eq!(loaded.nodes[0].kind, NodeKind::Monitor);
+            assert_eq!(monitor::mode(&loaded.nodes[0]), mode, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_quick_add_box_and_the_util_list_offer_the_monitor() {
+        assert!(NodeKind::ALL.contains(&NodeKind::Monitor));
+        assert!(Category::Util.kinds().contains(&NodeKind::Monitor));
+        let found = quick_add_results("monit", |_| true);
+        assert_eq!(found, vec![NodeKind::Monitor]);
+    }
+
+    /// An oscillator at node 0 and a monitor at node 1, next to it.
+    fn oscillator_and_monitor() -> Graph {
+        Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Oscillator, Point::new(40.0, 80.0)),
+                FlodeNode::new(NodeKind::Monitor, Point::new(500.0, 80.0)),
+            ],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn an_audio_wire_ends_on_the_monitor_pin() {
+        let mut graph = oscillator_and_monitor();
+        graph.connect(0, Port::Audio, 1, Port::Audio);
+        assert_eq!(graph.connections.len(), 1);
+        assert_eq!(graph.connections[0].to, 1);
+        let mut other = oscillator_and_monitor();
+        assert!(other.auto_connect(0, 1));
+        assert_eq!(other.connections[0].input, Port::Audio);
+        // Dragging from the monitor still finds the oscillator.
+        let mut backward = oscillator_and_monitor();
+        assert!(backward.auto_connect(1, 0));
+        assert_eq!(
+            (backward.connections[0].from, backward.connections[0].to),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn a_monitor_dropped_on_a_wire_is_not_spliced() {
+        let mut graph = minimal_graph();
+        let curve = graph.link_curve(&graph.connections[0]).unwrap();
+        let middle = bezier_point(&curve, 0.5);
+        let node = graph.add_node(
+            NodeKind::Monitor,
+            Point::new(middle.x - 100.0, middle.y - 40.0),
+        );
+        assert_eq!(graph.link_under(node), None);
+    }
+
+    #[test]
+    fn pressing_the_screen_selects_the_node_like_its_body() {
+        let mut graph = oscillator_and_monitor();
+        let screen = graph.nodes[1].monitor_bounds().unwrap();
+        let start = Point::new(
+            screen.x + screen.width / 2.0,
+            screen.y + screen.height / 2.0,
+        );
+        let before = graph.nodes[1].position;
+        let send = |graph: &mut Graph, event: mouse::Event, at: Point| {
+            let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+            editor.update(Event::Mouse(event), BOUNDS, Cursor::Available(at));
+        };
+        send(
+            &mut graph,
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            start,
+        );
+        let to = Point::new(start.x - 30.0, start.y + 40.0);
+        send(&mut graph, mouse::Event::CursorMoved { position: to }, to);
+        send(
+            &mut graph,
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+            to,
+        );
+        // A press on a node's body selects it and does nothing else, as on any other node. Only
+        // the header drags.
+        assert_eq!(graph.nodes[1].position, before);
+        assert_eq!(graph.selected, Some(1));
+        assert!(matches!(graph.interaction, Interaction::Idle));
+        assert!(graph.dropdown_menu.is_none());
+    }
+
+    #[test]
+    fn a_monitor_with_no_wiring_has_no_data_and_draws_the_hint() {
+        let graph = oscillator_and_monitor();
+        assert!(graph.monitor_data(1).is_none());
+        // The whole editor draws without a panic.
+        draw_editor(&graph, ControlLevels::default(), [0; 2], [0.0; 2], BOUNDS);
+    }
+
+    /// A measurement with something in every field.
+    fn busy_data() -> MonitorData {
+        let mut data = MonitorData::default();
+        for (i, sample) in data.trace.iter_mut().enumerate() {
+            let phase = i as f32 / 20.0;
+            *sample = [phase.sin(), (phase * 1.5).cos() * 0.6];
+        }
+        for (i, db) in data.spectrum.iter_mut().enumerate() {
+            *db = -90.0 + (i as f32 * 0.7).sin().abs() * 80.0;
+        }
+        data.levels = [-0.05, -6.0, -14.0, -20.0];
+        data.correlation = -0.4;
+        data
+    }
+
+    #[test]
+    fn every_mode_draws_with_and_without_data() {
+        let screen = monitor_in(MonitorMode::Scope).monitor_bounds().unwrap();
+        let data = busy_data();
+        let now = Instant::now();
+        for mode in MonitorMode::ALL {
+            let mut history = MonitorHistory::new(0, mode);
+            for i in 0..300 {
+                history.feed(
+                    mode,
+                    Some(&data),
+                    now + std::time::Duration::from_millis(40 * i),
+                );
+            }
+            for (data, history) in [
+                (Some(&data), Some(&history)),
+                (Some(&data), None),
+                (None, None),
+                (Some(&MonitorData::default()), Some(&history)),
+            ] {
+                let mut frame = Frame::new(BOUNDS.size());
+                draw_screen(&mut frame, screen, mode, data, history, &[], 1.0);
+                // And under an overlay that hides the text.
+                let mut frame = Frame::new(BOUNDS.size());
+                draw_screen(&mut frame, screen, mode, data, history, &[BOUNDS], 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_a_node_renumbers_the_monitor_histories() {
+        let mut graph = Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0)),
+                monitor_in(MonitorMode::Levels),
+                monitor_in(MonitorMode::Spectrogram),
+            ],
+            Vec::new(),
+        );
+        graph.monitor_history = vec![
+            MonitorHistory::new(1, MonitorMode::Levels),
+            MonitorHistory::new(2, MonitorMode::Spectrogram),
+        ];
+        graph.delete_node(1);
+        assert_eq!(graph.monitor_history.len(), 1);
+        assert_eq!(graph.monitor_history[0].node, 1);
+        graph.delete_node(0);
+        assert_eq!(graph.monitor_history[0].node, 0);
+        graph.delete_node(0);
+        assert!(graph.monitor_history.is_empty());
+    }
+
+    #[test]
+    fn updating_creates_a_history_only_for_the_time_modes() {
+        let mut graph = Graph::with(
+            vec![
+                monitor_in(MonitorMode::Scope),
+                monitor_in(MonitorMode::Levels),
+            ],
+            Vec::new(),
+        );
+        graph.update_monitors(Instant::now());
+        assert_eq!(graph.monitor_history.len(), 1);
+        assert_eq!(graph.monitor_history[0].node, 1);
+        // The history stays empty while the node has no data to record.
+        assert_eq!(graph.monitor_history[0].levels.len(), 0);
+    }
+}
+
+mod back_wiring_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    fn mouse_at(graph: &mut Graph, event: mouse::Event, at: Point) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(Event::Mouse(event), bounds(), Cursor::Available(at));
+    }
+
+    fn press(graph: &mut Graph, at: Point) {
+        mouse_at(graph, mouse::Event::ButtonPressed(mouse::Button::Left), at);
+    }
+
+    fn release(graph: &mut Graph, at: Point) {
+        mouse_at(graph, mouse::Event::ButtonReleased(mouse::Button::Left), at);
+    }
+
+    fn key(graph: &mut Graph, key_code: KeyCode) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key_code,
+                modifiers: Modifiers::default(),
+            }),
+            bounds(),
+            Cursor::Unavailable,
+        );
+    }
+
+    /// A graph with a filter at the right and an oscillator at the left, and nothing wired.
+    fn graph_with_filter() -> (Graph, usize, usize) {
+        let mut graph = Graph::default();
+        graph.nodes.clear();
+        graph.connections.clear();
+        let osc = graph.add_node(NodeKind::Oscillator, Point::new(120.0, 300.0));
+        let filter = graph.add_node(NodeKind::Filter, Point::new(520.0, 300.0));
+        graph.clear_selection();
+        (graph, osc, filter)
+    }
+
+    /// Dragging from a free input onto an output wires the two.
+    #[test]
+    fn dragging_back_to_an_output_wires_it() {
+        let (mut graph, osc, filter) = graph_with_filter();
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        let output = graph.nodes[osc].output_point(Port::Audio).unwrap();
+        press(&mut graph, input);
+        assert!(matches!(graph.interaction, Interaction::BackWiring { .. }));
+        release(&mut graph, output);
+        assert_eq!(graph.connections.len(), 1);
+        let link = graph.connections[0];
+        assert_eq!((link.from, link.to, link.input), (osc, filter, Port::Audio));
+        assert!(matches!(graph.interaction, Interaction::Idle));
+    }
+
+    /// Dropping on an output of the wrong kind of signal wires nothing.
+    #[test]
+    fn a_mismatched_output_does_not_wire() {
+        let (mut graph, _, filter) = graph_with_filter();
+        let lfo = graph.add_node(NodeKind::Lfo, Point::new(120.0, 500.0));
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        let output = graph.nodes[lfo].output_point(Port::Shape).unwrap();
+        press(&mut graph, input);
+        release(&mut graph, output);
+        assert!(graph.connections.is_empty());
+        assert!(graph.quick_add.is_none());
+    }
+
+    /// Dropping on empty canvas opens the quick add box, which lists only what can feed the input.
+    #[test]
+    fn dropping_on_empty_canvas_offers_the_nodes_that_can_feed() {
+        let (mut graph, _, filter) = graph_with_filter();
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        press(&mut graph, input);
+        release(&mut graph, Point::new(300.0, 520.0));
+        let open = graph.quick_add.clone().expect("the box opens");
+        assert_eq!(open.feed, Some((filter, Port::Audio)));
+        let kinds = graph.quick_add_results();
+        assert!(kinds.contains(&NodeKind::Reverb));
+        assert!(!kinds.contains(&NodeKind::Lfo));
+        assert!(!kinds.contains(&NodeKind::Output));
+        assert!(!kinds.contains(&NodeKind::Monitor));
+    }
+
+    /// A control input lists the control sources, not the audio nodes.
+    #[test]
+    fn a_knob_input_lists_control_sources() {
+        let (mut graph, _, filter) = graph_with_filter();
+        let pin = Port::Knob(KnobId::Cutoff);
+        let input = graph.nodes[filter].input_point(pin).unwrap();
+        press(&mut graph, input);
+        release(&mut graph, Point::new(300.0, 520.0));
+        let kinds = graph.quick_add_results();
+        assert!(kinds.contains(&NodeKind::Lfo));
+        assert!(kinds.contains(&NodeKind::Math));
+        assert!(!kinds.contains(&NodeKind::Oscillator));
+    }
+
+    /// Picking a node adds it, wires it to the input, and leaves it following the cursor.
+    #[test]
+    fn picking_a_node_adds_and_wires_it() {
+        let (mut graph, _, filter) = graph_with_filter();
+        let before = graph.nodes.len();
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        press(&mut graph, input);
+        release(&mut graph, Point::new(300.0, 520.0));
+        for c in "reverb".chars() {
+            let mut editor =
+                NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+            editor.update(
+                Event::Keyboard(keyboard::Event::CharacterReceived(c)),
+                bounds(),
+                Cursor::Unavailable,
+            );
+        }
+        key(&mut graph, KeyCode::Enter);
+        assert_eq!(graph.nodes.len(), before + 1);
+        let added = graph.nodes.len() - 1;
+        assert_eq!(graph.nodes[added].kind, NodeKind::Reverb);
+        assert!(matches!(
+            graph.interaction,
+            Interaction::Placing { node, .. } if node == added
+        ));
+        let link = graph.connections.last().copied().expect("a wire");
+        assert_eq!(
+            (link.from, link.to, link.input),
+            (added, filter, Port::Audio)
+        );
+    }
+
+    /// Escape closes the box and leaves the graph as it was.
+    #[test]
+    fn escape_leaves_the_graph_alone() {
+        let (mut graph, _, filter) = graph_with_filter();
+        let before = graph.nodes.len();
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        press(&mut graph, input);
+        release(&mut graph, Point::new(300.0, 520.0));
+        key(&mut graph, KeyCode::Escape);
+        assert!(graph.quick_add.is_none());
+        assert_eq!(graph.nodes.len(), before);
+        assert!(graph.connections.is_empty());
+    }
+
+    /// An input that has a wire still detaches it, as before.
+    #[test]
+    fn a_wired_input_still_detaches() {
+        let (mut graph, osc, filter) = graph_with_filter();
+        graph.connect(osc, Port::Audio, filter, Port::Audio);
+        let input = graph.nodes[filter].input_point(Port::Audio).unwrap();
+        press(&mut graph, input);
+        assert!(matches!(graph.interaction, Interaction::Wiring { .. }));
+        assert!(graph.connections.is_empty());
+    }
+
+    /// The quick add box a plain Shift+A opens has no input to feed, so it lists everything that
+    /// can be added.
+    #[test]
+    fn a_plain_quick_add_is_not_filtered() {
+        let (mut graph, _, _) = graph_with_filter();
+        graph.open_quick_add();
+        assert_eq!(graph.quick_add.as_ref().and_then(|open| open.feed), None);
+        assert!(!graph.quick_add_results().is_empty());
+    }
+}
+
+mod monitor_wiring_tests {
+    use super::*;
+
+    /// The starting graph, plus a monitor listening to its oscillator.
+    fn graph_with_monitor() -> (Graph, usize) {
+        let mut graph = Graph::default();
+        let osc = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Oscillator)
+            .expect("the starting graph has an oscillator");
+        let monitor = graph.add_node(NodeKind::Monitor, Point::new(600.0, 400.0));
+        graph.connect(osc, Port::Audio, monitor, Port::Audio);
+        (graph, monitor)
+    }
+
+    /// A monitor wired to something that plays gets an instance, and the editor finds its data.
+    #[test]
+    fn a_wired_monitor_finds_its_instance() {
+        let (graph, monitor) = graph_with_monitor();
+        assert!(graph.monitor_data(monitor).is_some());
+    }
+
+    /// A monitor with nothing wired to it has no instance.
+    #[test]
+    fn an_unwired_monitor_has_none() {
+        let mut graph = Graph::default();
+        let monitor = graph.add_node(NodeKind::Monitor, Point::new(600.0, 400.0));
+        assert!(graph.monitor_data(monitor).is_none());
+    }
+
+    /// The monitor does not change the sound path. The output still has its one chain.
+    #[test]
+    fn the_monitor_leaves_the_output_chain_alone() {
+        let (graph, _) = graph_with_monitor();
+        let patch = graph.wiring().patch();
+        assert!(patch.lanes[0].is_active());
     }
 }

@@ -20,6 +20,7 @@ pub mod knob;
 mod logo;
 mod menus;
 mod meter;
+mod monitor;
 mod pack;
 pub mod piano;
 pub mod saved;
@@ -244,6 +245,8 @@ impl IcedEditor for FlodeEditor {
             }
         }
         self.graph.spectra = meters.spectra;
+        self.graph.monitors = meters.monitors;
+        self.graph.update_monitors(now);
         let output = self.meter.update(meters.output, seconds);
 
         // The MIDI light flashes when the audio thread has taken in a note-on since the last frame,

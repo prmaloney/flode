@@ -9,6 +9,7 @@
 use super::control::ControlLevels;
 use super::Patch;
 use crate::dsp::analyzer::{BINS, FLOOR_DB};
+use crate::dsp::monitor::MonitorData;
 use crate::engine::POOL;
 use std::sync::{Arc, Mutex};
 use triple_buffer::{triple_buffer, Input, Output};
@@ -30,6 +31,8 @@ pub struct Meters {
     /// What each EQ instance measured, in dB per band, by pool number. An EQ node whose analyzer
     /// is on draws its instance's.
     pub spectra: [[f32; BINS]; POOL],
+    /// What each monitor instance measured, by pool number. A monitor node draws its instance's.
+    pub monitors: [MonitorData; POOL],
 }
 
 impl Default for Meters {
@@ -40,6 +43,7 @@ impl Default for Meters {
             output: [0.0; 2],
             notes_in: 0,
             spectra: [[FLOOR_DB; BINS]; POOL],
+            monitors: [MonitorData::default(); POOL],
         }
     }
 }

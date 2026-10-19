@@ -9,16 +9,16 @@ use super::control::{
 };
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
-    FilterParams, FlangerParams, LaneGraph, MixParams, OscillatorParams, PhaserParams,
-    ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
+    FilterParams, FlangerParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
+    PhaserParams, ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
 use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, eq, filter, input, lfo, map, math, mix, oscillator, phaser,
-    Bypass, FlodeNode, NodeKind, Port,
+    compressor, delay, distortion, eq, filter, input, lfo, map, math, mix, monitor, oscillator,
+    phaser, Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 use std::cell::OnceCell;
@@ -431,12 +431,64 @@ impl<'a> Wiring<'a> {
             let Some(link) = self.input_link(output, Port::Slot(slot)) else {
                 continue;
             };
-            let mut builder = LaneBuilder::new(&mut pools);
-            if builder.place(self, link.from).is_some() && !builder.overflowed {
-                found.extend(builder.eq_pools);
+            if let Some(built) = self.build_lane(link.from, &mut pools) {
+                found.extend(built.eq_pools);
             }
         }
         found
+    }
+
+    /// Which engine instance each monitor node runs on, as (node, pool number) pairs, in the order
+    /// the compiler hands them out. The editor reads a monitor node's measurement from its
+    /// instance. A monitor that listens to nothing that plays in a slot, or that the slot had no
+    /// room for, has no entry. A monitor that two slots both play has an entry for each.
+    pub fn monitor_pools(&self) -> Vec<(usize, u8)> {
+        let Some(output) = self.first_output() else {
+            return Vec::new();
+        };
+        let mut pools = [0u8; EFFECT_KINDS];
+        let mut found = Vec::new();
+        for slot in 0..MAX_SLOTS.min(self.nodes[output].used) {
+            let Some(link) = self.input_link(output, Port::Slot(slot)) else {
+                continue;
+            };
+            if let Some(built) = self.build_lane(link.from, &mut pools) {
+                found.extend(built.monitor_pools);
+            }
+        }
+        found
+    }
+
+    /// Builds the arena of the slot fed by `from`, and hands out instances from `pools`. A slot
+    /// that only overflows because of its monitors is built again without them, so a monitor never
+    /// silences a slot. None means the slot is silent.
+    fn build_lane(&self, from: usize, pools: &mut [u8; EFFECT_KINDS]) -> Option<BuiltLane> {
+        let (built, used) = self.build_with(from, *pools, true);
+        let (built, used) = match built {
+            None if used.1 => self.build_with(from, *pools, false),
+            _ => (built, used),
+        };
+        *pools = used.0;
+        built
+    }
+
+    /// One try at a slot's arena. Returns the arena if it fits, the pools after the try, and
+    /// whether the arena overflowed.
+    fn build_with(
+        &self,
+        from: usize,
+        mut pools: [u8; EFFECT_KINDS],
+        monitors: bool,
+    ) -> (Option<BuiltLane>, ([u8; EFFECT_KINDS], bool)) {
+        let mut builder = LaneBuilder::new(&mut pools, monitors);
+        let placed = builder.place(self, from).is_some();
+        let overflowed = builder.overflowed;
+        let built = (placed && !overflowed).then(|| BuiltLane {
+            stages: builder.stages,
+            eq_pools: builder.eq_pools,
+            monitor_pools: builder.monitor_pools,
+        });
+        (built, (pools, overflowed))
     }
 
     /// The gain knob of a slot, as a param.
@@ -458,9 +510,8 @@ impl<'a> Wiring<'a> {
         let Some(link) = self.input_link(output, Port::Slot(slot)) else {
             return lane;
         };
-        let mut builder = LaneBuilder::new(pools);
-        if builder.place(self, link.from).is_some() && !builder.overflowed {
-            lane.stages = builder.stages;
+        if let Some(built) = self.build_lane(link.from, pools) {
+            lane.stages = built.stages;
         }
         lane
     }
@@ -559,6 +610,9 @@ impl<'a> Wiring<'a> {
                     q: knob(eq::Q[band]),
                 }),
             })),
+            NodeKind::Monitor => Some(StageParams::Monitor(MonitorParams {
+                mode: monitor::mode(n),
+            })),
             NodeKind::Map
             | NodeKind::Math
             | NodeKind::Output
@@ -571,8 +625,11 @@ impl<'a> Wiring<'a> {
 }
 
 /// The kinds of bus stage that keep memory, for counting how many of each a patch uses: the eight
-/// effects, and the filter, which only runs on the bus when something on the bus feeds it.
-pub const EFFECT_KINDS: usize = 9;
+/// effects, the monitor, and the filter, which only runs on the bus when something on the bus
+/// feeds it.
+pub const EFFECT_KINDS: usize = 10;
+/// The counter the monitors use.
+const MONITOR_KIND: usize = 9;
 
 /// Which counter a bus stage uses, or None for a stage with no memory, such as a mix.
 fn pool_kind(params: &StageParams) -> Option<usize> {
@@ -586,8 +643,16 @@ fn pool_kind(params: &StageParams) -> Option<usize> {
         StageParams::Flanger(_) => Some(6),
         StageParams::Filter(_) => Some(7),
         StageParams::Eq(_) => Some(8),
+        StageParams::Monitor(_) => Some(MONITOR_KIND),
         StageParams::Oscillator(_) | StageParams::Mix(_) => None,
     }
+}
+
+/// What a slot compiles to, and the instances its EQ and monitor nodes took.
+struct BuiltLane {
+    stages: ArrayVec<StageSpec, MAX_STAGES>,
+    eq_pools: Vec<(usize, u8)>,
+    monitor_pools: Vec<(usize, u8)>,
 }
 
 /// The arena of one slot while it is built.
@@ -603,10 +668,16 @@ struct LaneBuilder<'p> {
     overflowed: bool,
     /// The EQ nodes placed so far and the instance each one took.
     eq_pools: Vec<(usize, u8)>,
+    /// True to give each monitor a stage after the node it listens to.
+    monitors: bool,
+    /// The nodes whose monitors are already placed.
+    attached: Vec<usize>,
+    /// The monitor nodes placed so far and the instance each one took.
+    monitor_pools: Vec<(usize, u8)>,
 }
 
 impl<'p> LaneBuilder<'p> {
-    fn new(pools: &'p mut [u8; EFFECT_KINDS]) -> Self {
+    fn new(pools: &'p mut [u8; EFFECT_KINDS], monitors: bool) -> Self {
         Self {
             pools,
             stages: ArrayVec::new(),
@@ -614,12 +685,61 @@ impl<'p> LaneBuilder<'p> {
             path: Vec::new(),
             overflowed: false,
             eq_pools: Vec::new(),
+            monitors,
+            attached: Vec::new(),
+            monitor_pools: Vec::new(),
+        }
+    }
+
+    /// Places a node's stage, and then a stage for each monitor wired to it. A monitor has no
+    /// output, so nothing else would pull it in.
+    fn place(&mut self, wiring: &Wiring, node: usize) -> Option<u8> {
+        let position = self.place_node(wiring, node)?;
+        if self.monitors && !self.attached.contains(&node) {
+            self.attached.push(node);
+            self.place_monitors(wiring, node, position);
+        }
+        Some(position)
+    }
+
+    /// Places a stage for every monitor that listens to `node`, whose own stage or whose upstream
+    /// stage, for a bypassed node, is at `source`. A monitor passes its input on unchanged, so it
+    /// never changes the sound, even as the last stage of the slot. One that does not fit is
+    /// skipped, and the slot keeps what it has.
+    fn place_monitors(&mut self, wiring: &Wiring, node: usize, source: u8) {
+        for monitor in 0..wiring.nodes.len() {
+            if wiring.nodes[monitor].kind != NodeKind::Monitor {
+                continue;
+            }
+            let listens = wiring
+                .input_link(monitor, Port::Audio)
+                .is_some_and(|link| link.from == node);
+            let Some(params) = wiring.stage_params(monitor).filter(|_| listens) else {
+                continue;
+            };
+            if self.stages.is_full() {
+                return;
+            }
+            let pool = self.pools[MONITOR_KIND];
+            self.pools[MONITOR_KIND] = pool.saturating_add(1);
+            self.monitor_pools.push((monitor, pool));
+            let feeder = &mut self.stages[source as usize];
+            if !feeder.bus {
+                feeder.tap = true;
+            }
+            self.stages.push(StageSpec {
+                params,
+                inputs: [Some(source), None],
+                bus: true,
+                tap: false,
+                pool,
+            });
         }
     }
 
     /// Places a node's stage after the stages that feed it, and returns its arena position. None
     /// means the node makes no audio, is part of a loop, or would not fit.
-    fn place(&mut self, wiring: &Wiring, node: usize) -> Option<u8> {
+    fn place_node(&mut self, wiring: &Wiring, node: usize) -> Option<u8> {
         if let Some(&(_, position)) = self.placed.iter().find(|(placed, _)| *placed == node) {
             return Some(position);
         }
@@ -1124,6 +1244,7 @@ mod effect_tests {
             NodeKind::Phaser,
             NodeKind::Flanger,
             NodeKind::Eq,
+            NodeKind::Monitor,
         ];
         for kind in NodeKind::ALL {
             let nodes = vec![node(kind)];
@@ -1410,5 +1531,207 @@ mod effect_tests {
         assert!(!lane.stages[1].bus);
         assert!(lane.stages[1].tap);
         assert_eq!(lane.stages[1].pool, 0);
+    }
+
+    /// The monitor pools of a graph with every slot on, after adding notes.
+    fn monitor_pools(
+        nodes: &mut Vec<FlodeNode>,
+        links: &[Connection],
+        output: usize,
+    ) -> Vec<(usize, u8)> {
+        nodes[output].used = MAX_SLOTS;
+        let mut links = links.to_vec();
+        super::tests::with_notes(nodes, &mut links);
+        Wiring::new(nodes, &links).monitor_pools()
+    }
+
+    /// One wire feeds the output and a monitor. The monitor is a bus stage after the oscillator,
+    /// which it taps, and it is the last stage, so it passes the oscillator on to the slot.
+    #[test]
+    fn a_monitor_on_an_oscillator_is_a_bus_stage() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        let links = [audio(0, 1, Port::Audio), audio(0, 2, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 2)[0];
+        assert_eq!(lane.stages.len(), 2);
+        assert!(lane.stages[0].tap && !lane.stages[0].bus);
+        let monitor = lane.root().unwrap();
+        assert!(matches!(monitor.params, StageParams::Monitor(_)));
+        assert!(monitor.bus && !monitor.tap);
+        assert_eq!(monitor.inputs, [Some(0), None]);
+        assert_eq!(monitor.pool, 0);
+        assert_eq!(monitor_pools(&mut nodes, &links, 2), [(1, 0)]);
+    }
+
+    /// A monitor on an effect that feeds the output reads the effect's output.
+    #[test]
+    fn a_monitor_on_an_effect_reads_its_output() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(1, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 3);
+        assert!(matches!(lane.stages[1].params, StageParams::Reverb(_)));
+        assert_eq!(lane.stages[2].inputs, [Some(1), None]);
+        assert!(matches!(lane.stages[2].params, StageParams::Monitor(_)));
+    }
+
+    /// A monitor on a node in the middle of a per-voice chain sits where it was placed. The root
+    /// stays per voice, and the monitor's source is tapped.
+    #[test]
+    fn a_monitor_in_a_voice_chain_leaves_the_root_per_voice() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Filter),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(0, 2, Port::Audio),
+            audio(1, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 3);
+        assert!(lane.stages[0].tap);
+        assert!(matches!(lane.stages[1].params, StageParams::Monitor(_)));
+        let root = lane.root().unwrap();
+        assert!(matches!(root.params, StageParams::Filter(_)));
+        assert!(!root.bus);
+        assert_eq!(root.inputs[0], Some(0));
+    }
+
+    /// A monitor on a bypassed node listens to what the node passes through.
+    #[test]
+    fn a_monitor_on_a_bypassed_node_reads_the_node_upstream() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Filter),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        nodes[1].bypassed = true;
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(1, 3, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 2);
+        assert!(matches!(lane.stages[0].params, StageParams::Oscillator(_)));
+        assert_eq!(lane.stages[1].inputs, [Some(0), None]);
+        assert!(matches!(lane.stages[1].params, StageParams::Monitor(_)));
+    }
+
+    /// A monitor on a muted node has nothing to hear and gets no stage.
+    #[test]
+    fn a_monitor_on_a_muted_node_gets_no_stage() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        nodes[1].bypassed = true;
+        let links = [audio(1, 2, Port::Audio), audio(0, 3, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 1);
+        assert!(monitor_pools(&mut nodes, &links, 3).is_empty());
+    }
+
+    /// A monitor on a source that plays in no slot gets no stage and no instance.
+    #[test]
+    fn a_monitor_on_an_unplayed_source_gets_no_stage() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Oscillator),
+            node(NodeKind::Monitor),
+            node(NodeKind::Output),
+        ];
+        let links = [audio(1, 2, Port::Audio), audio(0, 3, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 3)[0];
+        assert_eq!(lane.stages.len(), 1);
+        assert!(monitor_pools(&mut nodes, &links, 3).is_empty());
+    }
+
+    /// A monitor that does not fit is skipped, and the slot keeps playing.
+    #[test]
+    fn a_monitor_past_the_stage_limit_is_skipped() {
+        // A full arena, with a monitor on its last stage.
+        let mut nodes = vec![node(NodeKind::Oscillator)];
+        let mut links = Vec::new();
+        for i in 0..MAX_STAGES - 1 {
+            nodes.push(node(NodeKind::Filter));
+            links.push(audio(i, i + 1, Port::Audio));
+        }
+        nodes.push(node(NodeKind::Monitor));
+        nodes.push(node(NodeKind::Output));
+        let (monitor, output) = (MAX_STAGES, MAX_STAGES + 1);
+        links.push(audio(MAX_STAGES - 1, monitor, Port::Audio));
+        links.push(audio(MAX_STAGES - 1, output, Port::Slot(0)));
+        let lane = &lanes(&mut nodes, &links, output)[0];
+        assert_eq!(lane.stages.len(), MAX_STAGES);
+        assert!(lane
+            .stages
+            .iter()
+            .all(|s| !matches!(s.params, StageParams::Monitor(_))));
+        assert!(monitor_pools(&mut nodes, &links, output).is_empty());
+
+        // A monitor early in the chain would take the room the later filters need. The slot
+        // plays without it.
+        links[MAX_STAGES - 1] = audio(0, monitor, Port::Audio);
+        let lane = &lanes(&mut nodes, &links, output)[0];
+        assert_eq!(lane.stages.len(), MAX_STAGES);
+        assert!(lane
+            .stages
+            .iter()
+            .all(|s| !matches!(s.params, StageParams::Monitor(_))));
+        assert!(monitor_pools(&mut nodes, &links, output).is_empty());
+    }
+
+    /// Monitors take instances in the order the slots place them, and the lane graphs hand out
+    /// the same numbers as `monitor_pools`.
+    #[test]
+    fn monitor_pools_number_monitors_across_slots() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator), // 0
+            node(NodeKind::Monitor),    // 1
+            node(NodeKind::Monitor),    // 2
+            node(NodeKind::Oscillator), // 3
+            node(NodeKind::Monitor),    // 4
+            node(NodeKind::Output),     // 5
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(0, 2, Port::Audio),
+            audio(0, 5, Port::Slot(0)),
+            audio(3, 4, Port::Audio),
+            audio(3, 5, Port::Slot(1)),
+        ];
+        assert_eq!(
+            monitor_pools(&mut nodes, &links, 5),
+            [(1, 0), (2, 1), (4, 2)]
+        );
+        let lanes = lanes(&mut nodes, &links, 5);
+        let pools = |lane: &LaneGraph| -> Vec<u8> {
+            lane.stages
+                .iter()
+                .filter(|s| matches!(s.params, StageParams::Monitor(_)))
+                .map(|s| s.pool)
+                .collect()
+        };
+        assert_eq!(pools(&lanes[0]), [0, 1]);
+        assert_eq!(pools(&lanes[1]), [2]);
     }
 }

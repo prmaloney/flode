@@ -1,6 +1,8 @@
 //! The graph model and its editing state: nodes, wires, and what the mouse is doing to them.
 
 use crate::dsp::analyzer::{BINS, FLOOR_DB};
+use crate::dsp::monitor::MonitorData;
+use crate::editor::monitor::MonitorHistory;
 use crate::editor::piano::Piano;
 use crate::engine::POOL;
 use crate::nodes::connection::Connection;
@@ -56,6 +58,13 @@ pub(super) enum Interaction {
     Wiring {
         from: usize,
         out: Port,
+        cursor: Point,
+    },
+    /// Dragging a wire back from an input port that has no wire. Dropping it on an output port
+    /// wires the two. Dropping it on empty canvas opens the quick add box for the input.
+    BackWiring {
+        to: usize,
+        input: Port,
         cursor: Point,
     },
     /// Turning a knob on a node.
@@ -267,6 +276,11 @@ pub struct Graph {
     /// What each EQ instance of the audio thread last measured, by pool number. The view copies
     /// it in each frame.
     pub(super) spectra: [[f32; BINS]; POOL],
+    /// What each monitor instance last measured, by pool number. Copied in each frame.
+    pub(super) monitors: [MonitorData; POOL],
+    /// The history of each monitor node that shows a spectrogram or level strip. Entries name
+    /// nodes by index, so a delete renumbers them.
+    pub(super) monitor_history: Vec<MonitorHistory>,
     /// True while the cursor is inside the editor. Hover highlights use it, so one does not stay
     /// lit after the cursor leaves.
     pub(super) cursor_in: bool,
@@ -404,6 +418,8 @@ impl Graph {
             cursor_in: false,
             midi_light: 0.0,
             spectra: [[FLOOR_DB; BINS]; POOL],
+            monitors: [MonitorData::default(); POOL],
+            monitor_history: Vec::new(),
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
@@ -503,6 +519,17 @@ impl Graph {
     /// Opens the quick add box with its corner at the cursor, and closes the menus it would
     /// overlap.
     pub(super) fn open_quick_add(&mut self) {
+        self.open_quick_add_with(None, self.view.to_world(self.last_screen));
+    }
+
+    /// Opens the quick add box where a wire dragged back from input `input` of node `to` was
+    /// dropped on empty canvas. The box lists the kinds that can feed that input, and the one
+    /// picked is wired to it.
+    pub(super) fn open_quick_add_feeding(&mut self, to: usize, input: Port, world: Point) {
+        self.open_quick_add_with(Some((to, input)), world);
+    }
+
+    fn open_quick_add_with(&mut self, feed: Option<(usize, Port)>, world: Point) {
         self.menu = None;
         self.category_menu = None;
         self.preset_list = None;
@@ -511,16 +538,34 @@ impl Graph {
             query: String::new(),
             selected: 0,
             screen: self.last_screen,
-            world: self.view.to_world(self.last_screen),
-            skip_char: true,
+            world,
+            feed,
+            skip_char: feed.is_none(),
         });
     }
 
+    /// The output pin of a new node of `kind` that can feed input `input` of node `to`, if it has
+    /// one. Only pins that carry the same kind of signal can join.
+    pub(super) fn feeding_port(&self, kind: NodeKind, to: usize, input: Port) -> Option<Port> {
+        self.nodes.get(to)?.input_point(input)?;
+        let probe = FlodeNode::new(kind, Point::new(0.0, 0.0));
+        probe
+            .output_ports()
+            .into_iter()
+            .find(|&out| out.signal() == input.signal() && probe.output_point(out).is_some())
+    }
+
     /// The kinds the quick add box lists for what is typed in it. Kinds the graph can't take
-    /// another of are left out.
+    /// another of are left out, and so are the ones that can't feed the input the box was opened
+    /// from.
     pub(super) fn quick_add_results(&self) -> Vec<NodeKind> {
         match &self.quick_add {
-            Some(open) => quick_add_results(&open.query, |kind| self.can_add(kind)),
+            Some(open) => quick_add_results(&open.query, |kind| {
+                self.can_add(kind)
+                    && open
+                        .feed
+                        .is_none_or(|(to, input)| self.feeding_port(kind, to, input).is_some())
+            }),
             None => Vec::new(),
         }
     }
@@ -1338,6 +1383,7 @@ impl Graph {
         // Slides name nodes by index, so they land before the indices shift.
         self.finish_slides();
         self.nodes.remove(index);
+        self.drop_monitor_history(index);
         self.connections
             .retain(|c| c.from != index && c.to != index);
         for connection in &mut self.connections {

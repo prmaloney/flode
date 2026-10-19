@@ -6,6 +6,7 @@ use super::*;
 use crate::dsp::effects::distortion::DistortionKind;
 use crate::dsp::effects::eq::EqKind;
 use crate::dsp::mix::MixMode;
+use crate::dsp::monitor::MonitorMode;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::eq;
@@ -14,8 +15,8 @@ use crate::nodes::math::MathOp;
 use crate::patch::control::{MapNode, MapValue, MathNode, Param, Source};
 use crate::patch::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
-    FilterParams, FlangerParams, MixParams, OscillatorParams, PhaserParams, ReverbParams,
-    StageParams, StageSpec,
+    FilterParams, FlangerParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
+    PhaserParams, ReverbParams, StageParams, StageSpec,
 };
 use crate::patch::{EnvelopeSettings, LfoSettings};
 use assert_no_alloc::assert_no_alloc;
@@ -227,6 +228,21 @@ fn busy_patch() -> Patch {
             source: Some(Source::Lfo(0)),
         },
     });
+    // A monitor in each slot, in a different mode. Three listen to the end of the slot and one to
+    // a source.
+    let watch = |lane: &mut LaneGraph, mode, source: u8, pool: u8| {
+        let mut spec =
+            StageSpec::new(StageParams::Monitor(MonitorParams { mode })).with_input(0, source);
+        spec.pool = pool;
+        if !lane.stages[source as usize].bus {
+            lane.stages[source as usize].tap = true;
+        }
+        lane.stages.push(spec);
+    };
+    watch(&mut patch.lanes[0], MonitorMode::Scope, 4, 0);
+    watch(&mut patch.lanes[1], MonitorMode::Levels, 0, 1);
+    watch(&mut patch.lanes[2], MonitorMode::Vectorscope, 2, 2);
+    watch(&mut patch.lanes[3], MonitorMode::Spectrum, 8, 3);
     patch.envelopes[0] = Some(EnvelopeSettings::new());
     patch.lfos[0] = Some(LfoSettings::new());
     patch
@@ -240,7 +256,7 @@ fn the_audio_path_never_allocates() {
 
     let mut peak = 0.0f32;
     assert_no_alloc(|| {
-        for block in 0..4 {
+        for block in 0..6 {
             engine.begin_block(&patch, Transport::default());
             if block == 0 {
                 for note in [60, 64, 67, 72] {
@@ -257,6 +273,7 @@ fn the_audio_path_never_allocates() {
             }
             engine.levels();
             engine.active_notes();
+            engine.monitors();
         }
     });
 

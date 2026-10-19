@@ -18,6 +18,7 @@ use crate::dsp::effects::phaser::{Phaser, PhaserParams};
 use crate::dsp::effects::reverb::{Reverb, ReverbParams};
 use crate::dsp::frame::Frame;
 use crate::dsp::mix::MixMode;
+use crate::dsp::monitor::{Monitor, MonitorData};
 use crate::engine::stage::FilterState;
 use crate::nodes::lfo::cycles_per_beat;
 use crate::patch::control::ControlLevels;
@@ -40,6 +41,7 @@ pub struct Effects {
     phaser: Vec<Phaser>,
     flanger: Vec<Flanger>,
     eq: Vec<Eq>,
+    monitor: Vec<Monitor>,
     /// The filters that run on the bus. One starts at its knob values the first time it plays,
     /// so it holds `None` until then.
     filter: Vec<Option<FilterState>>,
@@ -60,6 +62,7 @@ impl Effects {
             phaser: (0..POOL).map(|_| Phaser::new(sample_rate)).collect(),
             flanger: (0..POOL).map(|_| Flanger::new(sample_rate)).collect(),
             eq: (0..POOL).map(|_| Eq::new(sample_rate)).collect(),
+            monitor: (0..POOL).map(|_| Monitor::new(sample_rate)).collect(),
         }
     }
 
@@ -73,6 +76,16 @@ impl Effects {
         })
     }
 
+    /// What each monitor instance last measured, by pool number. An instance that no stage uses
+    /// holds its starting values.
+    pub fn monitors(&self) -> [MonitorData; POOL] {
+        std::array::from_fn(|pool| {
+            self.monitor
+                .get(pool)
+                .map_or_else(MonitorData::default, |monitor| *monitor.data())
+        })
+    }
+
     /// Clears every tail and filter memory.
     pub fn reset(&mut self) {
         self.distortion.iter_mut().for_each(Distortion::reset);
@@ -83,6 +96,7 @@ impl Effects {
         self.phaser.iter_mut().for_each(Phaser::reset);
         self.flanger.iter_mut().for_each(Flanger::reset);
         self.eq.iter_mut().for_each(Eq::reset);
+        self.monitor.iter_mut().for_each(Monitor::reset);
         self.filter.iter_mut().for_each(|filter| *filter = None);
     }
 
@@ -98,9 +112,10 @@ impl Effects {
         tempo: Option<f64>,
         smooth: f32,
     ) -> Option<Frame> {
-        // A stage that reads the bus is on the bus too, so if any stage is, the last one is.
+        // A stage that reads the bus is on the bus too, so if any stage but a monitor is, the last
+        // one is. A monitor can sit on the bus in the middle of a per-voice slot.
         let root = graph.stages.len().checked_sub(1)?;
-        if !graph.stages[root].bus {
+        if !graph.stages.iter().any(|spec| spec.bus) {
             return None;
         }
         let mut outputs = *taps;
@@ -120,7 +135,7 @@ impl Effects {
                 smooth,
             );
         }
-        Some(outputs[root])
+        graph.stages[root].bus.then(|| outputs[root])
     }
 
     /// One sample through one bus stage. An instance past the pool passes the input through.
@@ -249,6 +264,13 @@ impl Effects {
                 ),
                 None => input,
             },
+            // A monitor listens and passes its input on unchanged.
+            StageParams::Monitor(p) => {
+                if let Some(monitor) = self.monitor.get_mut(pool) {
+                    monitor.process(input, p.mode);
+                }
+                input
+            }
             // A filter on the bus is one shared filter over the summed voices, so a knob that an
             // envelope drives follows the newest note, not each note's own.
             StageParams::Filter(p) => match self.filter.get_mut(pool) {

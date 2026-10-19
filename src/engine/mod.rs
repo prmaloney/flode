@@ -424,6 +424,11 @@ impl Engine {
         self.effects.spectra()
     }
 
+    /// What each monitor instance last measured, for the editor's monitor displays.
+    pub fn monitors(&self) -> [crate::dsp::monitor::MonitorData; effects::POOL] {
+        self.effects.monitors()
+    }
+
     /// The loudest left and right sample since the last call, as linear amplitude. The meter
     /// reads it once per block.
     pub fn take_output_peak(&mut self) -> [f32; 2] {
