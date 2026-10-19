@@ -5612,3 +5612,156 @@ mod map_polarity_tests {
         assert_eq!(loaded.connections.len(), graph.connections.len());
     }
 }
+
+mod quick_add_flow_tests {
+    use super::*;
+    use crate::editor::canvas::NodeEditor;
+    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    fn bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    fn key(graph: &mut Graph, key_code: KeyCode, modifiers: Modifiers) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key_code,
+                modifiers,
+            }),
+            bounds(),
+            Cursor::Unavailable,
+        );
+        editor.update(
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key_code,
+                modifiers,
+            }),
+            bounds(),
+            Cursor::Unavailable,
+        );
+    }
+
+    fn typed(graph: &mut Graph, text: &str) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        for c in text.chars() {
+            editor.update(
+                Event::Keyboard(keyboard::Event::CharacterReceived(c)),
+                bounds(),
+                Cursor::Unavailable,
+            );
+        }
+    }
+
+    fn open(graph: &mut Graph) {
+        graph.last_screen = Point::new(300.0, 300.0);
+        key(graph, KeyCode::A, Modifiers::SHIFT);
+        // The A that opened the box also arrives as a typed character.
+        typed(graph, "A");
+    }
+
+    /// Shift+A opens the box with nothing selected, and the opening A is not typed into it.
+    #[test]
+    fn shift_a_opens_an_empty_box() {
+        let mut graph = Graph::default();
+        open(&mut graph);
+        let box_state = graph.quick_add.as_ref().expect("box is open");
+        assert!(box_state.query.is_empty());
+    }
+
+    /// Typing a name and pressing Enter adds that node in placement mode.
+    #[test]
+    fn enter_adds_the_top_result_in_placement_mode() {
+        let mut graph = Graph::default();
+        let before = graph.nodes.len();
+        open(&mut graph);
+        typed(&mut graph, "reverb");
+        key(&mut graph, KeyCode::Enter, Modifiers::default());
+        assert!(graph.quick_add.is_none());
+        assert_eq!(graph.nodes.len(), before + 1);
+        assert_eq!(graph.nodes[before].kind, NodeKind::Reverb);
+        assert!(matches!(
+            graph.interaction,
+            Interaction::Placing { node, .. } if node == before
+        ));
+    }
+
+    /// The arrow keys move the lit result, so Enter adds a different one.
+    #[test]
+    fn arrows_pick_another_result() {
+        let mut graph = Graph::default();
+        open(&mut graph);
+        typed(&mut graph, "fl");
+        let results = graph.quick_add_results();
+        assert!(results.len() >= 2);
+        key(&mut graph, KeyCode::Down, Modifiers::default());
+        key(&mut graph, KeyCode::Enter, Modifiers::default());
+        assert_eq!(graph.nodes.last().map(|n| n.kind), Some(results[1]));
+    }
+
+    /// Escape closes the box and adds nothing.
+    #[test]
+    fn escape_closes_without_adding() {
+        let mut graph = Graph::default();
+        let before = graph.nodes.len();
+        open(&mut graph);
+        typed(&mut graph, "lfo");
+        key(&mut graph, KeyCode::Escape, Modifiers::default());
+        assert!(graph.quick_add.is_none());
+        assert_eq!(graph.nodes.len(), before);
+    }
+
+    /// Clicking a result adds its node in placement mode.
+    #[test]
+    fn clicking_a_result_adds_it() {
+        let mut graph = Graph::default();
+        let before = graph.nodes.len();
+        open(&mut graph);
+        typed(&mut graph, "mix");
+        let open_box = graph.quick_add.clone().expect("open");
+        let rows = graph.quick_add_results().len();
+        let area = quick_add_bounds(bounds(), open_box.screen, rows);
+        let at = Point::new(area.x + 20.0, area.y + QUICK_ADD_FIELD_HEIGHT + 10.0);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds(),
+            Cursor::Available(at),
+        );
+        assert_eq!(graph.nodes.len(), before + 1);
+        assert!(matches!(graph.interaction, Interaction::Placing { .. }));
+    }
+
+    /// A click outside the box closes it and adds nothing.
+    #[test]
+    fn clicking_outside_closes_it() {
+        let mut graph = Graph::default();
+        let before = graph.nodes.len();
+        open(&mut graph);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds(),
+            Cursor::Available(Point::new(900.0, 150.0)),
+        );
+        assert!(graph.quick_add.is_none());
+        assert_eq!(graph.nodes.len(), before);
+    }
+
+    /// A kind the graph holds one of is not offered again.
+    #[test]
+    fn a_second_output_is_not_offered() {
+        let mut graph = Graph::default();
+        graph.add_node(NodeKind::Output, Point::new(0.0, 0.0));
+        open(&mut graph);
+        typed(&mut graph, "output");
+        assert!(!graph.quick_add_results().contains(&NodeKind::Output));
+    }
+}

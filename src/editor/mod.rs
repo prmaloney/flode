@@ -17,6 +17,7 @@ mod draw;
 mod factory;
 pub mod graph;
 pub mod knob;
+mod logo;
 mod menus;
 mod meter;
 mod pack;

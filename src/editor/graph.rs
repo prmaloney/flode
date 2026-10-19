@@ -251,6 +251,8 @@ pub struct Graph {
     /// The box for typing a knob's value, while one is open.
     pub(super) knob_entry: Option<KnobEntry>,
     pub(super) menu: Option<ContextMenu>,
+    /// The quick add box, while it is open.
+    pub(super) quick_add: Option<QuickAdd>,
     /// The node whose dropdown list is open.
     pub(super) dropdown_menu: Option<(usize, usize)>,
     /// The audio connection a dragged node would be inserted into, if dropped now.
@@ -413,6 +415,7 @@ impl Graph {
             preset_list: None,
             name_entry: None,
             knob_entry: None,
+            quick_add: None,
             alt: false,
             pending_save: None,
             status: None,
@@ -495,6 +498,31 @@ impl Graph {
         self.macro_set(node, id);
         self.macro_end(node, id);
         true
+    }
+
+    /// Opens the quick add box with its corner at the cursor, and closes the menus it would
+    /// overlap.
+    pub(super) fn open_quick_add(&mut self) {
+        self.menu = None;
+        self.category_menu = None;
+        self.preset_list = None;
+        self.dropdown_menu = None;
+        self.quick_add = Some(QuickAdd {
+            query: String::new(),
+            selected: 0,
+            screen: self.last_screen,
+            world: self.view.to_world(self.last_screen),
+            skip_char: true,
+        });
+    }
+
+    /// The kinds the quick add box lists for what is typed in it. Kinds the graph can't take
+    /// another of are left out.
+    pub(super) fn quick_add_results(&self) -> Vec<NodeKind> {
+        match &self.quick_add {
+            Some(open) => quick_add_results(&open.query, |kind| self.can_add(kind)),
+            None => Vec::new(),
+        }
     }
 
     /// Opens the save box. It starts with the current preset's name and category, so saving again

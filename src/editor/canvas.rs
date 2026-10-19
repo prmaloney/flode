@@ -58,6 +58,23 @@ impl<'a> NodeEditor<'a> {
             return (event::Status::Captured, Some(Message::GraphChanged));
         }
 
+        // The quick add box takes every press. A result adds its node, which then follows the
+        // cursor. A press in the box off the results does nothing, and one outside closes it.
+        if self.graph.quick_add.is_some() {
+            let results = self.graph.quick_add_results();
+            if let Some(open) = self.graph.quick_add.take() {
+                let area = quick_add_bounds(bounds, open.screen, results.len());
+                if let Some(row) = quick_add_row_at(area, screen, results.len()) {
+                    self.place(results[row], open.world);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                if area.contains(screen) {
+                    self.graph.quick_add = Some(open);
+                }
+            }
+            return (event::Status::Captured, Some(Message::Hovered));
+        }
+
         // An open dropdown list takes the press. Its row picks the value. Any other press closes
         // the list and goes through as usual.
         if let Some((index, which)) = self.graph.dropdown_menu.take() {
@@ -396,10 +413,20 @@ impl<'a> NodeEditor<'a> {
     /// Runs a shortcut on the selected node. Returns true if the graph changed. With nothing
     /// selected, or on a node the action does not apply to, nothing happens.
     pub(super) fn run_shortcut(&mut self, shortcut: Shortcut) -> bool {
+        // The quick add box needs no selection. It waits while a node is being placed, so one
+        // press sets down one node.
+        if shortcut == Shortcut::QuickAdd {
+            if matches!(self.graph.interaction, Interaction::Placing { .. }) {
+                return false;
+            }
+            self.graph.open_quick_add();
+            return true;
+        }
         let Some(index) = self.graph.selected else {
             return false;
         };
         match shortcut {
+            Shortcut::QuickAdd => false,
             Shortcut::ToggleBypass => self.graph.toggle_bypass(index),
             // The copy appears under the cursor. While a node is already being placed, the
             // shortcut waits, so one press sets down one node.
@@ -445,7 +472,73 @@ impl<'a> NodeEditor<'a> {
             }
         }
         // The save box takes every press, so a press on the keys does not play one.
-        self.graph.name_entry.is_some()
+        self.graph.name_entry.is_some() || self.graph.quick_add.is_some()
+    }
+
+    /// Handles a key event while the quick add box is open. The box takes every key, so the piano
+    /// and the shortcuts stay quiet. Typing narrows the results, the arrows move the lit one, and
+    /// Enter adds its node, which then follows the cursor. Escape closes the box.
+    pub(super) fn quick_add_event(
+        &mut self,
+        event: &keyboard::Event,
+    ) -> (event::Status, Option<Message>) {
+        let results = self.graph.quick_add_results();
+        match event {
+            keyboard::Event::CharacterReceived(c) => {
+                if let Some(open) = self.graph.quick_add.as_mut() {
+                    let opening_key = open.skip_char && matches!(c, 'a' | 'A');
+                    open.skip_char = false;
+                    if !opening_key && !c.is_control() && open.query.chars().count() < 24 {
+                        open.query.push(*c);
+                        open.selected = 0;
+                    }
+                }
+                (event::Status::Captured, Some(Message::Hovered))
+            }
+            keyboard::Event::KeyPressed { key_code, .. } => {
+                // A held Shift+A repeats its press, which is not typing.
+                if self.graph.shortcut_held == Some(*key_code) {
+                    return (event::Status::Captured, None);
+                }
+                let Some(open) = self.graph.quick_add.as_mut() else {
+                    return (event::Status::Ignored, None);
+                };
+                open.skip_char = false;
+                match key_code {
+                    keyboard::KeyCode::Backspace => {
+                        open.query.pop();
+                        open.selected = 0;
+                    }
+                    keyboard::KeyCode::Down if !results.is_empty() => {
+                        open.selected = (open.selected + 1) % results.len();
+                    }
+                    keyboard::KeyCode::Up if !results.is_empty() => {
+                        open.selected = (open.selected + results.len() - 1) % results.len();
+                    }
+                    keyboard::KeyCode::Escape => self.graph.quick_add = None,
+                    keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
+                        let world = open.world;
+                        let kind = results.get(open.selected).copied();
+                        self.graph.quick_add = None;
+                        if let Some(kind) = kind {
+                            self.place(kind, world);
+                            return (event::Status::Captured, Some(Message::GraphChanged));
+                        }
+                    }
+                    _ => {}
+                }
+                (event::Status::Captured, Some(Message::Hovered))
+            }
+            keyboard::Event::KeyReleased { key_code, .. } => {
+                if self.graph.shortcut_held == Some(*key_code) {
+                    self.graph.shortcut_held = None;
+                }
+                let note = self.graph.piano.handle(event.clone());
+                let note = note.filter(|_| self.graph.computer_keys);
+                (event::Status::Captured, note.map(Message::Note))
+            }
+            _ => (event::Status::Ignored, None),
+        }
     }
 
     /// Opens the submenu of the category under the cursor, and closes it when the cursor moves onto
@@ -618,6 +711,7 @@ impl<'a> NodeEditor<'a> {
         screen: Point,
     ) -> (event::Status, Option<Message>) {
         self.graph.menu = None;
+        self.graph.quick_add = None;
         self.graph.dropdown_menu = None;
         // Shift and right drag from a node wires it to the node the drag ends on.
         if self.graph.shift {
@@ -836,6 +930,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 if self.graph.name_entry.is_some() {
                     return self.name_entry_event(&key_event);
                 }
+                // So does the quick add box.
+                if self.graph.quick_add.is_some() {
+                    return self.quick_add_event(&key_event);
+                }
                 // Shortcuts come first, so one on a piano key (Shift+D) is not also a note.
                 if let Some(result) = self.shortcut_event(&key_event) {
                     return result;
@@ -925,7 +1023,16 @@ impl<'a> Program<Message> for NodeEditor<'a> {
             mouse::Event::ButtonReleased(mouse::Button::Left) => self.release(point),
             mouse::Event::ButtonReleased(mouse::Button::Right) => self.release_secondary(point),
             mouse::Event::CursorMoved { .. } => {
-                let submenu_changed = self.hover_preset_menu(bounds, screen);
+                let mut submenu_changed = self.hover_preset_menu(bounds, screen);
+                // The result under the cursor is the lit one.
+                let rows = self.graph.quick_add_results().len();
+                if let Some(open) = self.graph.quick_add.as_mut() {
+                    let area = quick_add_bounds(bounds, open.screen, rows);
+                    if let Some(row) = quick_add_row_at(area, screen, rows) {
+                        submenu_changed |= open.selected != row;
+                        open.selected = row;
+                    }
+                }
                 let hover = self.graph.hover_at(point);
                 let changed = hover != self.graph.hover || submenu_changed;
                 self.graph.hover = hover;

@@ -19,6 +19,8 @@ pub(super) enum Shortcut {
     ToggleBypass,
     /// Copies the node.
     Duplicate,
+    /// Opens the quick add box at the cursor. It needs no selected node.
+    QuickAdd,
 }
 
 /// One key and whether Shift must be held with it.
@@ -29,7 +31,12 @@ struct Binding {
 }
 
 /// Every shortcut.
-const BINDINGS: [Binding; 2] = [
+const BINDINGS: [Binding; 3] = [
+    Binding {
+        key: KeyCode::A,
+        shift: true,
+        shortcut: Shortcut::QuickAdd,
+    },
     Binding {
         key: KeyCode::M,
         shift: false,
@@ -74,6 +81,16 @@ mod tests {
             Some(Shortcut::Duplicate)
         );
         assert_eq!(lookup(KeyCode::D, Modifiers::default()), None);
+    }
+
+    /// Shift+A opens the quick add box, and a plain A is left to the piano.
+    #[test]
+    fn shift_a_opens_quick_add() {
+        assert_eq!(
+            lookup(KeyCode::A, Modifiers::SHIFT),
+            Some(Shortcut::QuickAdd)
+        );
+        assert_eq!(lookup(KeyCode::A, Modifiers::default()), None);
     }
 
     /// Shift must match each binding, so Shift+M is not the bypass.

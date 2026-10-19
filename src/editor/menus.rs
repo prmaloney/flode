@@ -434,3 +434,138 @@ pub(super) fn menu_item_at(menu: ContextMenu, point: Point) -> Option<MenuItem> 
     let row = ((point.y - bounds.y) / MENU_ITEM_HEIGHT) as usize;
     menu.items.get(row).copied()
 }
+
+/// The most results the quick add box lists.
+pub(super) const QUICK_ADD_ROWS: usize = 8;
+/// The quick add box is this wide, and its search field is this tall.
+pub(super) const QUICK_ADD_WIDTH: f32 = 240.0;
+pub(super) const QUICK_ADD_FIELD_HEIGHT: f32 = 36.0;
+
+/// The quick add box, opened with Shift+A. It holds what is typed and which result is lit.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct QuickAdd {
+    pub(super) query: String,
+    /// The lit result, as a position in the results.
+    pub(super) selected: usize,
+    /// Where the box opened, in screen coordinates. The box keeps inside the editor.
+    pub(super) screen: Point,
+    /// Where the node goes, in editor coordinates. It is where the cursor was when the box opened.
+    pub(super) world: Point,
+    /// True until the first key after opening. The A that opened the box also arrives as a typed
+    /// character, and this drops it.
+    pub(super) skip_char: bool,
+}
+
+/// How well `query` matches `title`, lower being better, or None for no match. The best match is
+/// a title that starts with the query, then one with a word that does, then one that contains it,
+/// and last one that has the query's letters in order.
+fn match_rank(query: &str, title: &str) -> Option<u8> {
+    let title = title.to_lowercase();
+    if title.starts_with(query) {
+        Some(0)
+    } else if title.split_whitespace().any(|word| word.starts_with(query)) {
+        Some(1)
+    } else if title.contains(query) {
+        Some(2)
+    } else {
+        let mut letters = title.chars();
+        query.chars().all(|c| letters.any(|t| t == c)).then_some(3)
+    }
+}
+
+/// The kinds that match `query`, best first, and in the menu's order among equals. An empty query
+/// lists every kind. `allowed` drops the kinds that can't be added, such as a second output.
+pub(super) fn quick_add_results(query: &str, allowed: impl Fn(NodeKind) -> bool) -> Vec<NodeKind> {
+    let query = query.trim().to_lowercase();
+    let mut found: Vec<(u8, NodeKind)> = NodeKind::ALL
+        .iter()
+        .copied()
+        .filter(|&kind| allowed(kind))
+        .filter_map(|kind| {
+            let rank = if query.is_empty() {
+                0
+            } else {
+                match_rank(&query, kind.title())?
+            };
+            Some((rank, kind))
+        })
+        .collect();
+    found.sort_by_key(|(rank, _)| *rank);
+    found
+        .into_iter()
+        .map(|(_, kind)| kind)
+        .take(QUICK_ADD_ROWS)
+        .collect()
+}
+
+/// Where the quick add box sits for `rows` results: its corner at the cursor, moved to keep the
+/// whole box inside the editor. An empty list still has a row, which says nothing matched.
+pub(super) fn quick_add_bounds(bounds: Rectangle, at: Point, rows: usize) -> Rectangle {
+    let height = QUICK_ADD_FIELD_HEIGHT + rows.max(1) as f32 * MENU_ITEM_HEIGHT;
+    Rectangle {
+        x: at.x.min(bounds.width - QUICK_ADD_WIDTH).max(0.0),
+        y: at.y.min(bounds.height - height).max(0.0),
+        width: QUICK_ADD_WIDTH,
+        height,
+    }
+}
+
+/// The result row under `point`, as a position in the results.
+pub(super) fn quick_add_row_at(area: Rectangle, point: Point, rows: usize) -> Option<usize> {
+    let top = area.y + QUICK_ADD_FIELD_HEIGHT;
+    if !area.contains(point) || point.y < top {
+        return None;
+    }
+    let row = ((point.y - top) / MENU_ITEM_HEIGHT) as usize;
+    (row < rows).then_some(row)
+}
+
+#[cfg(test)]
+mod quick_add_tests {
+    use super::*;
+
+    fn all(_: NodeKind) -> bool {
+        true
+    }
+
+    /// An empty query lists kinds, capped at the row limit.
+    #[test]
+    fn empty_query_lists_kinds() {
+        assert_eq!(quick_add_results("", all).len(), QUICK_ADD_ROWS);
+    }
+
+    /// A prefix beats a substring, and matching ignores case.
+    #[test]
+    fn prefix_ranks_first() {
+        let found = quick_add_results("FL", all);
+        assert_eq!(found[0], NodeKind::Flanger);
+        assert!(found.contains(&NodeKind::Filter));
+    }
+
+    /// Letters in order find a kind, and letters that are not there find nothing.
+    #[test]
+    fn letters_in_order_match() {
+        assert!(quick_add_results("dst", all).contains(&NodeKind::Distortion));
+        assert!(quick_add_results("zzz", all).is_empty());
+    }
+
+    /// A kind the graph can't take is left out.
+    #[test]
+    fn disallowed_kinds_are_dropped() {
+        let found = quick_add_results("out", |kind| kind != NodeKind::Output);
+        assert!(!found.contains(&NodeKind::Output));
+    }
+
+    /// The box keeps inside the editor.
+    #[test]
+    fn box_stays_in_bounds() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        };
+        let area = quick_add_bounds(bounds, Point::new(1000.0, 700.0), 8);
+        assert!(area.x + area.width <= 1024.0 && area.y + area.height <= 712.0);
+    }
+}

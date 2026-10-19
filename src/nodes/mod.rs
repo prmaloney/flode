@@ -185,8 +185,7 @@ impl Category {
 }
 
 impl NodeKind {
-    /// Every kind. The tests walk them.
-    #[cfg(test)]
+    /// Every kind. The quick add box searches them, and the tests walk them.
     pub const ALL: [NodeKind; 18] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,

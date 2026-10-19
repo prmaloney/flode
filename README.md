@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.svg" alt="The Flode icon, an F made of wired nodes" width="128"></p>
+
 # Flode
 
 A synth you build by wiring nodes together. Add oscillators, envelopes, filters, LFOs and effects
@@ -111,6 +113,9 @@ the sustain hold. A noise LFO has no dot.
 - Fold the sections of a tall node, or collapse the whole node down to its pins.
 - `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
   in the right-click menu.
+- `Shift+A` opens a search box at the cursor. Type part of a node's name, pick a result with the
+  arrow keys and Enter or a click, and the node follows the cursor until you click to place it.
+  Escape or a click outside closes the box.
 - Scroll to pan and pinch to zoom.
 - Click the strip at the bottom to play notes, in the plugin and in the standalone app. The strip
   also shows the notes the host sends. The computer keyboard plays notes in the standalone app
@@ -133,10 +138,13 @@ You need a recent stable Rust toolchain and a network connection for the first b
 nih-plug is fetched from git.
 
 ```sh
-cargo xtask bundle flode --release
+./build.sh --release
 ```
 
-The bundles are written to `target/bundled/`. Copy them where your host looks for them:
+The bundles are written to `target/bundled/`. The bundler has no icon option, so `build.sh` runs
+`assets/apply-icon.sh` after it to add `assets/icon.icns` to each bundle. To regenerate the icon
+from `assets/icon.svg`, run `sh assets/make-icns.sh`. Then copy the bundles where your host looks
+for them:
 
 ```sh
 cp -R target/bundled/flode.vst3 ~/Library/Audio/Plug-Ins/VST3/
@@ -144,7 +152,7 @@ cp -R target/bundled/flode.clap ~/Library/Audio/Plug-Ins/CLAP/
 ```
 
 Restart or rescan in your DAW. The standalone app comes from a debug bundle
-(`cargo xtask bundle flode`), and `./build.sh` rebuilds and relaunches it whenever a source file
+(`./build.sh`), and `./build_and_watch.sh` rebuilds and relaunches it whenever a source file
 changes.
 
 ## Using it

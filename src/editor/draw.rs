@@ -16,7 +16,7 @@ use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text
 use nih_plug_iced::{alignment, Color, Point, Rectangle};
 
 use super::depth::{self, draw_shadow, FLOAT_SHADOW, LIFTED_SHADOW, NODE_SHADOW};
-use super::{curve::*, graph::*, menus::*, style::*};
+use super::{curve::*, graph::*, logo, menus::*, style::*};
 
 /// Draws one frame of the editor: the wires, the nodes, then the pill, key strip, and open
 /// lists on top.
@@ -39,6 +39,13 @@ pub(super) fn draw_editor(
         view.rect_to_world(pill_bounds(bounds)),
         view.rect_to_world(piano::strip_bounds(bounds)),
     ];
+    // The logo sits over the canvas too, so node text under it is hidden as well. It goes right
+    // after the pill and strip, and `fixed` counts the overlays that are not open menus.
+    let logo = logo::logo_bounds(bounds);
+    let fixed = overlays.len() + usize::from(logo.is_some());
+    if let Some(rect) = logo {
+        overlays.push(view.rect_to_world(rect));
+    }
     if let Some((index, which)) = graph.dropdown_menu {
         let node = &graph.nodes[index];
         if let Some(dropdown) = node.dropdowns().into_iter().find(|d| d.which == which) {
@@ -66,6 +73,10 @@ pub(super) fn draw_editor(
     }
     if let Some(entry) = &graph.name_entry {
         overlays.push(view.rect_to_world(name_box_bounds(bounds, &entry.categories)));
+    }
+    if let Some(open) = &graph.quick_add {
+        let rows = graph.quick_add_results().len();
+        overlays.push(view.rect_to_world(quick_add_bounds(bounds, open.screen, rows)));
     }
     // The number box covers the label text of the node it sits on, which is in editor coordinates.
     if let Some(rect) = graph.knob_entry_bounds() {
@@ -181,13 +192,16 @@ pub(super) fn draw_editor(
         hovered_item.and_then(item_place),
         open_item,
     );
+    if let Some(rect) = logo {
+        logo::draw_logo(&mut frame, rect);
+    }
     draw_status(&mut frame, bounds, graph);
     super::meter::draw(&mut frame, bounds, output, graph.midi_light);
 
     let strip = piano::strip_bounds(bounds);
     // Text would show through a menu drawn over the strip, so the strip drops its labels then.
     let strip_world = overlays[1];
-    let labels = !overlays[2..]
+    let labels = !overlays[fixed..]
         .iter()
         .any(|overlay| overlaps(overlay, &strip_world));
     piano::draw_strip(
@@ -259,6 +273,9 @@ pub(super) fn draw_editor(
     draw_preset_list(&mut frame, bounds, graph);
     if let Some(entry) = &graph.name_entry {
         draw_name_entry(&mut frame, bounds, entry);
+    }
+    if graph.quick_add.is_some() {
+        draw_quick_add(&mut frame, bounds, graph);
     }
 
     vec![frame.into_geometry()]
@@ -1927,4 +1944,64 @@ pub(super) fn rounded_rect(bounds: Rectangle, r: f32) -> Path {
         builder.quadratic_curve_to(Point::new(x0, y0), Point::new(x0 + r, y0));
         builder.close();
     })
+}
+
+/// The quick add box: a search field with the typed text and a caret, and under it a row for each
+/// matching node. The lit row is the one Enter adds. With no match, one dim row says so.
+pub(super) fn draw_quick_add(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+    let Some(open) = &graph.quick_add else {
+        return;
+    };
+    let results = graph.quick_add_results();
+    let area = quick_add_bounds(bounds, open.screen, results.len());
+    draw_shadow(frame, area, MENU_CORNER_RADIUS, FLOAT_SHADOW);
+    frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
+
+    let field = Rectangle {
+        x: area.x + 6.0,
+        y: area.y + 6.0,
+        width: area.width - 12.0,
+        height: QUICK_ADD_FIELD_HEIGHT - 12.0,
+    };
+    frame.fill(&rounded_rect(field, DROPDOWN_CORNER_RADIUS), DROPDOWN_COLOR);
+    let (shown, shade) = if open.query.is_empty() {
+        ("Search nodes|".to_string(), DIM_TEXT_COLOR)
+    } else {
+        (format!("{}|", open.query), TEXT_COLOR)
+    };
+    let text = |frame: &mut Frame, content: String, y: f32, color: Color| {
+        frame.fill_text(Text {
+            content,
+            position: Point::new(area.x + 14.0, y),
+            color,
+            size: 13.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+    };
+    text(frame, shown, field.y + field.height / 2.0, shade);
+
+    let list = Rectangle {
+        y: area.y + QUICK_ADD_FIELD_HEIGHT,
+        height: area.height - QUICK_ADD_FIELD_HEIGHT,
+        ..area
+    };
+    if results.is_empty() {
+        text(
+            frame,
+            "No match".to_string(),
+            list.y + MENU_ITEM_HEIGHT / 2.0,
+            DIM_TEXT_COLOR,
+        );
+        return;
+    }
+    light_row(frame, list, open.selected.min(results.len() - 1));
+    for (row, kind) in results.iter().enumerate() {
+        text(
+            frame,
+            kind.title().to_string(),
+            list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
+            TEXT_COLOR,
+        );
+    }
 }
