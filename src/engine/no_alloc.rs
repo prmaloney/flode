@@ -3,6 +3,7 @@
 //! debug builds. This test plays a busy patch under it.
 
 use super::*;
+use crate::dsp::curve::Curve;
 use crate::dsp::effects::distortion::DistortionKind;
 use crate::dsp::effects::eq::EqKind;
 use crate::dsp::mix::MixMode;
@@ -244,7 +245,13 @@ fn busy_patch() -> Patch {
     watch(&mut patch.lanes[2], MonitorMode::Vectorscope, 2, 2);
     watch(&mut patch.lanes[3], MonitorMode::Spectrum, 8, 3);
     patch.envelopes[0] = Some(EnvelopeSettings::new());
-    patch.lfos[0] = Some(LfoSettings::new());
+    // A drawn curve in one shot mode, which the notes in the test restart.
+    patch.lfos[0] = Some(LfoSettings {
+        curve: Curve::from_points(&[[0.0, 0.1], [0.3, 0.9], [0.6, 0.4], [1.0, 0.7]]),
+        one_shot: true,
+        rate: Param::fixed(KnobId::LfoRate, 20.0),
+        ..LfoSettings::new()
+    });
     patch
 }
 

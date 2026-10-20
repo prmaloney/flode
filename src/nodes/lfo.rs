@@ -2,14 +2,29 @@
 //! signal, and it drives any knob a control wire reaches. It makes no sound.
 //!
 //! With Sync set to a note division, the LFO follows the host's playhead instead of its rate.
+//!
+//! The Custom wave is a curve the user draws as points in the viewer. One shot plays one cycle from
+//! each note and then holds the end value.
 
-use super::oscillator::WAVEFORM_LABELS;
 use super::viewer::{sample, Live, Trace};
 use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use crate::dsp::curve::Curve;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::Waveform;
 
 pub struct Lfo;
+
+/// The Wave dropdown's rows: the oscillator's waves, in the same order, then Custom.
+pub const LFO_WAVE_LABELS: [&str; 6] = ["Sine", "Saw", "Square", "Triangle", "Noise", "Custom"];
+/// The row of Custom, which follows the built-in waves.
+const CUSTOM_ROW: usize = Waveform::ALL.len();
+
+/// The shape an LFO node runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LfoShape {
+    Wave(Waveform),
+    Custom,
+}
 
 /// The note divisions Sync offers, with how many cycles of the LFO fit in one beat. Sync step `n`
 /// is `DIVISIONS[n - 1]`. Step zero is free running.
@@ -42,15 +57,16 @@ impl NodeBehavior for Lfo {
             Row::plain_knob(KnobId::LfoSync),
             Row::control(Control::Dropdown(0)),
             Row::control(Control::Switch(0)),
+            Row::control(Control::Switch(1)),
         ]
     }
 
     fn switch_labels(&self) -> &'static [&'static str] {
-        &["Retrigger"]
+        &["Retrigger", "One shot"]
     }
 
     fn dropdowns(&self, _node: &FlodeNode) -> Vec<&'static [&'static str]> {
-        vec![&WAVEFORM_LABELS]
+        vec![&LFO_WAVE_LABELS]
     }
 
     fn dropdown_names(&self) -> &'static [&'static str] {
@@ -60,19 +76,22 @@ impl NodeBehavior for Lfo {
     /// One cycle of the chosen wave. The box shows a fixed number of cycles, so the rate knob
     /// does not change it.
     fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
-        let wave = waveform(node);
-        let points = if wave == Waveform::Noise {
-            noise_points(samples)
-        } else {
-            sample(samples, |x| {
+        let shape = shape(node);
+        let points = match shape {
+            LfoShape::Wave(Waveform::Noise) => noise_points(samples),
+            LfoShape::Wave(wave) => sample(samples, |x| {
                 // The engine maps the wave from -1..1 to 0..1 the same way.
                 (wave.naive((x * CYCLES as f32).fract()) + 1.0) * 0.5
-            })
+            }),
+            LfoShape::Custom => {
+                let curve = curve(node);
+                sample(samples, |x| curve.eval(x))
+            }
         };
         // The dot rides the cycle shown, at the LFO's phase. Noise holds a random value per cycle,
         // so its fixed picture has no place for a dot.
-        let cursor = match (wave, live.lfo()) {
-            (Waveform::Noise, _) | (_, None) => None,
+        let cursor = match (shape, live.lfo()) {
+            (LfoShape::Wave(Waveform::Noise), _) | (_, None) => None,
             (_, Some((phase, level))) => Some((phase.clamp(0.0, 1.0) / CYCLES as f32, level)),
         };
         Some(Trace {
@@ -98,9 +117,37 @@ fn noise_points(samples: usize) -> Vec<f32> {
     })
 }
 
-/// The waveform an LFO node runs.
+/// The shape an LFO node runs.
+pub fn shape(node: &FlodeNode) -> LfoShape {
+    let row = node.choice(0);
+    if row >= CUSTOM_ROW {
+        LfoShape::Custom
+    } else {
+        LfoShape::Wave(Waveform::ALL[row])
+    }
+}
+
+/// The built-in waveform an LFO node runs. A Custom LFO has none, and reads as a sine.
 pub fn waveform(node: &FlodeNode) -> Waveform {
-    Waveform::ALL[node.choice(0).min(Waveform::ALL.len() - 1)]
+    match shape(node) {
+        LfoShape::Wave(wave) => wave,
+        LfoShape::Custom => Waveform::Sine,
+    }
+}
+
+/// True while the node's wave is Custom, which is when its viewer takes points.
+pub fn is_custom(node: &FlodeNode) -> bool {
+    shape(node) == LfoShape::Custom
+}
+
+/// The node's custom curve, or the default if it has none.
+pub fn curve(node: &FlodeNode) -> Curve {
+    Curve::from_points(&node.points).unwrap_or_default()
+}
+
+/// Stores `curve` as the node's custom wave.
+pub fn set_curve(node: &mut FlodeNode, curve: &Curve) {
+    node.points = curve.points().to_vec();
 }
 
 #[cfg(test)]
@@ -183,6 +230,36 @@ mod tests {
     #[test]
     fn noise_has_no_cursor() {
         assert_eq!(cursor_of(Waveform::Noise, 0.3), None);
+    }
+
+    /// The Custom trace is the node's curve, straight between its points.
+    #[test]
+    fn a_custom_trace_follows_the_curve() {
+        let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        node.choices = vec![CUSTOM_ROW];
+        node.points = vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.25]];
+        let trace = Lfo
+            .trace(&node, &Live::of(&node), TRACE_SAMPLES)
+            .expect("an LFO has a trace");
+        assert_eq!(trace.points.len(), TRACE_SAMPLES);
+        assert_eq!(trace.points[0], 0.0);
+        assert_eq!(trace.points[TRACE_SAMPLES - 1], 0.25);
+        let last = (TRACE_SAMPLES - 1) as f32;
+        let quarter = trace.points[(0.25 * last).round() as usize];
+        assert!((quarter - 0.5).abs() < 0.02, "{quarter}");
+    }
+
+    /// The dot on a custom curve sits at the LFO's phase and level, and a node with no points of
+    /// its own draws the default triangle.
+    #[test]
+    fn a_custom_cursor_rides_the_curve() {
+        let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        node.choices = vec![CUSTOM_ROW];
+        let live = Live::of(&node).with_lfo(0.25, 0.5);
+        let trace = Lfo.trace(&node, &live, TRACE_SAMPLES).unwrap();
+        assert_eq!(trace.cursor, Some((0.25, 0.5)));
+        let peak = trace.points[TRACE_SAMPLES / 2];
+        assert!(peak > 0.98, "{peak}");
     }
 
     #[test]

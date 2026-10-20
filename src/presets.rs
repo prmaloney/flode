@@ -11,9 +11,6 @@ use std::path::{Path, PathBuf};
 /// The file extension of a preset.
 pub const EXTENSION: &str = "flode";
 
-/// The longest a preset or category name can be, in characters.
-pub const MAX_NAME_LEN: usize = 40;
-
 /// A saved patch: the node graph, and the macro knobs, which are host parameters and so are not
 /// part of the graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,30 +58,41 @@ pub fn directory() -> Option<PathBuf> {
     }
 }
 
-/// True for a character a preset or category name may hold. Names are file names, so the
-/// characters that file systems reserve, and control characters, are out.
-pub fn valid_char(c: char) -> bool {
-    !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+/// True if `part` can be one folder or file name inside the preset folder, so a name or category
+/// cannot reach outside it.
+#[cfg(test)]
+fn is_plain_name(part: &str) -> bool {
+    !part.is_empty()
+        && !part.starts_with('.')
+        && !part.contains(['/', '\\'])
+        && !part.chars().any(char::is_control)
 }
 
-/// The name as it will be saved: trimmed, and not empty. Returns None for a name with nothing in
-/// it, or one with a character that is not allowed.
-pub fn clean_name(raw: &str) -> Option<String> {
-    let name = raw.trim();
-    let allowed = name.chars().all(valid_char) && name.chars().count() <= MAX_NAME_LEN;
-    // A leading dot would hide the file.
-    let hidden = name.starts_with('.');
-    (!name.is_empty() && allowed && !hidden).then(|| name.to_string())
-}
-
-/// The category as it will be saved. An empty one is allowed and means none. Anything else has to
-/// be a usable name, and None means it is not.
-pub fn clean_category(raw: &str) -> Option<String> {
-    if raw.trim().is_empty() {
-        Some(String::new())
-    } else {
-        clean_name(raw)
+/// The category a file at `path` has under the preset folder `dir`. A file in the folder itself
+/// has none, and a file in a folder one level below has that folder's name. A file anywhere else
+/// has none either, though it is still a file the user chose. Such a file is not in the library.
+pub fn category_of(dir: &Path, path: &Path) -> String {
+    let Ok(relative) = path.strip_prefix(dir) else {
+        return String::new();
+    };
+    let mut parts = relative.components();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(folder)), Some(_), None) => {
+            folder.to_str().unwrap_or_default().to_string()
+        }
+        _ => String::new(),
     }
+}
+
+/// The path with `.flode` on the end of the whole file name, unless it already ends that way. A
+/// dotted part of the name stays, so "My.Pad" becomes "My.Pad.flode".
+pub fn with_extension(path: &Path) -> PathBuf {
+    if path.extension().is_some_and(|ext| ext == EXTENSION) {
+        return path.to_path_buf();
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{EXTENSION}"));
+    path.with_file_name(name)
 }
 
 fn folder_of(dir: &Path, category: &str) -> PathBuf {
@@ -101,22 +109,34 @@ fn path_of(dir: &Path, category: &str, name: &str) -> PathBuf {
 
 /// Writes the preset to `dir`, in its category's folder, making folders that are not there. The
 /// file is written whole before it takes the name, so a failed write never leaves half a preset.
+/// The editor saves with `save_to`, so this is for the tests and the factory preset writer.
+#[cfg(test)]
 pub fn save_in(dir: &Path, preset: &Preset) -> io::Result<()> {
-    let usable = clean_name(&preset.name).as_deref() == Some(preset.name.as_str())
-        && clean_category(&preset.category).as_deref() == Some(preset.category.as_str());
+    let usable = is_plain_name(&preset.name)
+        && (preset.category.is_empty() || is_plain_name(&preset.category));
     if !usable {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "that is not a usable preset name or category",
         ));
     }
-    std::fs::create_dir_all(folder_of(dir, &preset.category))?;
+    save_to(&path_of(dir, &preset.category, &preset.name), preset)
+}
+
+/// Writes the preset to `path`, making the folder it is in if it is not there. The file is
+/// written whole next to the target and then renamed, so a failed write never leaves half a
+/// preset.
+pub fn save_to(path: &Path, preset: &Preset) -> io::Result<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
     let json = serde_json::to_vec_pretty(preset)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let target = path_of(dir, &preset.category, &preset.name);
-    let temporary = target.with_extension(format!("{EXTENSION}.tmp"));
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
     std::fs::write(&temporary, json)?;
-    std::fs::rename(&temporary, &target)
+    std::fs::rename(&temporary, path)
 }
 
 /// The names of the presets in one folder, sorted without regard to case.
@@ -293,29 +313,50 @@ mod tests {
     }
 
     #[test]
-    fn names_are_cleaned_and_unsafe_ones_refused() {
-        assert_eq!(clean_name("  Warm pad  "), Some("Warm pad".to_string()));
-        assert_eq!(clean_name("   "), None);
-        assert_eq!(clean_name(""), None);
-        assert_eq!(clean_name("a/b"), None);
-        assert_eq!(clean_name("..\\x"), None);
-        assert_eq!(clean_name(".hidden"), None);
-        assert_eq!(
-            clean_name(&"x".repeat(MAX_NAME_LEN)).map(|n| n.len()),
-            Some(MAX_NAME_LEN)
-        );
-        assert_eq!(clean_name(&"x".repeat(MAX_NAME_LEN + 1)), None);
-        assert!(valid_char('é') && valid_char(' ') && !valid_char(':'));
-
-        // A category may be empty, which means none. Otherwise it follows the same rules.
-        assert_eq!(clean_category("  "), Some(String::new()));
-        assert_eq!(clean_category(" Bass "), Some("Bass".to_string()));
-        assert_eq!(clean_category("../up"), None);
-
+    fn names_that_reach_outside_the_folder_are_refused() {
         let dir = TempDir::new("refuse");
         assert!(save_in(&dir.0, &preset("", "a/b")).is_err());
-        assert!(save_in(&dir.0, &preset("", " padded ")).is_err());
+        assert!(save_in(&dir.0, &preset("", "..\\x")).is_err());
+        assert!(save_in(&dir.0, &preset("", "")).is_err());
+        assert!(save_in(&dir.0, &preset("", ".hidden")).is_err());
         assert!(save_in(&dir.0, &preset("../out", "x")).is_err());
-        assert!(save_in(&dir.0, &preset(" Bass", "x")).is_err());
+        assert!(save_in(&dir.0, &preset("", "fine")).is_ok());
+    }
+
+    /// A file directly in the folder has no category, one level down has that folder's name, and
+    /// anywhere else has none.
+    #[test]
+    fn the_category_comes_from_where_the_file_is() {
+        let dir = Path::new("/presets");
+        assert_eq!(category_of(dir, Path::new("/presets/Pad.flode")), "");
+        assert_eq!(
+            category_of(dir, Path::new("/presets/Bass/Pad.flode")),
+            "Bass"
+        );
+        assert_eq!(
+            category_of(dir, Path::new("/presets/Bass/Deep/Pad.flode")),
+            ""
+        );
+        assert_eq!(category_of(dir, Path::new("/elsewhere/Pad.flode")), "");
+        assert_eq!(category_of(dir, Path::new("/elsewhere/Bass/Pad.flode")), "");
+        assert_eq!(category_of(dir, Path::new("/presetsX/Bass/Pad.flode")), "");
+    }
+
+    #[test]
+    fn the_extension_is_added_to_the_whole_file_name() {
+        let flode = |path: &str| with_extension(Path::new(path));
+        assert_eq!(flode("/a/Pad.flode"), Path::new("/a/Pad.flode"));
+        assert_eq!(flode("/a/Pad"), Path::new("/a/Pad.flode"));
+        assert_eq!(flode("/a/My.Pad"), Path::new("/a/My.Pad.flode"));
+        assert_eq!(flode("/a/Pad.txt"), Path::new("/a/Pad.txt.flode"));
+    }
+
+    #[test]
+    fn save_to_writes_a_file_anywhere_and_leaves_no_temporary() {
+        let dir = TempDir::new("save-to");
+        let path = dir.0.join("deep").join("Pad.flode");
+        save_to(&path, &preset("", "Pad")).unwrap();
+        assert!(path.is_file());
+        assert_eq!(std::fs::read_dir(dir.0.join("deep")).unwrap().count(), 1);
     }
 }

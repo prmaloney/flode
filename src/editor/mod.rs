@@ -215,6 +215,7 @@ impl IcedEditor for FlodeEditor {
                 }
             }
         }
+        self.graph.poll_save_dialog();
         self.save_pending_preset();
         self.send_macro_edits();
         Command::none()

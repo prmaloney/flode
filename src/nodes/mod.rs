@@ -529,6 +529,9 @@ pub struct FlodeNode {
     pub choices: Vec<usize>,
     /// The switches, for kinds that have them. Each one is off until it is clicked.
     pub switches: Vec<bool>,
+    /// An LFO's custom wave, as points `[x, y]`. Empty means the default curve. Only an LFO reads
+    /// it, but every node keeps it, so it survives a copy or a change of the dropdown.
+    pub points: Vec<[f32; 2]>,
     /// Output nodes only. The slot pins shown: the connected ones and one empty pin below them.
     pub slots: usize,
     /// Output nodes only. The number of slots with a chain wired in.
@@ -553,6 +556,7 @@ impl FlodeNode {
             values: std::array::from_fn(|i| KnobId::ALL[i].default_normalized()),
             choices: Vec::new(),
             switches: Vec::new(),
+            points: Vec::new(),
             slots: 1,
             used: 0,
             knob_states: std::array::from_fn(|_| Default::default()),
@@ -571,7 +575,7 @@ impl FlodeNode {
     }
 
     /// A copy of the node at `position`, with the same knob values, dropdown choices, switches,
-    /// and on/off state. It has no wires, since those belong to the graph.
+    /// custom wave points, and on/off state. It has no wires, since those belong to the graph.
     pub fn duplicate(&self, position: Point) -> FlodeNode {
         let mut copy = FlodeNode::new(self.kind, position);
         copy.collapsed = self.collapsed;
@@ -580,6 +584,7 @@ impl FlodeNode {
         copy.values = self.values;
         copy.choices = self.choices.clone();
         copy.switches = self.switches.clone();
+        copy.points = self.points.clone();
         copy
     }
 

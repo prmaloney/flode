@@ -11,37 +11,102 @@ pub struct Envelope;
 /// The share of the box width the sustain hold takes. It is fixed, since a held note has no length.
 const HOLD_SHARE: f32 = 0.2;
 
-/// The least share of the box width a timed stage gets, so a 1 ms attack is still a visible slope.
-const MIN_SHARE: f32 = 0.08;
+/// The least share of the box width a timed stage gets, at the bottom of its knob. It is a sliver,
+/// so the shortest attack or release draws as a nearly vertical line, and not zero, so the stages
+/// and their handles stay in order.
+const MIN_SHARE: f32 = 0.01;
 
-/// Where each stage ends across the box, from 0.0 to 1.0, for stage times in seconds.
+/// The most share of the box width a timed stage gets, at the top of its knob. Three stages at
+/// this width and the hold fill the box, so the curve never passes the right edge.
+const SHARE_MAX: f32 = (1.0 - HOLD_SHARE) / 3.0;
+
+/// The width a stage takes across the box, from 0.0 to 1.0, for its knob's normalized value.
+fn stage_width(normalized: f32) -> f32 {
+    MIN_SHARE + (SHARE_MAX - MIN_SHARE) * normalized.clamp(0.0, 1.0)
+}
+
+/// Where each stage ends across the box, from 0.0 to 1.0, for the normalized values of the Attack,
+/// Decay, and Release knobs.
 ///
-/// The sustain hold takes `HOLD_SHARE`. The three timed stages split the rest. Each gets
-/// `MIN_SHARE`, and what is left after those minimums goes to the stages in proportion to their
-/// times. The result is the ends of attack, decay, and the hold. Release runs from the last one to
-/// the right edge.
-fn stage_ends(attack: f32, decay: f32, release: f32) -> [f32; 3] {
-    let timed = 1.0 - HOLD_SHARE;
-    let spare = timed - 3.0 * MIN_SHARE;
-    let total = (attack + decay + release).max(f32::EPSILON);
-    let share = |t: f32| MIN_SHARE + spare * t / total;
-    let attack_end = share(attack);
-    let decay_end = attack_end + share(decay);
-    [attack_end, decay_end, decay_end + HOLD_SHARE]
+/// Each timed stage has a width that depends on its own knob and no other, so the time axis is
+/// fixed and moving one knob moves only the stages after it. The sustain hold takes `HOLD_SHARE`.
+/// The result is the ends of attack, decay, the hold, and release. The curve is flat at zero from
+/// the release end to the right edge.
+fn stage_ends(attack: f32, decay: f32, release: f32) -> [f32; 4] {
+    let attack_end = stage_width(attack);
+    let decay_end = attack_end + stage_width(decay);
+    let hold_end = decay_end + HOLD_SHARE;
+    [
+        attack_end,
+        decay_end,
+        hold_end,
+        hold_end + stage_width(release),
+    ]
+}
+
+/// The stage ends for the knobs as they are now, wires included.
+pub fn ends_of(live: &Live) -> [f32; 4] {
+    stage_ends(
+        live.value(KnobId::Attack),
+        live.value(KnobId::Decay),
+        live.value(KnobId::Release),
+    )
+}
+
+/// The knob value for a stage that is `width` wide, the inverse of `stage_width`. A width past
+/// either limit gives the nearest end of the knob.
+fn value_for_width(width: f32) -> f32 {
+    ((width - MIN_SHARE) / (SHARE_MAX - MIN_SHARE)).clamp(0.0, 1.0)
+}
+
+/// The normalized Attack that ends the attack at `x` across the box.
+pub fn attack_at(x: f32) -> f32 {
+    value_for_width(x)
+}
+
+/// The normalized Decay that ends the decay at `x`, when the attack ends at `attack_end`.
+pub fn decay_at(x: f32, attack_end: f32) -> f32 {
+    value_for_width(x - attack_end)
+}
+
+/// The normalized Release that ends the release at `x`, when the hold ends at `hold_end`.
+pub fn release_at(x: f32, hold_end: f32) -> f32 {
+    value_for_width(x - hold_end)
+}
+
+/// The knobs behind each handle. The decay handle sets two, and the others set one.
+pub const HANDLE_KNOBS: [&[KnobId]; 3] = [
+    &[KnobId::Attack],
+    &[KnobId::Decay, KnobId::Sustain],
+    &[KnobId::Release],
+];
+
+/// Where the three handles of the curve sit in the unit box, as (x across, y up from the bottom).
+/// They are the peak at the end of the attack, the sustain level at the end of the decay, and the
+/// end of the release. They read `live`, so a knob that a wire drives moves its handle.
+pub fn handles(live: &Live) -> [(f32, f32); 3] {
+    let [attack_end, decay_end, _, release_end] = ends_of(live);
+    [
+        (attack_end, 1.0),
+        (decay_end, live.value(KnobId::Sustain).clamp(0.0, 1.0)),
+        (release_end, 0.0),
+    ]
 }
 
 /// The level at position `x` across the box. The curves match `dsp::envelope`: a linear climb to
-/// full, a linear fall to the sustain level, a hold, then a linear fall to zero.
-fn level_at(x: f32, ends: [f32; 3], sustain: f32) -> f32 {
-    let [attack_end, decay_end, hold_end] = ends;
+/// full, a linear fall to the sustain level, a hold, a linear fall to zero, then silence.
+fn level_at(x: f32, ends: [f32; 4], sustain: f32) -> f32 {
+    let [attack_end, decay_end, hold_end, release_end] = ends;
     if x < attack_end {
         x / attack_end
     } else if x < decay_end {
         1.0 - (1.0 - sustain) * (x - attack_end) / (decay_end - attack_end)
     } else if x < hold_end {
         sustain
+    } else if x < release_end {
+        sustain * (1.0 - (x - hold_end) / (release_end - hold_end))
     } else {
-        sustain * (1.0 - (x - hold_end) / (1.0 - hold_end))
+        0.0
     }
 }
 
@@ -54,8 +119,8 @@ fn level_at(x: f32, ends: [f32; 3], sustain: f32) -> f32 {
 /// The drawn release starts from the sustain level. A note let go earlier releases from a higher
 /// level, so while its level is above the sustain the dot waits at the start of the release,
 /// then follows the drawn line down. That keeps the dot on the curve.
-fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 3], sustain: f32) -> (f32, f32) {
-    let [attack_end, decay_end, hold_end] = ends;
+fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 4], sustain: f32) -> (f32, f32) {
+    let [attack_end, decay_end, hold_end, release_end] = ends;
     let level = level.clamp(0.0, 1.0);
     let x = match phase {
         EnvPhase::Attack => level * attack_end,
@@ -74,7 +139,7 @@ fn cursor_at(phase: EnvPhase, level: f32, ends: [f32; 3], sustain: f32) -> (f32,
             } else {
                 1.0
             };
-            hold_end + fallen.clamp(0.0, 1.0) * (1.0 - hold_end)
+            hold_end + fallen.clamp(0.0, 1.0) * (release_end - hold_end)
         }
     };
     let y = match phase {
@@ -101,14 +166,10 @@ impl NodeBehavior for Envelope {
 
     fn trace(&self, _node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
         let sustain = live.value(KnobId::Sustain).clamp(0.0, 1.0);
-        let ends = stage_ends(
-            live.plain(KnobId::Attack),
-            live.plain(KnobId::Decay),
-            live.plain(KnobId::Release),
-        );
+        let ends = ends_of(live);
         Some(Trace {
             points: sample(samples, |x| level_at(x, ends, sustain)),
-            markers: ends.to_vec(),
+            markers: ends[..3].to_vec(),
             fill: true,
             cursor: live
                 .envelope()
@@ -186,11 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn a_very_short_attack_still_gets_a_slope() {
+    fn a_very_short_attack_is_nearly_vertical() {
         let mut node = node();
         node.set_value(KnobId::Attack, 0.0);
         let trace = trace_of(&node);
         assert!(trace.markers[0] >= MIN_SHARE - 1e-6);
+        assert!(trace.markers[0] < 0.03, "{}", trace.markers[0]);
     }
 
     #[test]
@@ -282,6 +344,94 @@ mod tests {
         .map(|(phase, level)| cursor_in(phase, level).0)
         .to_vec();
         assert!(xs.windows(2).all(|w| w[0] < w[1]), "{xs:?}");
+    }
+
+    /// A knob's value at the bottom, middle, and top gives the narrowest, a middle, and the widest
+    /// stage, and the curve ends inside the box even with every knob at the top.
+    #[test]
+    fn the_curve_stays_inside_the_box() {
+        let [attack_end, .., release_end] = stage_ends(0.0, 0.0, 0.0);
+        assert!((attack_end - MIN_SHARE).abs() < 1e-6);
+        assert!(release_end < 1.0);
+        let full = stage_ends(1.0, 1.0, 1.0);
+        assert!((full[3] - 1.0).abs() < 1e-5);
+        assert!(full[3] <= 1.0 + 1e-6);
+    }
+
+    /// Each stage's width follows its own knob, so moving one knob leaves the other widths alone.
+    #[test]
+    fn a_stage_width_ignores_the_other_knobs() {
+        let width = |ends: [f32; 4]| {
+            [
+                ends[0],
+                ends[1] - ends[0],
+                ends[2] - ends[1],
+                ends[3] - ends[2],
+            ]
+        };
+        let base = width(stage_ends(0.3, 0.5, 0.7));
+        let attack = width(stage_ends(0.9, 0.5, 0.7));
+        assert!(attack[0] > base[0]);
+        let same = |a: [f32; 4], b: [f32; 4], skip: usize| {
+            (0..4).all(|i| i == skip || (a[i] - b[i]).abs() < 1e-5)
+        };
+        assert!(same(attack, base, 0));
+        let decay = width(stage_ends(0.3, 0.1, 0.7));
+        assert!(decay[1] < base[1]);
+        assert!(same(decay, base, 1));
+        let release = width(stage_ends(0.3, 0.5, 0.0));
+        assert!(release[3] < base[3]);
+        assert!(same(release, base, 3));
+    }
+
+    #[test]
+    fn the_inverse_maps_undo_the_stage_ends() {
+        for n in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let [attack_end, ..] = stage_ends(n, 0.4, 0.6);
+            assert!((attack_at(attack_end) - n).abs() < 1e-5);
+            let [attack_end, decay_end, ..] = stage_ends(0.25, n, 0.6);
+            assert!((decay_at(decay_end, attack_end) - n).abs() < 1e-5);
+            let [_, _, hold_end, release_end] = stage_ends(0.25, 0.4, n);
+            assert!((release_at(release_end, hold_end) - n).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn the_inverse_maps_clamp_at_both_ends() {
+        assert_eq!(attack_at(-1.0), 0.0);
+        assert_eq!(attack_at(0.0), 0.0);
+        assert_eq!(attack_at(5.0), 1.0);
+        assert_eq!(decay_at(0.1, 0.3), 0.0);
+        assert_eq!(decay_at(9.0, 0.3), 1.0);
+        assert_eq!(release_at(0.2, 0.6), 0.0);
+        assert_eq!(release_at(9.0, 0.6), 1.0);
+    }
+
+    /// The curve is flat at zero from the release end to the right edge.
+    #[test]
+    fn the_curve_is_silent_after_the_release() {
+        let mut node = node();
+        node.set_value(KnobId::Release, 0.0);
+        let trace = trace_of(&node);
+        let release_end = handles(&Live::of(&node))[2].0;
+        assert!(release_end < 0.95);
+        let last = (TRACE_SAMPLES - 1) as f32;
+        let from = (release_end * last).ceil() as usize;
+        assert!(trace.points[from..].iter().all(|p| *p == 0.0));
+    }
+
+    #[test]
+    fn the_handles_sit_on_the_curve() {
+        let node = shaped();
+        let live = Live::of(&node);
+        let [attack, decay, release] = handles(&live);
+        let [attack_end, decay_end, _, release_end] = ends_of(&live);
+        assert_eq!(attack, (attack_end, 1.0));
+        assert_eq!(decay, (decay_end, 0.5));
+        assert_eq!(release, (release_end, 0.0));
+        let ends = ends_of(&live);
+        assert!((level_at(attack.0 - 1e-4, ends, 0.5) - 1.0).abs() < 0.01);
+        assert!((level_at(decay.0 + 1e-4, ends, 0.5) - 0.5).abs() < 0.01);
     }
 
     #[test]

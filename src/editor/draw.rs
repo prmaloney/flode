@@ -71,9 +71,6 @@ pub(super) fn draw_editor(
             overlays.push(view.rect_to_world(submenu_bounds(bounds, &menu.library, open)));
         }
     }
-    if let Some(entry) = &graph.name_entry {
-        overlays.push(view.rect_to_world(name_box_bounds(bounds, &entry.categories)));
-    }
     if let Some(open) = &graph.quick_add {
         let rows = graph.quick_add_results().len();
         overlays.push(view.rect_to_world(quick_add_bounds(bounds, open.screen, rows)));
@@ -283,9 +280,6 @@ pub(super) fn draw_editor(
         draw_category_list(&mut frame, bounds, category, graph);
     }
     draw_preset_list(&mut frame, bounds, graph);
-    if let Some(entry) = &graph.name_entry {
-        draw_name_entry(&mut frame, bounds, entry);
-    }
     if graph.quick_add.is_some() {
         draw_quick_add(&mut frame, bounds, graph);
     }
@@ -894,7 +888,8 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
     live
 }
 
-/// A node's viewer: a box with the shape the node's kind traces in it. Nothing in it is clickable.
+/// A node's viewer: a box with the shape the node's kind traces in it. Only the handles of an
+/// envelope and of a custom LFO curve are clickable.
 pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels: ControlLevels) {
     let node = &graph.nodes[index];
     let Some(bounds) = node.viewer_bounds() else {
@@ -920,7 +915,8 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
             .with_width(1.0),
     );
 
-    let Some(trace) = node.trace(&live_knobs(graph, index, &levels)) else {
+    let live = live_knobs(graph, index, &levels);
+    let Some(trace) = node.trace(&live) else {
         return;
     };
     let at = |i: usize, y: f32| {
@@ -986,6 +982,32 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
             .with_width(1.5)
             .with_line_cap(LineCap::Round),
     );
+
+    // An envelope's curve has a handle at the end of each stage, drawn like the EQ's points.
+    if let Some(handles) = envelope_handles(node, &live) {
+        for (handle, center) in handles.iter().enumerate() {
+            let held = graph.interaction
+                == Interaction::EnvelopeHandle {
+                    node: index,
+                    handle,
+                };
+            frame.fill(
+                &Path::circle(*center, if held { 5.5 } else { 4.5 }),
+                TEXT_COLOR,
+            );
+        }
+    }
+
+    // An LFO on Custom has a handle at each point of its curve, in the same style.
+    if let Some(handles) = lfo_handles(node) {
+        for (point, center) in handles.iter().enumerate() {
+            let held = graph.interaction == Interaction::LfoPoint { node: index, point };
+            frame.fill(
+                &Path::circle(*center, if held { 5.5 } else { 4.5 }),
+                TEXT_COLOR,
+            );
+        }
+    }
 
     // The live signal, as the dot the map's curve also uses.
     if let Some((x, y)) = trace.cursor {
@@ -1731,116 +1753,6 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
             ..Text::default()
         });
     }
-}
-
-/// The box where a preset is named and sorted: a title, a field for the name and one for the
-/// category, a chip for each existing category, and the keys that work in it. The field being
-/// typed in is lighter and has the caret. A category that does not exist yet is tagged "new", so
-/// a typo shows before it makes a folder.
-pub(super) fn draw_name_entry(frame: &mut Frame, bounds: Rectangle, entry: &NameEntry) {
-    let area = name_box_bounds(bounds, &entry.categories);
-    let layout = name_box_layout(&entry.categories);
-    draw_shadow(frame, area, MENU_CORNER_RADIUS, FLOAT_SHADOW);
-    frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
-    let label = |frame: &mut Frame, content: &str, x: f32, y: f32, size: f32, color: Color| {
-        frame.fill_text(Text {
-            content: content.to_string(),
-            position: Point::new(area.x + x, area.y + y),
-            color,
-            size,
-            vertical_alignment: alignment::Vertical::Center,
-            ..Text::default()
-        });
-    };
-    label(frame, "Save preset", 14.0, 16.0, 12.0, DIM_TEXT_COLOR);
-
-    let fields = [
-        ("Name", &entry.name, EntryField::Name, "", 28.0),
-        (
-            "Category",
-            &entry.category,
-            EntryField::Category,
-            "optional, such as Bass or Pad",
-            64.0,
-        ),
-    ];
-    for (title, text, field, placeholder, top) in fields {
-        let active = entry.field == field;
-        let rect = Rectangle {
-            x: area.x + 12.0,
-            y: area.y + top,
-            width: area.width - 24.0,
-            height: 30.0,
-        };
-        let color = if active {
-            DROPDOWN_HOVER_COLOR
-        } else {
-            DROPDOWN_COLOR
-        };
-        frame.fill(&rounded_rect(rect, DROPDOWN_CORNER_RADIUS), color);
-        label(frame, title, 22.0, top + 15.0, 11.0, DIM_TEXT_COLOR);
-        // The caret is a bar after the text. A field with nothing in it shows its hint.
-        let (shown, shade) = match (text.is_empty(), active) {
-            (true, false) => (placeholder.to_string(), DIM_TEXT_COLOR),
-            (true, true) => ("|".to_string(), TEXT_COLOR),
-            (false, true) => (format!("{text}|"), TEXT_COLOR),
-            (false, false) => (text.clone(), TEXT_COLOR),
-        };
-        label(frame, &shown, 86.0, top + 15.0, 13.0, shade);
-        if field == EntryField::Category && entry.is_new_category() {
-            let tag = Rectangle {
-                x: rect.x + rect.width - 46.0,
-                y: rect.y + 6.0,
-                width: 38.0,
-                height: 18.0,
-            };
-            frame.fill(&rounded_rect(tag, DROPDOWN_CORNER_RADIUS), NEW_TAG_COLOR);
-            label(
-                frame,
-                "new",
-                tag.x - area.x + 8.0,
-                top + 15.0,
-                11.0,
-                TEXT_COLOR,
-            );
-        }
-    }
-
-    if let Some(y) = layout.chips_label_y {
-        label(frame, "Existing categories", 14.0, y, 11.0, DIM_TEXT_COLOR);
-    }
-    let picked = entry.existing_category();
-    for (index, chip) in &layout.chips {
-        let rect = Rectangle {
-            x: area.x + chip.x,
-            y: area.y + chip.y,
-            ..*chip
-        };
-        let name = &entry.categories[*index];
-        let is_picked = picked == Some(name);
-        let color = if is_picked {
-            CHECKBOX_CHECKED_COLOR
-        } else {
-            DROPDOWN_COLOR
-        };
-        frame.fill(&rounded_rect(rect, CHIP_HEIGHT / 2.0), color);
-        label(
-            frame,
-            name,
-            chip.x + 10.0,
-            chip.y + CHIP_HEIGHT / 2.0,
-            12.0,
-            TEXT_COLOR,
-        );
-    }
-    label(
-        frame,
-        "Tab field, Up/Down category, Enter save, Esc cancel",
-        14.0,
-        layout.hint_y,
-        11.0,
-        DIM_TEXT_COLOR,
-    );
 }
 
 /// The line under the pill that says what a save or load did, for a few seconds.

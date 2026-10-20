@@ -355,6 +355,8 @@ impl<'a> Wiring<'a> {
                 rate: self.param(index, KnobId::LfoRate),
                 sync: self.param(index, KnobId::LfoSync),
                 retrigger: node.switch(0),
+                one_shot: node.switch(1),
+                curve: lfo::is_custom(node).then(|| lfo::curve(node)),
             });
         }
         out

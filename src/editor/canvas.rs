@@ -1,9 +1,10 @@
 //! The editor widget. It borrows the graph for a frame, turns mouse and keyboard events into
 //! changes to the graph, and draws it.
 
+use crate::dsp::curve::MAX_CURVE_POINTS;
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
-use crate::nodes::eq;
+use crate::nodes::{envelope, eq};
 use crate::nodes::{NodeKind, Port, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{
@@ -132,18 +133,6 @@ impl<'a> NodeEditor<'a> {
         }
         self.graph.knob_entry = None;
 
-        // The save box takes every press. A chip picks its category, and one outside the box
-        // cancels it.
-        if let Some(entry) = self.graph.name_entry.as_mut() {
-            if let Some(index) = category_chip_at(bounds, &entry.categories, screen) {
-                entry.category = entry.categories[index].clone();
-                entry.field = EntryField::Category;
-            } else if !name_box_bounds(bounds, &entry.categories).contains(screen) {
-                self.graph.name_entry = None;
-            }
-            return (event::Status::Captured, Some(Message::GraphChanged));
-        }
-
         // An open preset list takes the press. Its row saves, loads, or opens a category's
         // submenu. Any other press closes it.
         let had_presets = self.graph.preset_list.is_some();
@@ -151,7 +140,7 @@ impl<'a> NodeEditor<'a> {
             let library = &menu.library;
             match preset_row_at(bounds, &menu, screen) {
                 Some(PresetRow::SaveAs) => {
-                    self.graph.start_name_entry();
+                    self.graph.start_save_dialog();
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 // Init drops what is on the canvas for the starting graph, saved or not.
@@ -244,6 +233,11 @@ impl<'a> NodeEditor<'a> {
 
         // Walk nodes from the last drawn (top) to the first.
         for index in self.graph.draw_order().into_iter().rev() {
+            if !self.graph.shift {
+                if let Some(result) = self.press_lfo_viewer(index, point, screen) {
+                    return result;
+                }
+            }
             let node = &self.graph.nodes[index];
             // Shift+click adds the node to the selection, or drops it from it.
             if self.graph.shift && node.bounds().contains(point) {
@@ -275,6 +269,25 @@ impl<'a> NodeEditor<'a> {
                     // A double click puts the band back where a new node has it.
                     for id in [eq::FREQ[band], eq::GAIN[band], eq::Q[band]] {
                         node.reset_value(id);
+                    }
+                    self.graph.interaction = Interaction::Idle;
+                }
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            if let Some(handle) = envelope_handle_at(&self.graph.nodes[index], &live, point) {
+                self.graph.select(index);
+                self.graph.interaction = Interaction::EnvelopeHandle {
+                    node: index,
+                    handle,
+                };
+                let node = &mut self.graph.nodes[index];
+                let knobs = envelope::HANDLE_KNOBS[handle];
+                let current = node.value(knobs[0]);
+                let state = &mut node.knob_states[knobs[0] as usize];
+                if let Press::Reset = knob::press(state, current, screen) {
+                    // A double click puts the handle's knobs back where a new node has them.
+                    for id in knobs {
+                        node.reset_value(*id);
                     }
                     self.graph.interaction = Interaction::Idle;
                 }
@@ -380,6 +393,50 @@ impl<'a> NodeEditor<'a> {
         (event::Status::Captured, Some(Message::GraphChanged))
     }
 
+    /// A press on the viewer of an LFO on Custom. A press on a point starts dragging it, and a
+    /// double click on one removes it. A double click on empty space adds a point there. Either
+    /// double click leaves no drag running. None if the press is not for the curve, or is the
+    /// first press on empty space, which does what a press on the node's body does.
+    fn press_lfo_viewer(
+        &mut self,
+        index: usize,
+        point: Point,
+        screen: Point,
+    ) -> Option<(event::Status, Option<Message>)> {
+        let node = &self.graph.nodes[index];
+        lfo_handles(node)?;
+        let hit = lfo_handle_at(node, point);
+        if hit.is_none() && !node.viewer_bounds()?.contains(point) {
+            return None;
+        }
+        let double = knob::double_click(&mut self.graph.viewer_click, screen);
+        match (hit, double) {
+            (Some(handle), false) => {
+                self.graph.select(index);
+                self.graph.interaction = Interaction::LfoPoint {
+                    node: index,
+                    point: handle,
+                };
+            }
+            (Some(handle), true) => {
+                self.graph.select(index);
+                remove_lfo_point(&mut self.graph.nodes[index], handle);
+                self.graph.interaction = Interaction::Idle;
+            }
+            (None, true) => {
+                self.graph.select(index);
+                if add_lfo_point(&mut self.graph.nodes[index], point) == LfoAdd::Full {
+                    self.graph.say(format!(
+                        "A custom wave holds up to {MAX_CURVE_POINTS} points"
+                    ));
+                }
+                self.graph.interaction = Interaction::Idle;
+            }
+            (None, false) => return None,
+        }
+        Some((event::Status::Captured, Some(Message::GraphChanged)))
+    }
+
     /// Handles a key event for the shortcuts, or returns None if no shortcut uses its key. A
     /// shortcut runs once per press. Its key repeats and its release are captured and do
     /// nothing, so the system does not beep at them.
@@ -479,8 +536,7 @@ impl<'a> NodeEditor<'a> {
                 return true;
             }
         }
-        // The save box takes every press, so a press on the keys does not play one.
-        self.graph.name_entry.is_some() || self.graph.quick_add.is_some()
+        self.graph.quick_add.is_some()
     }
 
     /// Handles a key event while the quick add box is open. The box takes every key, so the piano
@@ -617,69 +673,6 @@ impl<'a> NodeEditor<'a> {
                 }
                 _ => (event::Status::Captured, Some(Message::Hovered)),
             },
-            keyboard::Event::KeyReleased { .. } => {
-                let note = self.graph.piano.handle(event.clone());
-                let note = note.filter(|_| self.graph.computer_keys);
-                (event::Status::Captured, note.map(Message::Note))
-            }
-            _ => (event::Status::Ignored, None),
-        }
-    }
-
-    /// Handles a key event while the save box is open. The box takes every key, so the piano and
-    /// the shortcuts stay quiet. A key already held when the box opened still gets its release, so
-    /// no note sticks.
-    pub(super) fn name_entry_event(
-        &mut self,
-        event: &keyboard::Event,
-    ) -> (event::Status, Option<Message>) {
-        match event {
-            // Typing goes to the field with the caret.
-            keyboard::Event::CharacterReceived(c) => {
-                if let Some(entry) = self.graph.name_entry.as_mut() {
-                    let text = entry.active_mut();
-                    if text.chars().count() < crate::presets::MAX_NAME_LEN
-                        && crate::presets::valid_char(*c)
-                    {
-                        text.push(*c);
-                    }
-                }
-                (event::Status::Captured, Some(Message::Hovered))
-            }
-            keyboard::Event::KeyPressed { key_code, .. } => {
-                match key_code {
-                    keyboard::KeyCode::Backspace => {
-                        if let Some(entry) = self.graph.name_entry.as_mut() {
-                            entry.active_mut().pop();
-                        }
-                    }
-                    // Tab moves between the name and the category. The arrow keys step through
-                    // the existing categories, so one can be picked without typing it.
-                    keyboard::KeyCode::Tab => {
-                        if let Some(entry) = self.graph.name_entry.as_mut() {
-                            entry.switch_field();
-                        }
-                    }
-                    keyboard::KeyCode::Down | keyboard::KeyCode::Up => {
-                        if let Some(entry) = self.graph.name_entry.as_mut() {
-                            let step = if *key_code == keyboard::KeyCode::Down {
-                                1
-                            } else {
-                                -1
-                            };
-                            entry.cycle_category(step);
-                        }
-                    }
-                    keyboard::KeyCode::Escape => self.graph.name_entry = None,
-                    keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
-                        self.graph.confirm_name_entry();
-                        // The editor saves the preset when it hears of this.
-                        return (event::Status::Captured, Some(Message::GraphChanged));
-                    }
-                    _ => {}
-                }
-                (event::Status::Captured, Some(Message::Hovered))
-            }
             keyboard::Event::KeyReleased { .. } => {
                 let note = self.graph.piano.handle(event.clone());
                 let note = note.filter(|_| self.graph.computer_keys);
@@ -838,6 +831,12 @@ impl<'a> NodeEditor<'a> {
                 knob::release(&mut self.graph.nodes[node].knob_states[eq::FREQ[band] as usize]);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
+            Interaction::EnvelopeHandle { node, handle } => {
+                let first = envelope::HANDLE_KNOBS[handle][0];
+                knob::release(&mut self.graph.nodes[node].knob_states[first as usize]);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::LfoPoint { .. } => (event::Status::Captured, Some(Message::GraphChanged)),
             Interaction::MovingNode { node, .. } => {
                 if let Some(link) = self.graph.link_target.take() {
                     self.graph.insert_into(node, link);
@@ -933,6 +932,22 @@ impl<'a> NodeEditor<'a> {
                 drag_eq_point(&mut self.graph.nodes[node], band, point, driven);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
+            Interaction::EnvelopeHandle { node, handle } => {
+                let knobs = envelope::HANDLE_KNOBS[handle];
+                let driven = EnvelopeDriven {
+                    time: self.graph.is_driven(node, knobs[0]),
+                    level: knobs
+                        .get(1)
+                        .is_some_and(|id| self.graph.is_driven(node, *id)),
+                };
+                let live = live_knobs(self.graph, node, &self.levels);
+                drag_envelope_handle(&mut self.graph.nodes[node], handle, point, &live, driven);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::LfoPoint { node, point: index } => {
+                drag_lfo_point(&mut self.graph.nodes[node], index, point);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
             Interaction::Knob { node, id } => {
                 let state = &self.graph.nodes[node].knob_states[id as usize];
                 if let Some(value) = knob::drag(state, screen) {
@@ -979,10 +994,6 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 // The number box takes the keys while it is open.
                 if self.graph.knob_entry.is_some() {
                     return self.knob_entry_event(&key_event);
-                }
-                // The save box takes the keys while it is open.
-                if self.graph.name_entry.is_some() {
-                    return self.name_entry_event(&key_event);
                 }
                 // So does the quick add box.
                 if self.graph.quick_add.is_some() {

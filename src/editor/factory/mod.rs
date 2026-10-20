@@ -289,10 +289,7 @@ mod tests {
         let presets = all();
         assert_eq!(presets.len(), 7);
         for (index, preset) in presets.iter().enumerate() {
-            assert_eq!(
-                crate::presets::clean_name(&preset.name).as_deref(),
-                Some(preset.name.as_str())
-            );
+            assert!(!preset.name.is_empty() && preset.name == preset.name.trim());
             assert!(presets[..index].iter().all(|p| p.name != preset.name));
         }
         // Three basses, two leads, two pads, each filed in the folder that names it.

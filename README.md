@@ -36,8 +36,22 @@ Flode is not affiliated with Blender or the Blender Foundation.
 - **Oscillator.** Sine, saw, square, triangle and noise (white, pink, brown, Geiger). Up to seven
   unison voices with detune and stereo spread, pitch controls, and warp modes (bend, sync, PWM,
   asymmetry, flip, mirror, quantize). Each has its own level and pan.
-- **Envelope, LFO and Map.** An envelope shapes an oscillator's amplitude or drives any knob. The
-  LFO runs free or locks to the host's tempo. A map rescales a control signal through a curve you
+- **Envelope, LFO and Map.** An envelope shapes an oscillator's amplitude or drives any knob. Its
+  curve has three handles you can drag. The first sets Attack, the second sets Decay sideways and
+  Sustain up and down, and the third sets Release. They turn the same knobs, so a knob or a control
+  wire moves its handle, and double clicking a handle resets its knobs. Each stage's width follows
+  its own knob only, so the time axis is fixed and a long release shows as a long tail. The
+  LFO runs free or locks to the host's tempo. Its Wave list has a Custom wave, a shape you draw as
+  a list of points in the viewer. Double click empty space in the viewer to add a point there, and
+  double click a point to remove it. Drag a point to move it. A curve holds up to 16 points, and
+  the two end points only move up and down. The points are saved with the patch and with presets.
+  The One shot checkbox makes the LFO play exactly one cycle from each note and then hold its end
+  value until the next note, which restarts it. One shot restarts on every note whether or not
+  Retrigger is on, and it ignores the playhead lock of Sync. With Sync on a note division and a
+  tempo from the host, the cycle is that division long. Otherwise it takes 1 / Rate seconds.
+  Before the first note it sits at the start of the shape. A saw ends high, and a Custom wave ends
+  on its last point. A noise LFO in one shot mode draws one new random value at each note and
+  holds it. A map rescales a control signal through a curve you
   can drag. The curve's four values and an Offset, which pushes the whole curve up or down, are
   also knobs in a folded Range section, and a control wire can drive any of them, so the handles
   follow it. Maps chain to any depth, including into another map's values. The Bipolar checkbox
@@ -96,7 +110,7 @@ waveform, the ADSR curve, and the filter's response from 20 Hz to 20 kHz. The pi
 knobs. It also follows a wire that drives a knob, so a filter with an LFO on its cutoff shows the
 curve sweeping. While a note plays, the envelope and LFO viewers put an orange dot on the curve
 where the signal is now. The envelope dot follows the newest note, and it rests in the middle of
-the sustain hold. A noise LFO has no dot.
+the sustain hold. A noise LFO has no dot. A one shot LFO's dot stops at the end of the curve.
 
 **Editing.**
 
@@ -196,13 +210,17 @@ the Reese preset in the Bass category.
 
 The Presets button opens a list with "Save as..." and "Init", then the categories, then any presets
 with none. "Init" goes back to the starting patch and resets the macros, and it does not ask about
-unsaved changes. A category opens a submenu of its presets when you hover it or click it. "Save as..." opens a box
-with a name and a category. The existing categories show as chips you can click, or step through
-with the up and down keys, so a typo does not make a new folder. A category that does not exist
-yet is tagged "new". Saving under a name that already exists replaces that preset.
+unsaved changes. A category opens a submenu of its presets when you hover it or click it.
+
+"Save as..." opens the system save dialog. It starts in the preset folder, or in the current
+preset's category folder, and suggests the current name. The file name is the preset's name, and
+Flode adds `.flode` to it if you leave that off. A folder directly inside the preset folder is the category,
+so saving into `Bass` files the preset under Bass in the list, and a new folder makes a new
+category. A file saved directly in the preset folder has no category. A file saved anywhere else
+is written where you chose, and it works, but it does not appear in the list. Saving over an
+existing file replaces that preset. Canceling the dialog does nothing.
 
 ![The presets menu with the Pad submenu open](docs/images/presets-menu.png)
-![The save box, with the existing categories to pick from](docs/images/save-preset.png)
 
 Six factory presets are built in code in `src/editor/factory/`: Sub Bass and Reese, Pulse Lead and
 Bell Lead, Warm Pad and Dusk Pad. To write them into your preset folder:
@@ -224,7 +242,7 @@ patch that runs all eight effects, the EQ's analyzer, monitors in every mode, an
 math nodes with allocation forbidden.
 
 Four environment variables help when taking screenshots. `FLODE_PRESET` (`Category/Name`) starts the
-editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `save`, `select:2`, `select:0,2`) opens part
+editor with a preset loaded, `FLODE_UI` (`presets`, `presets:Bass`, `select:2`, `select:0,2`) opens part
 of the interface or selects nodes, `FLODE_PRESET_DIR` points the editor at another preset folder,
 and `FLODE_NOTE` (a MIDI note number) holds that note down from the start, so the viewers have a
 live signal. They are read once, at start. See `src/editor/demo.rs`.

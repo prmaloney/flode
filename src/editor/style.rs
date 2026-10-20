@@ -33,14 +33,6 @@ pub(super) const CATEGORY_MIN_WIDTH: f32 = 160.0;
 pub(super) const STATUS_SECONDS: std::time::Duration = std::time::Duration::from_secs(3);
 /// The preset list is at least this wide, so most names fit on a row.
 pub(super) const PRESET_LIST_MIN_WIDTH: f32 = 220.0;
-/// The box where a preset's name is typed.
-pub(super) const NAME_BOX_WIDTH: f32 = 360.0;
-pub(super) const NAME_BOX_HEIGHT: f32 = 136.0;
-/// The tag on a category that does not exist yet.
-pub(super) const NEW_TAG_COLOR: Color = Color::from_rgb(0.80, 0.50, 0.15);
-/// The chips in the save box that pick an existing category.
-pub(super) const CHIP_HEIGHT: f32 = 22.0;
-pub(super) const CHIP_GAP: f32 = 6.0;
 
 pub(super) const MENU_WIDTH: f32 = 150.0;
 pub(super) const MENU_ITEM_HEIGHT: f32 = 32.0;

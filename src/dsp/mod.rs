@@ -2,6 +2,7 @@
 //! module can be read and tested on its own.
 
 pub mod analyzer;
+pub mod curve;
 pub mod delay;
 pub mod effects;
 pub mod envelope;

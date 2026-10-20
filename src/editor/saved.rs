@@ -1,5 +1,6 @@
 //! The graph as the project saves it, and the migrations that keep old saves loading.
 
+use crate::dsp::curve::Curve;
 use crate::dsp::svf::FilterType;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::connection::Connection;
@@ -64,6 +65,10 @@ pub struct SavedNode {
     /// before knobs lived on nodes have none, because those values were host parameters.
     #[serde(default)]
     pub(super) knobs: Vec<(KnobId, f32)>,
+    /// The points of an LFO's custom wave. Empty means the default curve, which is what saves from
+    /// before the wave existed have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) points: Vec<[f32; 2]>,
     /// Fields from before the dropdown row and the knobs moved onto every node. They are read
     /// when loading and never written.
     #[serde(default, skip_serializing)]
@@ -90,6 +95,7 @@ impl SavedNode {
             switches: node.switches.to_vec(),
             switched: false,
             knobs: KnobId::ALL.iter().map(|&id| (id, node.value(id))).collect(),
+            points: node.points.clone(),
             waveform: None,
             filter_type: None,
             out_min: None,
@@ -113,6 +119,10 @@ impl SavedNode {
         node.switches = self.switches.clone();
         if self.switched {
             node.set_switch(0, true);
+        }
+        // Points that do not make a valid curve load as the default.
+        if Curve::from_points(&self.points).is_some() {
+            node.points = self.points.clone();
         }
         match self.kind {
             NodeKind::Oscillator => {

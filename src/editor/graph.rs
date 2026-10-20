@@ -19,6 +19,7 @@ use crate::presets::{self, Library, Preset};
 use nih_plug_iced::keyboard::KeyCode;
 use nih_plug_iced::{Point, Rectangle, Vector};
 use std::path::PathBuf;
+use std::sync::{mpsc, Mutex};
 use std::time::Instant;
 
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
@@ -81,6 +82,17 @@ pub(super) enum Interaction {
     EqPoint {
         node: usize,
         band: usize,
+    },
+    /// Dragging one handle of an envelope's curve. `handle` is 0 for the attack, 1 for the decay
+    /// and sustain, and 2 for the release.
+    EnvelopeHandle {
+        node: usize,
+        handle: usize,
+    },
+    /// Dragging one point of an LFO's custom curve. `point` is 0 for the first.
+    LfoPoint {
+        node: usize,
+        point: usize,
     },
 }
 
@@ -168,73 +180,21 @@ pub(super) struct PresetMenu {
     pub(super) open: Option<usize>,
 }
 
-/// Which field of the save box takes the typing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EntryField {
-    Name,
-    Category,
-}
-
-/// The save box: a name, a category, and the field being typed in. It also holds the categories
-/// that already exist, so one can be picked instead of typed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct NameEntry {
-    pub(super) name: String,
-    pub(super) category: String,
-    pub(super) field: EntryField,
-    /// The existing categories, in the order the list shows them.
-    pub(super) categories: Vec<String>,
-}
-
-impl NameEntry {
-    /// The existing category that the typed one names, ignoring case and spaces at the ends.
-    pub(super) fn existing_category(&self) -> Option<&String> {
-        let typed = self.category.trim().to_lowercase();
-        self.categories
-            .iter()
-            .find(|name| name.to_lowercase() == typed)
-    }
-
-    /// True if the typed category is not one that exists yet, so saving would make a folder.
-    pub(super) fn is_new_category(&self) -> bool {
-        !self.category.trim().is_empty() && self.existing_category().is_none()
-    }
-
-    /// Picks the existing category `step` places along from the typed one, wrapping around. From
-    /// no category, stepping on goes to the first and stepping back goes to the last. The typing
-    /// moves to the category field.
-    pub(super) fn cycle_category(&mut self, step: i32) {
-        self.field = EntryField::Category;
-        let count = self.categories.len() as i32;
-        if count == 0 {
-            return;
-        }
-        let at = self
-            .existing_category()
-            .and_then(|found| self.categories.iter().position(|name| name == found));
-        let next = match at {
-            Some(at) => (at as i32 + step).rem_euclid(count),
-            None if step >= 0 => 0,
-            None => count - 1,
-        };
-        self.category = self.categories[next as usize].clone();
-    }
-
-    /// The text of the field being typed in.
-    pub(super) fn active_mut(&mut self) -> &mut String {
-        match self.field {
-            EntryField::Name => &mut self.name,
-            EntryField::Category => &mut self.category,
-        }
-    }
-
-    /// Moves the typing to the other field.
-    pub(super) fn switch_field(&mut self) {
-        self.field = match self.field {
-            EntryField::Name => EntryField::Category,
-            EntryField::Category => EntryField::Name,
-        };
-    }
+/// Where the save dialog starts and what file name it suggests. It starts in the preset folder
+/// `dir`, or in the current preset's category folder inside it, and suggests the preset's name,
+/// or "Untitled", with the preset extension.
+pub(super) fn save_dialog_start(
+    dir: &std::path::Path,
+    category: &str,
+    name: Option<&str>,
+) -> (PathBuf, String) {
+    let folder = if category.is_empty() {
+        dir.to_path_buf()
+    } else {
+        dir.join(category)
+    };
+    let file = format!("{}.{}", name.unwrap_or("Untitled"), presets::EXTENSION);
+    (folder, file)
 }
 
 /// Graph state that persists between frames.
@@ -305,13 +265,23 @@ pub struct Graph {
     pub(super) preset_category: String,
     /// The open preset list, read when it opened.
     pub(super) preset_list: Option<PresetMenu>,
-    /// The name and category being typed, while the save box is open.
-    pub(super) name_entry: Option<NameEntry>,
-    /// A name and category the user confirmed. The editor saves the preset under them, since the
-    /// macro values are the host's.
-    pub(super) pending_save: Option<(String, String)>,
+    /// The answer of the save dialog, while one is open. It holds the chosen path, or None if the
+    /// user canceled.
+    /// The mutex only makes the editor `Sync`, which the receiver is not.
+    pub(super) save_dialog: Option<Mutex<mpsc::Receiver<Option<PathBuf>>>>,
+    /// The file the save dialog chose. The editor saves the preset to it, since the macro values
+    /// are the host's.
+    pub(super) pending_save: Option<PathBuf>,
+    /// How many times a dialog was asked for. Tests read it, since they open no real dialog.
+    #[cfg(test)]
+    pub(super) save_dialog_requests: usize,
+    /// The other end of `save_dialog` in tests, which send the answer through it.
+    #[cfg(test)]
+    pub(super) save_dialog_sender: Option<mpsc::Sender<Option<PathBuf>>>,
     /// A line shown under the pill for a few seconds, such as "Saved Lead".
     pub(super) status: Option<(String, Instant)>,
+    /// The last press on an LFO's viewer, to tell a double click that adds or removes a point.
+    pub(super) viewer_click: Option<nih_plug_iced::mouse::Click>,
 }
 
 /// The part of a dropdown under the cursor.
@@ -429,12 +399,17 @@ impl Graph {
             preset_name: None,
             preset_category: String::new(),
             preset_list: None,
-            name_entry: None,
+            save_dialog: None,
             knob_entry: None,
             quick_add: None,
             alt: false,
             pending_save: None,
+            #[cfg(test)]
+            save_dialog_requests: 0,
+            #[cfg(test)]
+            save_dialog_sender: None,
             status: None,
+            viewer_click: None,
         }
     }
 
@@ -570,71 +545,114 @@ impl Graph {
         }
     }
 
-    /// Opens the save box. It starts with the current preset's name and category, so saving again
-    /// replaces it.
-    pub(super) fn start_name_entry(&mut self) {
+    /// Opens the system save dialog on a worker thread, so the editor keeps running while it is
+    /// up. The answer arrives on `save_dialog` and `poll_save_dialog` picks it up. Does nothing
+    /// while a dialog is already open.
+    pub(super) fn start_save_dialog(&mut self) {
         self.preset_list = None;
-        let categories = self
-            .preset_dir
-            .as_deref()
-            .map(presets::library_in)
-            .unwrap_or_default()
-            .categories
-            .into_iter()
-            .map(|category| category.name)
-            .collect();
-        self.name_entry = Some(NameEntry {
-            name: self.preset_name.clone().unwrap_or_default(),
-            category: self.preset_category.clone(),
-            field: EntryField::Name,
-            categories,
-        });
+        if self.save_dialog.is_some() {
+            return;
+        }
+        let Some(dir) = self.preset_dir.clone() else {
+            self.say("Could not save: no preset folder");
+            return;
+        };
+        let (folder, file) =
+            save_dialog_start(&dir, &self.preset_category, self.preset_name.as_deref());
+        // The panel can only start in a folder that exists.
+        let _ = std::fs::create_dir_all(&folder);
+        let (sender, receiver) = mpsc::channel();
+        // Tests never open a real dialog. They read the request and send the answer themselves.
+        #[cfg(test)]
+        {
+            let _ = (&folder, &file);
+            self.save_dialog_requests += 1;
+            self.save_dialog_sender = Some(sender);
+        }
+        #[cfg(not(test))]
+        {
+            let spawned = std::thread::Builder::new()
+                .name("flode-save-dialog".into())
+                .spawn(move || {
+                    // rfd panics if the platform has no running application. The sender then
+                    // drops without an answer, which the poll reports.
+                    let picked = std::panic::catch_unwind(|| {
+                        rfd::FileDialog::new()
+                            .set_title("Save preset")
+                            .set_directory(folder)
+                            .set_file_name(file)
+                            .add_filter("Flode preset", &[presets::EXTENSION])
+                            .save_file()
+                    });
+                    if let Ok(picked) = picked {
+                        let _ = sender.send(picked);
+                    }
+                });
+            if spawned.is_err() {
+                self.say("Could not open the save dialog");
+                return;
+            }
+        }
+        self.save_dialog = Some(Mutex::new(receiver));
     }
 
-    /// Takes the typed name and category. One that is not usable keeps the box open and says why.
-    pub(super) fn confirm_name_entry(&mut self) {
-        let Some(entry) = &self.name_entry else {
+    /// Collects the save dialog's answer, if it has one. A chosen path waits in `pending_save`
+    /// for the editor to save, a cancel does nothing, and a dialog that died is reported.
+    pub(super) fn poll_save_dialog(&mut self) {
+        let Some(receiver) = &self.save_dialog else {
             return;
         };
-        let Some(name) = presets::clean_name(&entry.name) else {
-            self.say("Type a name first");
-            return;
+        let answer = match receiver.lock() {
+            Ok(receiver) => receiver.try_recv(),
+            Err(_) => Err(mpsc::TryRecvError::Disconnected),
         };
-        // A category that matches an existing one apart from its case is that one, so a slip of
-        // the shift key does not make a second folder.
-        let typed = entry.existing_category().unwrap_or(&entry.category);
-        let Some(category) = presets::clean_category(typed) else {
-            self.say("That category is not usable");
-            return;
-        };
-        self.name_entry = None;
-        self.pending_save = Some((name, category));
+        match answer {
+            Ok(Some(path)) => {
+                self.save_dialog = None;
+                self.pending_save = Some(path);
+            }
+            Ok(None) => self.save_dialog = None,
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.save_dialog = None;
+                self.say("Could not open the save dialog");
+            }
+        }
     }
 
-    /// Saves the preset a confirmed name asked for, with the macro knobs' current values. Does
-    /// nothing if no name is waiting.
+    /// Saves the preset to the file the dialog chose, with the macro knobs' current values. The
+    /// name is the file's name and the category is the folder it is in, if that is one level
+    /// inside the preset folder. Does nothing if no file is waiting.
     pub(super) fn save_pending_preset(&mut self, macros: [f32; MACRO_COUNT]) {
-        let Some((name, category)) = self.pending_save.take() else {
+        let Some(chosen) = self.pending_save.take() else {
             return;
         };
         let Some(dir) = self.preset_dir.clone() else {
             self.say("Could not save: no preset folder");
             return;
         };
+        let path = presets::with_extension(&chosen);
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
         let preset = Preset {
             name: name.clone(),
-            category: category.clone(),
+            category: String::new(),
             graph: self.to_saved(),
             macros,
         };
-        match presets::save_in(&dir, &preset) {
-            Ok(()) => {
-                self.preset_name = Some(name.clone());
-                self.preset_category = category;
-                self.say(format!("Saved {name}"));
-            }
-            Err(error) => self.say(format!("Could not save: {error}")),
+        if let Err(error) = presets::save_to(&path, &preset) {
+            self.say(format!("Could not save: {error}"));
+            return;
         }
+        // The panel may hand back a path through a link, such as /var for /private/var, so both
+        // are compared as the file system resolves them.
+        let resolved = |path: &std::path::Path| path.canonicalize().unwrap_or(path.to_path_buf());
+        self.preset_category = presets::category_of(&resolved(&dir), &resolved(&path));
+        self.preset_name = Some(name.clone());
+        self.say(format!("Saved {name}"));
     }
 
     /// Replaces the graph with the saved preset `name` in `category` (empty for none), and sends
@@ -677,7 +695,17 @@ impl Graph {
         let computer_keys = self.computer_keys;
         let shift = self.shift;
         let dir = self.preset_dir.clone();
+        // A dialog that is open still answers after a load, and a second one must not open.
+        let dialog = self.save_dialog.take();
+        #[cfg(test)]
+        let (requests, sender) = (self.save_dialog_requests, self.save_dialog_sender.take());
         *self = fresh;
+        self.save_dialog = dialog;
+        #[cfg(test)]
+        {
+            self.save_dialog_requests = requests;
+            self.save_dialog_sender = sender;
+        }
         self.view = view;
         self.piano = piano;
         self.computer_keys = computer_keys;

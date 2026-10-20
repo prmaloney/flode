@@ -10,8 +10,7 @@
 //! gives the envelope and LFO viewers a live signal to show.
 //!
 //! `FLODE_UI` opens part of the interface. `presets` opens the preset list, `presets:Bass` opens
-//! it with the Bass submenu out, `save` opens the save box, and `select:2` selects the node at
-//! index 2.
+//! it with the Bass submenu out, and `select:2` selects the node at index 2.
 
 use super::graph::Graph;
 
@@ -60,7 +59,6 @@ pub(super) fn apply_with(
                     .position(|c| c.name == category);
             }
         }
-        Some(("save", _)) => graph.start_name_entry(),
         // A comma list, such as `select:0,2`, selects several nodes.
         Some(("select", indexes)) => {
             let nodes = indexes
@@ -110,10 +108,6 @@ mod tests {
         assert_eq!(menu.open, Some(0));
         assert!(graph.status.is_none());
 
-        let (mut graph, _) = graph_with_a_preset("save");
-        apply_with(&mut graph, None, None, Some("save"));
-        assert!(graph.name_entry.is_some() && graph.preset_list.is_none());
-
         // A folder can be named, and presets are read from it.
         let mut elsewhere = Graph::default();
         let nodes = elsewhere.nodes.len();
@@ -160,7 +154,7 @@ mod tests {
         let nodes = graph.nodes.len();
         apply_with(&mut graph, None, Some("Nope/Missing"), Some("sideways"));
         assert_eq!(graph.nodes.len(), nodes);
-        assert!(graph.preset_list.is_none() && graph.name_entry.is_none());
+        assert!(graph.preset_list.is_none());
         apply_with(&mut graph, None, None, None);
         let _ = std::fs::remove_dir_all(dir);
     }

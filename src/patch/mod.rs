@@ -7,6 +7,7 @@ pub mod link;
 pub mod stage;
 pub mod wiring;
 
+use crate::dsp::curve::Curve;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::MAX_SLOTS;
@@ -52,6 +53,11 @@ pub struct LfoSettings {
     /// Restart the cycle at every note on. It applies to a free running LFO. A synced LFO follows
     /// the playhead and ignores it.
     pub retrigger: bool,
+    /// Play one cycle from each note on, then hold the end value until the next note. It restarts
+    /// at every note whatever `retrigger` says, and it ignores the playhead lock of Sync.
+    pub one_shot: bool,
+    /// The drawn wave. Some only when the shape is Custom, and then `waveform` is not read.
+    pub curve: Option<Curve>,
 }
 
 impl LfoSettings {
@@ -61,6 +67,8 @@ impl LfoSettings {
             rate: Param::default_of(KnobId::LfoRate),
             sync: Param::default_of(KnobId::LfoSync),
             retrigger: false,
+            one_shot: false,
+            curve: None,
         }
     }
 }

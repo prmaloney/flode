@@ -73,6 +73,16 @@ pub fn press(state: &mut State, value: f32, position: Point) -> Press {
     Press::Drag
 }
 
+/// Records a press at `position` in `last`, and returns true if it is the second press of a double
+/// click. A double click clears `last`, so the next press starts a new one. For presses that need
+/// no knob state, such as the clicks on an LFO's drawn curve.
+pub fn double_click(last: &mut Option<mouse::Click>, position: Point) -> bool {
+    let click = mouse::Click::new(position, *last);
+    let double = matches!(click.kind(), mouse::click::Kind::Double);
+    *last = (!double).then_some(click);
+    double
+}
+
 /// The normalized value for the cursor during a drag. Dragging up increases the value. None when
 /// no drag is active.
 pub fn drag(state: &State, position: Point) -> Option<f32> {

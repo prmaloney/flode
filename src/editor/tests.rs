@@ -210,6 +210,7 @@ mod slot_tests {
             filter_type: None,
             out_min: None,
             out_max: None,
+            points: Vec::new(),
         };
         let saved = SavedGraph {
             version: 0,
@@ -254,6 +255,7 @@ mod slot_tests {
             filter_type: None,
             out_min: None,
             out_max: None,
+            points: Vec::new(),
         };
         assert_eq!(
             oscillator::waveform(&legacy.into_node()),
@@ -889,6 +891,7 @@ mod envelope_migration_tests {
             filter_type: None,
             out_min: None,
             out_max: None,
+            points: Vec::new(),
         };
         let saved = SavedGraph {
             version: 0,
@@ -1058,7 +1061,7 @@ mod lfo_retrigger_tests {
     fn the_retrigger_switch_reaches_the_patch_and_survives_saving() {
         let mut graph = minimal_graph();
         let lfo = graph.add_node(NodeKind::Lfo, Point::new(0.0, 200.0));
-        assert_eq!(graph.nodes[lfo].switch_labels(), &["Retrigger"]);
+        assert_eq!(graph.nodes[lfo].switch_labels(), &["Retrigger", "One shot"]);
         assert!(!graph.patch().lfos[0].unwrap().retrigger);
 
         graph.nodes[lfo].set_switch(0, true);
@@ -2388,10 +2391,8 @@ mod preset_ui_tests {
     }
 
     use crate::editor::canvas::{Message, NodeEditor};
-    use crate::editor::piano::PianoEvent;
     use crate::editor::style::MENU_ITEM_HEIGHT;
     use crate::presets::Library;
-    use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
     use nih_plug_iced::mouse;
     use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
     use nih_plug_iced::Vector;
@@ -2437,26 +2438,6 @@ mod preset_ui_tests {
         message
     }
 
-    fn key(editor: &mut NodeEditor, event: keyboard::Event) -> Option<Message> {
-        editor
-            .update(Event::Keyboard(event), bounds(), Cursor::Unavailable)
-            .1
-    }
-
-    fn type_text(editor: &mut NodeEditor, text: &str) {
-        for c in text.chars() {
-            key(editor, keyboard::Event::CharacterReceived(c));
-        }
-    }
-
-    fn press_key(editor: &mut NodeEditor, key_code: KeyCode) -> Option<Message> {
-        let event = keyboard::Event::KeyPressed {
-            key_code,
-            modifiers: Modifiers::default(),
-        };
-        key(editor, event)
-    }
-
     fn presets_button() -> Point {
         let segment = pill_segment(bounds(), 4);
         Point::new(
@@ -2485,84 +2466,46 @@ mod preset_ui_tests {
         Point::new(sub.x + 20.0, sub.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT)
     }
 
-    /// Save a preset through the UI: open the list, pick Save as, type a name, press Tab, type a
-    /// category, press Enter. The editor then saves it, which the test does by hand with the
-    /// macro values it is given.
+    /// Sends the open dialog's answer, as the worker thread would, and polls for it. Starts a
+    /// dialog first if none is open.
+    fn answer_dialog(graph: &mut Graph, path: Option<PathBuf>) {
+        if graph.save_dialog.is_none() {
+            graph.start_save_dialog();
+        }
+        let sender = graph.save_dialog_sender.clone().expect("a dialog is open");
+        sender.send(path).unwrap();
+        graph.poll_save_dialog();
+    }
+
+    /// Save a preset through the UI: open the list, pick Save as, and answer the dialog with a
+    /// file in the category's folder. The editor then saves it, which the test does by hand with
+    /// the macro values it is given.
     fn save_through_the_ui(graph: &mut Graph, name: &str, category: &str, macros: [f32; 4]) {
-        let library = graph
-            .preset_dir
-            .as_deref()
-            .map(crate::presets::library_in)
-            .unwrap_or_default();
+        let dir = graph.preset_dir.clone().unwrap();
+        let library = crate::presets::library_in(&dir);
         let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
         click(&mut editor, presets_button());
         click(&mut editor, list_row(&library, 0));
-        assert!(editor.graph.name_entry.is_some());
-        // Clear the name and category the box started with, then type.
-        for _ in 0..60 {
-            press_key(&mut editor, KeyCode::Backspace);
-        }
-        type_text(&mut editor, name);
-        press_key(&mut editor, KeyCode::Tab);
-        for _ in 0..60 {
-            press_key(&mut editor, KeyCode::Backspace);
-        }
-        type_text(&mut editor, category);
-        let message = press_key(&mut editor, KeyCode::Enter);
-        assert!(matches!(message, Some(Message::GraphChanged)));
+        assert!(editor.graph.save_dialog.is_some());
+        answer_dialog(
+            graph,
+            Some(dir.join(category).join(format!("{name}.flode"))),
+        );
         graph.save_pending_preset(macros);
     }
 
+    /// Saving again to the same file replaces that preset, and the dialog starts with the
+    /// current preset's name and folder.
     #[test]
-    fn saving_through_the_ui_writes_a_named_preset_in_its_category() {
-        let dir = TempDir::new("save");
-        let mut graph = graph_in(&dir);
-        save_through_the_ui(&mut graph, "  Warm pad ", " Pad ", [0.1, 0.2, 0.3, 0.4]);
-
-        let library = library_of(&dir);
-        assert_eq!(library.categories.len(), 1);
-        assert_eq!(library.categories[0].name, "Pad");
-        assert_eq!(library.categories[0].presets, ["Warm pad"]);
-        assert!(library.loose.is_empty());
-        let saved = crate::presets::load_in(&dir.0, "Pad", "Warm pad").unwrap();
-        assert_eq!(saved.macros, [0.1, 0.2, 0.3, 0.4]);
-        assert_eq!(graph.preset_name.as_deref(), Some("Warm pad"));
-        assert_eq!(graph.preset_category, "Pad");
-        assert!(graph.name_entry.is_none() && graph.pending_save.is_none());
-        // The name and category stay with the project's saved graph.
-        let reloaded = Graph::from_saved(&graph.to_saved());
-        assert_eq!(reloaded.preset_name.as_deref(), Some("Warm pad"));
-        assert_eq!(reloaded.preset_category, "Pad");
-    }
-
-    /// A preset saved with no category sits loose in the folder, and it is listed after the
-    /// categories.
-    #[test]
-    fn a_preset_with_no_category_is_listed_loose() {
-        let dir = TempDir::new("loose");
-        let mut graph = graph_in(&dir);
-        save_through_the_ui(&mut graph, "Plain", "", [0.0; 4]);
-        let library = library_of(&dir);
-        assert!(library.categories.is_empty());
-        assert_eq!(library.loose, ["Plain"]);
-        assert!(dir.0.join("Plain.flode").is_file());
-    }
-
-    /// Saving again under a name that is already there replaces that preset, and the box starts
-    /// with the current preset's name and category.
-    #[test]
-    fn saving_again_keeps_the_name_and_category_and_replaces_the_file() {
+    fn saving_again_replaces_the_file() {
         let dir = TempDir::new("again");
         let mut graph = graph_in(&dir);
         save_through_the_ui(&mut graph, "Pluck", "Lead", [0.0; 4]);
-        graph.start_name_entry();
-        let entry = graph.name_entry.clone().unwrap();
         assert_eq!(
-            (entry.name.as_str(), entry.category.as_str()),
-            ("Pluck", "Lead")
+            save_dialog_start(&dir.0, &graph.preset_category, graph.preset_name.as_deref()),
+            (dir.0.join("Lead"), "Pluck.flode".to_string())
         );
-        graph.confirm_name_entry();
-        graph.save_pending_preset([0.9; 4]);
+        save_through_the_ui(&mut graph, "Pluck", "Lead", [0.9; 4]);
         let library = library_of(&dir);
         assert_eq!(library.categories.len(), 1);
         assert_eq!(library.categories[0].presets, ["Pluck"]);
@@ -2635,117 +2578,230 @@ mod preset_ui_tests {
             .is_some_and(|(text, _)| text.contains("ghost")));
     }
 
-    /// While the box is open, keys are text. They do not play the piano or run a shortcut.
+    /// Save as... asks for a dialog, and a second click while it is open asks for nothing more.
     #[test]
-    fn the_name_box_takes_the_keys() {
-        let dir = TempDir::new("keys");
+    fn save_as_asks_for_one_dialog_at_a_time() {
+        let dir = TempDir::new("once");
         let mut graph = graph_in(&dir);
-        graph.selected = Some(0);
-        graph.start_name_entry();
-        graph.name_entry.as_mut().unwrap().name.clear();
+        let library = Library::default();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        let name = |editor: &NodeEditor| editor.graph.name_entry.clone().unwrap();
-
-        // 'a' is a piano key and 'm' is the bypass shortcut. Both are just letters here.
-        let message = press_key(&mut editor, KeyCode::A);
-        assert!(!matches!(message, Some(Message::Note(_))));
-        type_text(&mut editor, "am");
-        press_key(&mut editor, KeyCode::M);
-        assert!(!editor.graph.nodes[0].bypassed);
-        assert_eq!(name(&editor).name, "am");
-
-        // Characters a file name can't hold are dropped, and Backspace removes one.
-        type_text(&mut editor, "a/b:c");
-        assert_eq!(name(&editor).name, "amabc");
-        press_key(&mut editor, KeyCode::Backspace);
-        assert_eq!(name(&editor).name, "amab");
-
-        // Tab moves the typing to the category, and back.
-        press_key(&mut editor, KeyCode::Tab);
-        assert_eq!(name(&editor).field, EntryField::Category);
-        type_text(&mut editor, "Bass");
-        assert_eq!(
-            (name(&editor).name.as_str(), name(&editor).category.as_str()),
-            ("amab", "Bass")
-        );
-        press_key(&mut editor, KeyCode::Tab);
-        assert_eq!(name(&editor).field, EntryField::Name);
-
-        // Enter with a blank name keeps the box open.
-        editor.graph.name_entry.as_mut().unwrap().name = "   ".to_string();
-        press_key(&mut editor, KeyCode::Enter);
-        assert!(editor.graph.name_entry.is_some());
+        click(&mut editor, presets_button());
+        click(&mut editor, list_row(&library, 0));
+        assert_eq!(editor.graph.save_dialog_requests, 1);
+        assert!(editor.graph.save_dialog.is_some() && editor.graph.preset_list.is_none());
+        click(&mut editor, presets_button());
+        click(&mut editor, list_row(&library, 0));
+        assert_eq!(editor.graph.save_dialog_requests, 1);
+        // Nothing is saved until the dialog answers.
         assert!(editor.graph.pending_save.is_none());
+        // The folder the dialog starts in exists.
+        assert!(dir.0.is_dir());
+    }
 
-        // Enter with a name takes the name and the category.
-        editor.graph.name_entry.as_mut().unwrap().name = " Dark ".to_string();
-        press_key(&mut editor, KeyCode::Enter);
-        assert!(editor.graph.name_entry.is_none());
+    /// The dialog starts in the preset folder, or the current category's folder in it, and
+    /// suggests the current name.
+    #[test]
+    fn the_dialog_starts_where_the_preset_lives() {
+        let dir = std::path::Path::new("/presets");
         assert_eq!(
-            editor.graph.pending_save,
-            Some(("Dark".to_string(), "Bass".to_string()))
+            save_dialog_start(dir, "Bass", Some("Reese")),
+            (PathBuf::from("/presets/Bass"), "Reese.flode".to_string())
         );
-        editor.graph.pending_save = None;
-        editor.graph.start_name_entry();
-
-        press_key(&mut editor, KeyCode::Escape);
-        assert!(editor.graph.name_entry.is_none());
-        assert!(editor.graph.pending_save.is_none());
+        assert_eq!(
+            save_dialog_start(dir, "", Some("Plain")),
+            (PathBuf::from("/presets"), "Plain.flode".to_string())
+        );
+        assert_eq!(
+            save_dialog_start(dir, "", None),
+            (PathBuf::from("/presets"), "Untitled.flode".to_string())
+        );
     }
 
-    /// The name stops growing at the longest allowed name.
+    /// A category folder is made before the dialog opens, so the panel can start in it.
     #[test]
-    fn the_name_has_a_length_limit() {
-        let dir = TempDir::new("limit");
+    fn the_current_category_folder_is_made_for_the_dialog() {
+        let dir = TempDir::new("start-folder");
         let mut graph = graph_in(&dir);
-        graph.start_name_entry();
-        graph.name_entry.as_mut().unwrap().name.clear();
-        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        type_text(&mut editor, &"x".repeat(100));
-        press_key(&mut editor, KeyCode::Tab);
-        type_text(&mut editor, &"y".repeat(100));
-        let entry = editor.graph.name_entry.clone().unwrap();
-        assert_eq!(entry.name.chars().count(), crate::presets::MAX_NAME_LEN);
-        assert_eq!(entry.category.chars().count(), crate::presets::MAX_NAME_LEN);
+        graph.preset_category = "Lead".to_string();
+        graph.start_save_dialog();
+        assert!(dir.0.join("Lead").is_dir());
     }
 
-    /// A key held when the box opens still ends its note when it comes up.
     #[test]
-    fn a_held_piano_key_still_releases_while_the_box_is_open() {
-        let dir = TempDir::new("held");
-        let mut graph = graph_in(&dir);
-        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        let on = press_key(&mut editor, KeyCode::A);
-        assert!(matches!(on, Some(Message::Note(PianoEvent::NoteOn { .. }))));
-        editor.graph.start_name_entry();
-        let up = keyboard::Event::KeyReleased {
-            key_code: KeyCode::A,
-            modifiers: Modifiers::default(),
-        };
-        let off = key(&mut editor, up);
-        assert!(matches!(
-            off,
-            Some(Message::Note(PianoEvent::NoteOff { .. }))
-        ));
+    fn save_as_without_a_preset_folder_says_so() {
+        let mut graph = minimal_graph();
+        graph.preset_dir = None;
+        graph.start_save_dialog();
+        assert_eq!(graph.save_dialog_requests, 0);
+        assert!(graph
+            .status
+            .as_ref()
+            .is_some_and(|(text, _)| text == "Could not save: no preset folder"));
     }
 
-    /// A press outside the box cancels it, and one on the keys does not play a note.
+    /// A path the dialog returns is saved with the macro values, and names the preset.
     #[test]
-    fn a_press_outside_the_box_cancels_it() {
-        let dir = TempDir::new("outside");
+    fn a_chosen_path_is_saved_with_the_macros() {
+        let dir = TempDir::new("chosen");
         let mut graph = graph_in(&dir);
-        graph.start_name_entry();
-        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        let keys = Point::new(300.0, 700.0);
-        let message = click(&mut editor, keys);
-        assert!(!matches!(message, Some(Message::Note(_))));
-        assert!(editor.graph.name_entry.is_none());
+        answer_dialog(&mut graph, Some(dir.0.join("Pad").join("Warm pad.flode")));
+        assert!(graph.pending_save.is_some());
+        graph.save_pending_preset([0.1, 0.2, 0.3, 0.4]);
 
-        // A press inside the box leaves it open.
-        editor.graph.start_name_entry();
-        let inside = name_box_bounds(bounds(), &[]);
-        click(&mut editor, Point::new(inside.x + 10.0, inside.y + 10.0));
-        assert!(editor.graph.name_entry.is_some());
+        let saved = crate::presets::load_in(&dir.0, "Pad", "Warm pad").unwrap();
+        assert_eq!(saved.macros, [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(graph.preset_name.as_deref(), Some("Warm pad"));
+        assert_eq!(graph.preset_category, "Pad");
+        assert!(graph.pending_save.is_none() && graph.save_dialog.is_none());
+        assert!(graph
+            .status
+            .as_ref()
+            .is_some_and(|(text, _)| text == "Saved Warm pad"));
+        // The name and category stay with the project's saved graph.
+        let reloaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(reloaded.preset_name.as_deref(), Some("Warm pad"));
+        assert_eq!(reloaded.preset_category, "Pad");
+    }
+
+    /// A file outside the preset folder is written where the user chose, with no category.
+    #[test]
+    fn a_path_outside_the_preset_folder_has_no_category() {
+        let dir = TempDir::new("inside");
+        let elsewhere = TempDir::new("outside");
+        let mut graph = graph_in(&dir);
+        graph.preset_category = "Bass".to_string();
+        answer_dialog(&mut graph, Some(elsewhere.0.join("Far.flode")));
+        graph.save_pending_preset([0.0; 4]);
+        assert!(elsewhere.0.join("Far.flode").is_file());
+        assert_eq!(graph.preset_name.as_deref(), Some("Far"));
+        assert_eq!(graph.preset_category, "");
+        assert!(library_of(&dir).is_empty());
+    }
+
+    /// A deeper folder inside the preset folder is written there and has no category either.
+    #[test]
+    fn a_path_two_folders_down_has_no_category() {
+        let dir = TempDir::new("deep");
+        let mut graph = graph_in(&dir);
+        answer_dialog(
+            &mut graph,
+            Some(dir.0.join("A").join("B").join("Deep.flode")),
+        );
+        graph.save_pending_preset([0.0; 4]);
+        assert!(dir.0.join("A").join("B").join("Deep.flode").is_file());
+        assert_eq!(graph.preset_category, "");
+    }
+
+    /// A name with no extension, or another one, gets `.flode` on the end of the whole name.
+    #[test]
+    fn a_chosen_name_always_ends_in_flode() {
+        let dir = TempDir::new("extension");
+        let mut graph = graph_in(&dir);
+        for (typed, file, name) in [
+            ("Bare", "Bare.flode", "Bare"),
+            ("Text.txt", "Text.txt.flode", "Text.txt"),
+            ("My.Pad", "My.Pad.flode", "My.Pad"),
+            ("Right.flode", "Right.flode", "Right"),
+        ] {
+            answer_dialog(&mut graph, Some(dir.0.join(typed)));
+            graph.save_pending_preset([0.0; 4]);
+            assert!(dir.0.join(file).is_file(), "{typed}");
+            assert_eq!(graph.preset_name.as_deref(), Some(name));
+        }
+        assert!(!dir.0.join("Bare").exists());
+    }
+
+    /// A file that landed in the preset folder shows in the list and loads back through the
+    /// normal flow.
+    #[test]
+    fn a_saved_file_in_the_preset_folder_loads_back() {
+        let dir = TempDir::new("loads-back");
+        let mut graph = graph_in(&dir);
+        graph.add_node(NodeKind::Reverb, Point::new(400.0, 300.0));
+        answer_dialog(&mut graph, Some(dir.0.join("Pad").join("Wet")));
+        graph.save_pending_preset([0.5, 0.6, 0.7, 0.8]);
+        answer_dialog(&mut graph, Some(dir.0.join("Loose")));
+        graph.save_pending_preset([0.0; 4]);
+        let library = library_of(&dir);
+        assert_eq!(library.categories[0].name, "Pad");
+        assert_eq!(library.categories[0].presets, ["Wet"]);
+        assert_eq!(library.loose, ["Loose"]);
+
+        let mut other = graph_in(&dir);
+        assert!(other.load_preset("Pad", "Wet"));
+        assert!(other.nodes.iter().any(|n| n.kind == NodeKind::Reverb));
+        assert_eq!(other.preset_category, "Pad");
+        let sets: Vec<f32> = other
+            .macro_edits
+            .iter()
+            .filter_map(|edit| match edit {
+                MacroEdit::Set(_, v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sets, [0.5, 0.6, 0.7, 0.8]);
+    }
+
+    /// Canceling the dialog saves nothing and says nothing, and a new dialog can open.
+    #[test]
+    fn a_canceled_dialog_does_nothing() {
+        let dir = TempDir::new("cancel");
+        let mut graph = graph_in(&dir);
+        answer_dialog(&mut graph, None);
+        assert!(graph.pending_save.is_none() && graph.save_dialog.is_none());
+        assert!(graph.status.is_none());
+        graph.start_save_dialog();
+        assert_eq!(graph.save_dialog_requests, 2);
+    }
+
+    /// While the dialog has not answered, polling changes nothing.
+    #[test]
+    fn polling_an_open_dialog_waits() {
+        let dir = TempDir::new("waiting");
+        let mut graph = graph_in(&dir);
+        graph.start_save_dialog();
+        graph.poll_save_dialog();
+        assert!(graph.save_dialog.is_some() && graph.pending_save.is_none());
+        assert!(graph.status.is_none());
+    }
+
+    /// A dialog that dies without an answer is reported, and the editor carries on.
+    #[test]
+    fn a_dialog_that_died_shows_the_status_line() {
+        let dir = TempDir::new("died");
+        let mut graph = graph_in(&dir);
+        graph.start_save_dialog();
+        drop(graph.save_dialog_sender.take());
+        graph.poll_save_dialog();
+        assert!(graph.save_dialog.is_none() && graph.pending_save.is_none());
+        assert!(graph
+            .status
+            .as_ref()
+            .is_some_and(|(text, _)| text == "Could not open the save dialog"));
+        graph.start_save_dialog();
+        assert!(graph.save_dialog.is_some());
+    }
+
+    /// A load while the dialog is open keeps waiting for its answer.
+    #[test]
+    fn a_load_keeps_the_open_dialog() {
+        let dir = TempDir::new("keep-dialog");
+        let mut graph = graph_in(&dir);
+        crate::presets::save_in(
+            &dir.0,
+            &crate::presets::Preset {
+                name: "Wet".to_string(),
+                category: String::new(),
+                graph: graph.to_saved(),
+                macros: [0.0; 4],
+            },
+        )
+        .unwrap();
+        graph.start_save_dialog();
+        assert!(graph.load_preset("", "Wet"));
+        assert!(graph.save_dialog.is_some());
+        graph.start_save_dialog();
+        assert_eq!(graph.save_dialog_requests, 1);
     }
 
     /// The button opens the list, and pressing it again or pressing elsewhere closes it.
@@ -2952,9 +3008,8 @@ mod preset_ui_tests {
             })
             .collect();
         assert_eq!(sets, [(0, 0.0), (1, 0.0), (2, 0.0), (3, 0.0)]);
-        // The next save starts from a blank name.
-        editor.graph.start_name_entry();
-        assert_eq!(editor.graph.name_entry.as_ref().unwrap().name, "");
+        // The next save suggests a blank name.
+        assert_eq!(editor.graph.preset_name, None);
         // And the preset on disk is untouched.
         assert!(crate::presets::load_in(&dir.0, "Bass", "Keeper").is_ok());
     }
@@ -2975,156 +3030,6 @@ mod preset_ui_tests {
         assert!(editor.graph.nodes.iter().any(|n| n.kind == NodeKind::Delay));
         assert_eq!(editor.graph.preset_name.as_deref(), Some("Plain"));
         assert_eq!(editor.graph.preset_category, "");
-    }
-
-    /// The save box with these categories to pick from.
-    fn entry_with(categories: &[&str]) -> NameEntry {
-        NameEntry {
-            name: "Sound".to_string(),
-            category: String::new(),
-            field: EntryField::Name,
-            categories: categories.iter().map(|c| c.to_string()).collect(),
-        }
-    }
-
-    /// A typed category is matched to an existing one without regard to case, and one that
-    /// matches nothing is tagged new, so a typo like "baas" shows before it makes a folder.
-    #[test]
-    fn a_typed_category_is_matched_or_marked_new() {
-        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
-        assert!(!entry.is_new_category());
-        for (typed, new) in [
-            ("Bass", false),
-            (" bass ", false),
-            ("LEAD", false),
-            ("baas", true),
-        ] {
-            entry.category = typed.to_string();
-            assert_eq!(entry.is_new_category(), new, "{typed}");
-        }
-        entry.category = "pad".to_string();
-        assert_eq!(entry.existing_category().map(String::as_str), Some("Pad"));
-    }
-
-    /// Up and down step through the existing categories and wrap, and move the typing to the
-    /// category field.
-    #[test]
-    fn the_arrow_keys_step_through_the_categories() {
-        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
-        entry.cycle_category(1);
-        assert_eq!(entry.category, "Bass");
-        assert_eq!(entry.field, EntryField::Category);
-        entry.cycle_category(1);
-        entry.cycle_category(1);
-        assert_eq!(entry.category, "Pad");
-        entry.cycle_category(1);
-        assert_eq!(entry.category, "Bass");
-        entry.cycle_category(-1);
-        assert_eq!(entry.category, "Pad");
-
-        // From nothing, up goes to the last. A typed category that matches one starts from it.
-        let mut entry = entry_with(&["Bass", "Lead", "Pad"]);
-        entry.cycle_category(-1);
-        assert_eq!(entry.category, "Pad");
-        entry.category = "lead".to_string();
-        entry.cycle_category(1);
-        assert_eq!(entry.category, "Pad");
-        // With no categories there is nothing to pick, and the typed text stays.
-        let mut empty = entry_with(&[]);
-        empty.category = "Mine".to_string();
-        empty.cycle_category(1);
-        assert_eq!(empty.category, "Mine");
-    }
-
-    /// Saving with a category that differs from an existing one only in case files the preset
-    /// under the existing one.
-    #[test]
-    fn a_case_slip_files_under_the_existing_category() {
-        let dir = TempDir::new("case");
-        let mut seed = graph_in(&dir);
-        save_through_the_ui(&mut seed, "First", "Bass", [0.0; 4]);
-
-        let mut graph = graph_in(&dir);
-        save_through_the_ui(&mut graph, "Second", "bass", [0.0; 4]);
-        let library = library_of(&dir);
-        assert_eq!(library.categories.len(), 1);
-        assert_eq!(library.categories[0].name, "Bass");
-        assert_eq!(library.categories[0].presets, ["First", "Second"]);
-    }
-
-    /// The save box starts with the categories that exist, and a click on a chip picks one.
-    #[test]
-    fn a_chip_picks_an_existing_category() {
-        let dir = TempDir::new("chips");
-        let mut seed = graph_in(&dir);
-        save_through_the_ui(&mut seed, "A", "Bass", [0.0; 4]);
-        save_through_the_ui(&mut seed, "B", "Pad", [0.0; 4]);
-
-        let mut graph = graph_in(&dir);
-        graph.start_name_entry();
-        graph.name_entry.as_mut().unwrap().name = "Sound".to_string();
-        assert_eq!(
-            graph.name_entry.as_ref().unwrap().categories,
-            ["Bass", "Pad"]
-        );
-        let categories = graph.name_entry.as_ref().unwrap().categories.clone();
-        let area = name_box_bounds(bounds(), &categories);
-        let layout = name_box_layout(&categories);
-        assert_eq!(layout.chips.len(), 2);
-        let (_, pad) = layout.chips[1];
-        let middle = Point::new(
-            area.x + pad.x + pad.width / 2.0,
-            area.y + pad.y + pad.height / 2.0,
-        );
-
-        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, middle);
-        let entry = editor.graph.name_entry.clone().expect("the box stays open");
-        assert_eq!(entry.category, "Pad");
-        assert_eq!(entry.field, EntryField::Category);
-        assert!(!entry.is_new_category());
-        // Enter files the preset under it.
-        press_key(&mut editor, KeyCode::Enter);
-        assert_eq!(
-            editor.graph.pending_save,
-            Some(("Sound".to_string(), "Pad".to_string()))
-        );
-    }
-
-    /// The chips wrap inside the box, there are at most three rows, and every chip is clickable
-    /// inside the box's bounds.
-    #[test]
-    fn the_chips_wrap_inside_the_box() {
-        let names: Vec<String> = (0..40).map(|n| format!("Category {n}")).collect();
-        let layout = name_box_layout(&names);
-        assert!(!layout.chips.is_empty() && layout.chips.len() < names.len());
-        let rows: std::collections::BTreeSet<i32> =
-            layout.chips.iter().map(|(_, chip)| chip.y as i32).collect();
-        assert_eq!(rows.len(), 3);
-        for (_, chip) in &layout.chips {
-            assert!(chip.x >= 0.0 && chip.x + chip.width <= 360.0);
-            assert!(chip.y + chip.height <= layout.hint_y);
-        }
-        assert!(layout.height > layout.hint_y);
-        // The box is the same size as before when there is nothing to pick from.
-        assert_eq!(name_box_layout(&[]).height, 136.0);
-        // The box still sits above the keys.
-        let area = name_box_bounds(bounds(), &names);
-        assert!(area.y + area.height <= bounds().height - crate::editor::piano::STRIP_HEIGHT);
-    }
-
-    /// A category that is not usable keeps the box open and says so.
-    #[test]
-    fn a_bad_category_keeps_the_box_open() {
-        let dir = TempDir::new("bad-category");
-        let mut graph = graph_in(&dir);
-        graph.start_name_entry();
-        let entry = graph.name_entry.as_mut().unwrap();
-        entry.name = "Fine".to_string();
-        entry.category = ".hidden".to_string();
-        graph.confirm_name_entry();
-        assert!(graph.name_entry.is_some() && graph.pending_save.is_none());
-        assert!(graph.status.is_some());
     }
 }
 
@@ -4527,6 +4432,404 @@ mod eq_tests {
         assert!(smooth_segments(&flat, 0.0, 100.0)
             .iter()
             .all(|(c1, c2, end)| c1.y == 50.0 && c2.y == 50.0 && end.y == 50.0));
+    }
+}
+
+#[cfg(test)]
+mod envelope_handle_tests {
+    use super::*;
+    use crate::dsp::envelope::EnvPhase;
+    use crate::editor::canvas::NodeEditor;
+    use crate::nodes::viewer::Live;
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Frame, Program};
+
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    const KNOBS: [KnobId; 4] = [
+        KnobId::Attack,
+        KnobId::Decay,
+        KnobId::Sustain,
+        KnobId::Release,
+    ];
+
+    fn envelope_node() -> FlodeNode {
+        let mut node = FlodeNode::new(NodeKind::Envelope, Point::new(300.0, 200.0));
+        for (id, n) in [
+            (KnobId::Attack, 0.3),
+            (KnobId::Decay, 0.5),
+            (KnobId::Sustain, 0.6),
+            (KnobId::Release, 0.4),
+        ] {
+            node.set_value(id, n);
+        }
+        node
+    }
+
+    fn values(node: &FlodeNode) -> [f32; 4] {
+        KNOBS.map(|id| node.value(id))
+    }
+
+    fn handles_of(node: &FlodeNode) -> [Point; 3] {
+        envelope_handles(node, &Live::of(node)).expect("the viewer is on show")
+    }
+
+    fn drag(node: &mut FlodeNode, handle: usize, to: Point, driven: EnvelopeDriven) {
+        let live = Live::of(node);
+        drag_envelope_handle(node, handle, to, &live, driven);
+    }
+
+    /// A graph with the envelope as its only node.
+    fn graph_of(node: FlodeNode) -> Graph {
+        Graph::with(vec![node], Vec::new())
+    }
+
+    fn send(graph: &mut Graph, event: mouse::Event, at: Point) {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor.update(Event::Mouse(event), BOUNDS, Cursor::Available(at));
+    }
+
+    fn press(graph: &mut Graph, at: Point) {
+        send(graph, mouse::Event::ButtonPressed(mouse::Button::Left), at);
+    }
+
+    fn release(graph: &mut Graph, at: Point) {
+        send(graph, mouse::Event::ButtonReleased(mouse::Button::Left), at);
+    }
+
+    #[test]
+    fn handle_positions_follow_the_knob_values() {
+        let mut node = envelope_node();
+        let bounds = node.viewer_bounds().unwrap();
+        let before = handles_of(&node);
+        // The attack and the release sit on the top and bottom edges, and the decay at the sustain.
+        assert!((before[0].y - bounds.y).abs() < 1e-3);
+        assert!((before[2].y - (bounds.y + bounds.height)).abs() < 1e-3);
+        assert!((before[1].y - (bounds.y + 0.4 * bounds.height)).abs() < 0.5);
+        assert!(before[0].x < before[1].x && before[1].x < before[2].x);
+        node.set_value(KnobId::Sustain, 0.2);
+        node.set_value(KnobId::Release, 1.0);
+        let after = handles_of(&node);
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].x, before[1].x);
+        assert!(after[1].y > before[1].y);
+        assert!(after[2].x > before[2].x);
+        assert!(after[2].x <= bounds.x + bounds.width + 1e-3);
+    }
+
+    #[test]
+    fn dragging_the_attack_handle_sets_only_attack() {
+        let mut node = envelope_node();
+        let before = values(&node);
+        let bounds = node.viewer_bounds().unwrap();
+        drag(
+            &mut node,
+            0,
+            Point::new(
+                bounds.x + 0.2 * bounds.width,
+                bounds.y + bounds.height / 2.0,
+            ),
+            EnvelopeDriven::default(),
+        );
+        let after = values(&node);
+        assert_ne!(after[0], before[0]);
+        assert_eq!(after[1..], before[1..]);
+        // The handle lands under the cursor's x, and its y stays on the top edge.
+        let handle = handles_of(&node)[0];
+        assert!((handle.x - (bounds.x + 0.2 * bounds.width)).abs() < 0.5);
+        assert!((handle.y - bounds.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn dragging_the_decay_handle_sets_decay_and_sustain() {
+        let mut node = envelope_node();
+        let before = values(&node);
+        let bounds = node.viewer_bounds().unwrap();
+        let target = Point::new(
+            bounds.x + 0.35 * bounds.width,
+            bounds.y + 0.25 * bounds.height,
+        );
+        drag(&mut node, 1, target, EnvelopeDriven::default());
+        let after = values(&node);
+        assert_ne!(after[1], before[1]);
+        assert!((after[2] - 0.75).abs() < 0.01, "{}", after[2]);
+        assert_eq!((after[0], after[3]), (before[0], before[3]));
+        let handle = handles_of(&node)[1];
+        assert!((handle.x - target.x).abs() < 0.5 && (handle.y - target.y).abs() < 0.5);
+    }
+
+    #[test]
+    fn dragging_the_release_handle_sets_only_release() {
+        let mut node = envelope_node();
+        let before = values(&node);
+        let bounds = node.viewer_bounds().unwrap();
+        drag(
+            &mut node,
+            2,
+            Point::new(bounds.x + 0.9 * bounds.width, bounds.y + 3.0),
+            EnvelopeDriven::default(),
+        );
+        let after = values(&node);
+        assert!(after[3] > before[3]);
+        assert_eq!(after[..3], before[..3]);
+    }
+
+    #[test]
+    fn a_drag_past_the_box_stops_at_its_edges() {
+        let mut node = envelope_node();
+        drag(
+            &mut node,
+            1,
+            Point::new(-500.0, -500.0),
+            EnvelopeDriven::default(),
+        );
+        assert_eq!(node.value(KnobId::Decay), 0.0);
+        assert_eq!(node.value(KnobId::Sustain), 1.0);
+        drag(
+            &mut node,
+            1,
+            Point::new(5000.0, 5000.0),
+            EnvelopeDriven::default(),
+        );
+        assert_eq!(node.value(KnobId::Decay), 1.0);
+        assert_eq!(node.value(KnobId::Sustain), 0.0);
+        for handle in [0, 2] {
+            drag(
+                &mut node,
+                handle,
+                Point::new(5000.0, 5000.0),
+                EnvelopeDriven::default(),
+            );
+        }
+        assert!((node.value(KnobId::Attack) - 1.0).abs() < 1e-4);
+        assert!((node.value(KnobId::Release) - 1.0).abs() < 1e-4);
+        drag(
+            &mut node,
+            0,
+            Point::new(-500.0, 0.0),
+            EnvelopeDriven::default(),
+        );
+        assert_eq!(node.value(KnobId::Attack), 0.0);
+    }
+
+    /// A driven knob stays where its wire puts it, and the other knob of the handle still moves.
+    #[test]
+    fn a_drag_leaves_driven_knobs_alone() {
+        let mut node = envelope_node();
+        let bounds = node.viewer_bounds().unwrap();
+        let target = Point::new(bounds.x + 0.7 * bounds.width, bounds.y + 2.0);
+        let before = values(&node);
+        drag(
+            &mut node,
+            1,
+            target,
+            EnvelopeDriven {
+                time: true,
+                level: false,
+            },
+        );
+        assert_eq!(node.value(KnobId::Decay), before[1]);
+        assert!(node.value(KnobId::Sustain) > before[2]);
+        let sustain = node.value(KnobId::Sustain);
+        drag(
+            &mut node,
+            1,
+            Point::new(bounds.x + 0.7 * bounds.width, bounds.y + bounds.height),
+            EnvelopeDriven {
+                time: false,
+                level: true,
+            },
+        );
+        assert_eq!(node.value(KnobId::Sustain), sustain);
+        assert_ne!(node.value(KnobId::Decay), before[1]);
+        drag(
+            &mut node,
+            2,
+            target,
+            EnvelopeDriven {
+                time: true,
+                level: false,
+            },
+        );
+        assert_eq!(node.value(KnobId::Release), before[3]);
+    }
+
+    /// A stage after a driven one is placed by where the wire puts it, so the drag lands under
+    /// the cursor on the drawn curve.
+    #[test]
+    fn a_drag_reads_the_stages_before_it_from_the_live_values() {
+        let mut node = envelope_node();
+        let live = Live::new(&node, |id| (id == KnobId::Attack).then_some(1.0));
+        let bounds = node.viewer_bounds().unwrap();
+        let target = Point::new(bounds.x + 0.45 * bounds.width, bounds.y + 5.0);
+        drag_envelope_handle(&mut node, 1, target, &live, EnvelopeDriven::default());
+        let live = Live::new(&node, |id| (id == KnobId::Attack).then_some(1.0));
+        let handle = envelope_handles(&node, &live).unwrap()[1];
+        assert!((handle.x - target.x).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_driven_knob_moves_its_handle() {
+        let node = envelope_node();
+        let own = handles_of(&node);
+        let live = Live::new(&node, |id| match id {
+            KnobId::Decay => Some(1.0),
+            KnobId::Sustain => Some(0.0),
+            _ => None,
+        });
+        let driven = envelope_handles(&node, &live).unwrap();
+        assert_eq!(driven[0], own[0]);
+        assert!(driven[1].x > own[1].x && driven[1].y > own[1].y);
+        assert!(driven[2].x > own[2].x);
+        assert_eq!(envelope_handle_at(&node, &live, driven[1]), Some(1));
+        assert_eq!(envelope_handle_at(&node, &live, own[1]), None);
+    }
+
+    #[test]
+    fn a_press_grabs_the_handle_it_lands_on() {
+        let node = envelope_node();
+        let live = Live::of(&node);
+        for (handle, at) in handles_of(&node).iter().enumerate() {
+            assert_eq!(envelope_handle_at(&node, &live, *at), Some(handle));
+            let near = Point::new(at.x + 4.0, at.y + 4.0);
+            assert_eq!(envelope_handle_at(&node, &live, near), Some(handle));
+        }
+        let at = handles_of(&node)[1];
+        let far = Point::new(at.x, at.y + 30.0);
+        assert_eq!(envelope_handle_at(&node, &live, far), None);
+    }
+
+    #[test]
+    fn a_collapsed_envelope_has_no_handles() {
+        let mut node = envelope_node();
+        let at = handles_of(&node)[1];
+        assert_eq!(envelope_handle_at(&node, &Live::of(&node), at), Some(1));
+        node.collapsed = true;
+        assert!(envelope_handles(&node, &Live::of(&node)).is_none());
+        assert_eq!(envelope_handle_at(&node, &Live::of(&node), at), None);
+    }
+
+    #[test]
+    fn other_nodes_have_no_envelope_handles() {
+        let node = FlodeNode::new(NodeKind::Filter, Point::new(300.0, 200.0));
+        assert!(envelope_handles(&node, &Live::of(&node)).is_none());
+    }
+
+    /// A press on a handle selects the node and starts a drag. The cursor then moves the knobs,
+    /// and the release ends the drag.
+    #[test]
+    fn pressing_and_dragging_a_handle_turns_the_knobs() {
+        let mut graph = graph_of(envelope_node());
+        let bounds = graph.nodes[0].viewer_bounds().unwrap();
+        let start = handles_of(&graph.nodes[0])[1];
+        press(&mut graph, start);
+        assert_eq!(graph.selected, Some(0));
+        assert_eq!(
+            graph.interaction,
+            Interaction::EnvelopeHandle { node: 0, handle: 1 }
+        );
+        let to = Point::new(
+            bounds.x + 0.35 * bounds.width,
+            bounds.y + 0.1 * bounds.height,
+        );
+        send(&mut graph, mouse::Event::CursorMoved { position: to }, to);
+        let handle = handles_of(&graph.nodes[0])[1];
+        assert!((handle.x - to.x).abs() < 0.5 && (handle.y - to.y).abs() < 0.5);
+        assert!((graph.nodes[0].value(KnobId::Sustain) - 0.9).abs() < 0.01);
+        release(&mut graph, to);
+        assert_eq!(graph.interaction, Interaction::Idle);
+    }
+
+    #[test]
+    fn a_double_click_resets_the_handles_knobs() {
+        for (handle, reset, kept) in [
+            (
+                0,
+                vec![KnobId::Attack],
+                vec![KnobId::Decay, KnobId::Sustain],
+            ),
+            (
+                1,
+                vec![KnobId::Decay, KnobId::Sustain],
+                vec![KnobId::Attack, KnobId::Release],
+            ),
+            (
+                2,
+                vec![KnobId::Release],
+                vec![KnobId::Attack, KnobId::Sustain],
+            ),
+        ] {
+            let mut graph = graph_of(envelope_node());
+            let at = handles_of(&graph.nodes[0])[handle];
+            let before = values(&graph.nodes[0]);
+            press(&mut graph, at);
+            release(&mut graph, at);
+            press(&mut graph, at);
+            for id in reset {
+                assert_eq!(graph.nodes[0].value(id), id.default_normalized(), "{id:?}");
+            }
+            for id in kept {
+                let place = KNOBS.iter().position(|k| *k == id).unwrap();
+                assert_eq!(graph.nodes[0].value(id), before[place], "{id:?}");
+            }
+            // The second press ended the gesture, so a move does not drag.
+            assert_eq!(graph.interaction, Interaction::Idle);
+        }
+    }
+
+    #[test]
+    fn a_press_on_the_box_away_from_a_handle_starts_no_drag() {
+        let mut graph = graph_of(envelope_node());
+        let bounds = graph.nodes[0].viewer_bounds().unwrap();
+        let before = values(&graph.nodes[0]);
+        let at = Point::new(
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        );
+        assert_eq!(
+            envelope_handle_at(&graph.nodes[0], &Live::of(&graph.nodes[0]), at),
+            None
+        );
+        press(&mut graph, at);
+        assert_eq!(graph.interaction, Interaction::Idle);
+        assert_eq!(graph.selected, Some(0));
+        send(
+            &mut graph,
+            mouse::Event::CursorMoved { position: at },
+            Point::new(at.x + 20.0, at.y),
+        );
+        assert_eq!(values(&graph.nodes[0]), before);
+    }
+
+    /// The viewer draws with the handles, held and not, and with a live voice's dot on the curve.
+    #[test]
+    fn the_viewer_draws_with_a_live_voice() {
+        let mut graph = graph_of(envelope_node());
+        let mut levels = ControlLevels::default();
+        for phase in [
+            EnvPhase::Attack,
+            EnvPhase::Decay,
+            EnvPhase::Sustain,
+            EnvPhase::Release,
+        ] {
+            levels.envelope_phase[0] = Some(phase);
+            levels.envelope[0] = 0.4;
+            for held in [false, true] {
+                graph.interaction = if held {
+                    Interaction::EnvelopeHandle { node: 0, handle: 1 }
+                } else {
+                    Interaction::Idle
+                };
+                let mut frame = Frame::new(BOUNDS.size());
+                draw_viewer(&mut frame, 0, &graph, levels);
+            }
+        }
+        draw_editor(&graph, levels, [0; 2], [0.0; 2], BOUNDS);
     }
 }
 
@@ -6223,5 +6526,456 @@ mod monitor_wiring_tests {
         let (graph, _) = graph_with_monitor();
         let patch = graph.wiring().patch();
         assert!(patch.lanes[0].is_active());
+    }
+}
+
+#[cfg(test)]
+mod lfo_curve_tests {
+    use super::*;
+    use crate::dsp::curve::{Curve, MAX_CURVE_POINTS, MIN_GAP};
+    use crate::editor::canvas::{Message, NodeEditor};
+    use crate::nodes::lfo::{self, LfoShape};
+    use crate::presets::{self, Preset};
+    use nih_plug_iced::mouse;
+    use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+
+    const BOUNDS: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    /// Where the Wave dropdown's Custom row is.
+    const CUSTOM: usize = 5;
+
+    fn lfo_node() -> FlodeNode {
+        let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(300.0, 200.0));
+        node.choose(0, CUSTOM);
+        node
+    }
+
+    fn graph_of(node: FlodeNode) -> Graph {
+        Graph::with(vec![node], Vec::new())
+    }
+
+    /// Where curve position `(x, y)` is on screen for the node.
+    fn spot(node: &FlodeNode, x: f32, y: f32) -> Point {
+        let bounds = node.viewer_bounds().expect("the viewer is on show");
+        Point::new(
+            bounds.x + x * bounds.width,
+            bounds.y + (1.0 - y) * bounds.height,
+        )
+    }
+
+    fn send(graph: &mut Graph, event: mouse::Event, at: Point) -> Option<Message> {
+        let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        editor
+            .update(Event::Mouse(event), BOUNDS, Cursor::Available(at))
+            .1
+    }
+
+    fn press(graph: &mut Graph, at: Point) -> Option<Message> {
+        send(graph, mouse::Event::ButtonPressed(mouse::Button::Left), at)
+    }
+
+    fn release(graph: &mut Graph, at: Point) -> Option<Message> {
+        send(graph, mouse::Event::ButtonReleased(mouse::Button::Left), at)
+    }
+
+    fn click(graph: &mut Graph, at: Point) {
+        press(graph, at);
+        release(graph, at);
+    }
+
+    fn double_click(graph: &mut Graph, at: Point) {
+        click(graph, at);
+        click(graph, at);
+    }
+
+    fn move_to(graph: &mut Graph, to: Point) {
+        send(graph, mouse::Event::CursorMoved { position: to }, to);
+    }
+
+    fn points(graph: &Graph) -> Vec<[f32; 2]> {
+        lfo::curve(&graph.nodes[0]).points().to_vec()
+    }
+
+    #[test]
+    fn the_wave_dropdown_ends_with_custom_and_keeps_the_old_rows() {
+        let node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        let labels = node.dropdowns()[0].labels;
+        assert_eq!(
+            labels,
+            ["Sine", "Saw", "Square", "Triangle", "Noise", "Custom"]
+        );
+        for (row, wave) in Waveform::ALL.iter().enumerate() {
+            let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+            node.choose(0, row);
+            assert_eq!(lfo::shape(&node), LfoShape::Wave(*wave));
+            assert_eq!(lfo::waveform(&node), *wave);
+        }
+        // The oscillator's list does not change.
+        let osc = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        assert_eq!(osc.dropdowns()[0].labels.len(), 5);
+        assert_eq!(lfo::shape(&lfo_node()), LfoShape::Custom);
+    }
+
+    #[test]
+    fn the_node_has_a_one_shot_switch_after_retrigger() {
+        let node = FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0));
+        assert_eq!(node.switch_labels(), &["Retrigger", "One shot"]);
+        assert!(node.switch_shown(1));
+    }
+
+    #[test]
+    fn a_new_lfo_has_the_default_curve() {
+        let graph = graph_of(lfo_node());
+        assert_eq!(points(&graph), Curve::default().points());
+    }
+
+    #[test]
+    fn handles_sit_on_the_curve_points() {
+        let node = lfo_node();
+        let handles = lfo_handles(&node).expect("a custom LFO has handles");
+        assert_eq!(handles.len(), 3);
+        assert_eq!(handles[0], spot(&node, 0.0, 0.0));
+        assert_eq!(handles[1], spot(&node, 0.5, 1.0));
+        assert_eq!(handles[2], spot(&node, 1.0, 0.0));
+    }
+
+    #[test]
+    fn a_shape_that_is_not_custom_has_no_handles() {
+        let mut node = lfo_node();
+        let at = spot(&node, 0.5, 1.0);
+        assert_eq!(lfo_handle_at(&node, at), Some(1));
+        node.choose(0, 1);
+        assert!(lfo_handles(&node).is_none());
+        assert_eq!(lfo_handle_at(&node, at), None);
+    }
+
+    #[test]
+    fn a_collapsed_lfo_has_no_handles() {
+        let mut node = lfo_node();
+        node.collapsed = true;
+        assert!(lfo_handles(&node).is_none());
+    }
+
+    #[test]
+    fn other_nodes_have_no_lfo_handles() {
+        let mut node = FlodeNode::new(NodeKind::Envelope, Point::new(300.0, 200.0));
+        node.choices = vec![CUSTOM];
+        assert!(lfo_handles(&node).is_none());
+    }
+
+    #[test]
+    fn dragging_a_point_moves_it() {
+        let mut graph = graph_of(lfo_node());
+        let start = spot(&graph.nodes[0], 0.5, 1.0);
+        press(&mut graph, start);
+        assert_eq!(graph.selected, Some(0));
+        assert_eq!(
+            graph.interaction,
+            Interaction::LfoPoint { node: 0, point: 1 }
+        );
+        let to = spot(&graph.nodes[0], 0.3, 0.4);
+        move_to(&mut graph, to);
+        let moved = points(&graph)[1];
+        assert!((moved[0] - 0.3).abs() < 1e-4 && (moved[1] - 0.4).abs() < 1e-4);
+        assert!(matches!(
+            release(&mut graph, to),
+            Some(Message::GraphChanged)
+        ));
+        assert_eq!(graph.interaction, Interaction::Idle);
+        assert_eq!(points(&graph).len(), 3);
+    }
+
+    #[test]
+    fn a_drag_stops_at_the_neighbours_and_the_box() {
+        let mut node = lfo_node();
+        let mut curve = lfo::curve(&node);
+        curve.insert(0.25, 0.5);
+        lfo::set_curve(&mut node, &curve);
+        let mut graph = graph_of(node);
+        // The middle point is index 2 now. Dragging it far left stops short of its neighbour.
+        let start = spot(&graph.nodes[0], 0.5, 1.0);
+        press(&mut graph, start);
+        let far_left = spot(&graph.nodes[0], -3.0, 5.0);
+        move_to(&mut graph, far_left);
+        let point = points(&graph)[2];
+        assert!((point[0] - (0.25 + MIN_GAP)).abs() < 1e-4, "{point:?}");
+        assert_eq!(point[1], 1.0);
+        let far_right = spot(&graph.nodes[0], 4.0, -5.0);
+        move_to(&mut graph, far_right);
+        let point = points(&graph)[2];
+        assert!((point[0] - (1.0 - MIN_GAP)).abs() < 1e-4, "{point:?}");
+        assert_eq!(point[1], 0.0);
+        release(&mut graph, far_right);
+        assert_eq!(points(&graph).len(), 4);
+    }
+
+    #[test]
+    fn an_end_point_keeps_its_x() {
+        let mut graph = graph_of(lfo_node());
+        for (x, index) in [(0.0, 0), (1.0, 2)] {
+            let start = spot(&graph.nodes[0], x, 0.0);
+            press(&mut graph, start);
+            assert_eq!(
+                graph.interaction,
+                Interaction::LfoPoint {
+                    node: 0,
+                    point: index
+                }
+            );
+            let to = spot(&graph.nodes[0], 0.4, 0.6);
+            move_to(&mut graph, to);
+            release(&mut graph, to);
+            let end = points(&graph)[index];
+            assert!(end[0] == x && (end[1] - 0.6).abs() < 1e-4, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn a_double_click_on_empty_space_adds_a_point_there() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        click(&mut graph, at);
+        assert_eq!(points(&graph).len(), 3);
+        press(&mut graph, at);
+        assert_eq!(points(&graph).len(), 4);
+        let added = points(&graph)[1];
+        assert!((added[0] - 0.25).abs() < 1e-4 && (added[1] - 0.2).abs() < 1e-4);
+        // No drag is left running, so the release and a move change nothing.
+        assert_eq!(graph.interaction, Interaction::Idle);
+        release(&mut graph, at);
+        let away = spot(&graph.nodes[0], 0.9, 0.9);
+        move_to(&mut graph, away);
+        assert_eq!(points(&graph)[1], added);
+    }
+
+    #[test]
+    fn a_single_press_on_empty_space_adds_nothing() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        press(&mut graph, at);
+        release(&mut graph, at);
+        assert_eq!(points(&graph).len(), 3);
+        // The press still selects the node, as a press on its body does.
+        assert_eq!(graph.selected, Some(0));
+        assert_eq!(graph.interaction, Interaction::Idle);
+        // Two slow presses are two single presses. Another spot far away is not a double click.
+        let elsewhere = spot(&graph.nodes[0], 0.8, 0.8);
+        click(&mut graph, elsewhere);
+        assert_eq!(points(&graph).len(), 3);
+    }
+
+    #[test]
+    fn a_double_click_on_an_inner_point_removes_it() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        double_click(&mut graph, at);
+        assert_eq!(points(&graph).len(), 4);
+        let inner = spot(&graph.nodes[0], 0.25, 0.2);
+        press(&mut graph, inner);
+        assert_eq!(
+            graph.interaction,
+            Interaction::LfoPoint { node: 0, point: 1 }
+        );
+        release(&mut graph, inner);
+        click(&mut graph, inner);
+        assert_eq!(points(&graph).len(), 3);
+        assert_eq!(points(&graph), Curve::default().points());
+        assert_eq!(graph.interaction, Interaction::Idle);
+    }
+
+    #[test]
+    fn a_double_click_on_an_end_point_does_nothing() {
+        let mut graph = graph_of(lfo_node());
+        for x in [0.0, 1.0] {
+            let at = spot(&graph.nodes[0], x, 0.0);
+            click(&mut graph, at);
+            press(&mut graph, at);
+            assert_eq!(graph.interaction, Interaction::Idle);
+            release(&mut graph, at);
+            assert_eq!(points(&graph), Curve::default().points());
+        }
+    }
+
+    #[test]
+    fn there_is_no_adding_past_sixteen_points() {
+        let mut node = lfo_node();
+        node.points = (0..MAX_CURVE_POINTS)
+            .map(|n| [n as f32 / (MAX_CURVE_POINTS - 1) as f32, 0.9])
+            .collect();
+        let mut graph = graph_of(node);
+        assert_eq!(points(&graph).len(), MAX_CURVE_POINTS);
+        assert!(graph.status.is_none());
+        let before = points(&graph);
+        let at = spot(&graph.nodes[0], 0.52, 0.1);
+        double_click(&mut graph, at);
+        assert_eq!(points(&graph), before);
+        let (text, _) = graph.status.clone().expect("the status line says so");
+        assert!(text.contains("16"), "{text}");
+    }
+
+    #[test]
+    fn a_double_click_does_nothing_when_the_wave_is_not_custom() {
+        let mut node = lfo_node();
+        node.choose(0, 0);
+        let mut graph = graph_of(node);
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        double_click(&mut graph, at);
+        let on_point = spot(&graph.nodes[0], 0.5, 1.0);
+        double_click(&mut graph, on_point);
+        assert!(graph.nodes[0].points.is_empty());
+        assert_eq!(graph.interaction, Interaction::Idle);
+        assert!(graph.status.is_none());
+    }
+
+    #[test]
+    fn an_edit_asks_for_the_patch_to_be_published() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        click(&mut graph, at);
+        assert!(matches!(press(&mut graph, at), Some(Message::GraphChanged)));
+        release(&mut graph, at);
+        let handle = spot(&graph.nodes[0], 0.5, 1.0);
+        assert!(matches!(
+            press(&mut graph, handle),
+            Some(Message::GraphChanged)
+        ));
+        let to = spot(&graph.nodes[0], 0.5, 0.5);
+        let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
+        let moved = editor.update(
+            Event::Mouse(mouse::Event::CursorMoved { position: to }),
+            BOUNDS,
+            Cursor::Available(to),
+        );
+        assert!(matches!(moved.1, Some(Message::GraphChanged)));
+    }
+
+    #[test]
+    fn choosing_custom_keeps_the_points() {
+        let mut node = FlodeNode::new(NodeKind::Lfo, Point::new(300.0, 200.0));
+        node.points = vec![[0.0, 0.1], [0.4, 0.9], [1.0, 0.5]];
+        node.choose(0, 2);
+        node.choose(0, CUSTOM);
+        assert_eq!(node.points, vec![[0.0, 0.1], [0.4, 0.9], [1.0, 0.5]]);
+        node.choose(0, 1);
+        assert_eq!(node.points.len(), 3);
+    }
+
+    #[test]
+    fn the_curve_and_one_shot_reach_the_patch() {
+        let mut graph = minimal_graph();
+        let index = graph.add_node(NodeKind::Lfo, Point::new(0.0, 200.0));
+        let settings = graph.patch().lfos[0].unwrap();
+        assert!(!settings.one_shot);
+        assert_eq!(settings.curve, None);
+
+        graph.nodes[index].points = vec![[0.0, 0.2], [0.5, 0.8], [1.0, 0.4]];
+        // Still a built-in wave, so the points are not sent.
+        assert_eq!(graph.patch().lfos[0].unwrap().curve, None);
+
+        graph.nodes[index].choose(0, CUSTOM);
+        graph.nodes[index].set_switch(1, true);
+        let settings = graph.patch().lfos[0].unwrap();
+        assert!(settings.one_shot);
+        assert!(!settings.retrigger);
+        assert_eq!(
+            settings.curve,
+            Curve::from_points(&[[0.0, 0.2], [0.5, 0.8], [1.0, 0.4]])
+        );
+
+        // Custom with no points of its own sends the default.
+        graph.nodes[index].points.clear();
+        assert_eq!(graph.patch().lfos[0].unwrap().curve, Some(Curve::default()));
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_points() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        double_click(&mut graph, at);
+        let copy = graph.duplicate_node(0).expect("an LFO can be copied");
+        assert_eq!(graph.nodes[copy].points, graph.nodes[0].points);
+        assert_eq!(graph.nodes[copy].points.len(), 4);
+        // Editing the copy leaves the original alone.
+        graph.nodes[copy].points.clear();
+        assert_eq!(graph.nodes[0].points.len(), 4);
+    }
+
+    #[test]
+    fn saving_and_loading_keeps_the_points() {
+        let mut graph = graph_of(lfo_node());
+        let at = spot(&graph.nodes[0], 0.25, 0.2);
+        double_click(&mut graph, at);
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.nodes[0].points, graph.nodes[0].points);
+        assert_eq!(lfo::shape(&loaded.nodes[0]), LfoShape::Custom);
+        // Through the JSON a project or preset holds.
+        let json = serde_json::to_string(&graph.to_saved()).unwrap();
+        let saved: SavedGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(Graph::from_saved(&saved).nodes[0].points.len(), 4);
+    }
+
+    #[test]
+    fn a_preset_keeps_the_points() {
+        let dir = std::env::temp_dir().join(format!("flode-lfo-curve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut graph = graph_of(lfo_node());
+        graph.nodes[0].points = vec![[0.0, 0.3], [0.2, 1.0], [0.7, 0.0], [1.0, 0.6]];
+        let preset = Preset {
+            name: "Curve".to_string(),
+            category: String::new(),
+            graph: graph.to_saved(),
+            macros: [0.0; 4],
+        };
+        presets::save_in(&dir, &preset).unwrap();
+        let mut fresh = graph_of(FlodeNode::new(NodeKind::Lfo, Point::new(0.0, 0.0)));
+        fresh.preset_dir = Some(dir.clone());
+        assert!(fresh.load_preset("", "Curve"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            fresh.nodes[0].points,
+            vec![[0.0, 0.3], [0.2, 1.0], [0.7, 0.0], [1.0, 0.6]]
+        );
+        assert_eq!(lfo::shape(&fresh.nodes[0]), LfoShape::Custom);
+    }
+
+    /// The JSON of a one node graph, with `edit` applied to its first node.
+    fn load_with(edit: impl Fn(&mut serde_json::Map<String, serde_json::Value>)) -> Graph {
+        let mut value = serde_json::to_value(graph_of(lfo_node()).to_saved()).unwrap();
+        let node = value["nodes"][0].as_object_mut().unwrap();
+        edit(node);
+        let saved: SavedGraph = serde_json::from_value(value).unwrap();
+        Graph::from_saved(&saved)
+    }
+
+    #[test]
+    fn a_save_without_points_loads_the_default_curve() {
+        let graph = load_with(|node| {
+            node.remove("points");
+        });
+        assert!(graph.nodes[0].points.is_empty());
+        assert_eq!(lfo::curve(&graph.nodes[0]), Curve::default());
+        assert_eq!(graph.patch().lfos[0].unwrap().curve, Some(Curve::default()));
+    }
+
+    #[test]
+    fn points_that_make_no_curve_load_as_the_default() {
+        for bad in [
+            serde_json::json!([[0.0, 0.0]]),
+            serde_json::json!([[0.0, 0.0], [0.6, 1.0], [0.4, 0.0], [1.0, 0.0]]),
+            serde_json::json!([[0.0, 0.0], [0.5, 1.5], [1.0, 0.0]]),
+            serde_json::json!([[0.1, 0.0], [1.0, 0.0]]),
+            serde_json::json!((0..17).map(|n| [n as f32 / 16.0, 0.5]).collect::<Vec<_>>()),
+        ] {
+            let graph = load_with(|node| {
+                node.insert("points".to_string(), bad.clone());
+            });
+            assert!(graph.nodes[0].points.is_empty(), "{bad}");
+            assert_eq!(lfo::curve(&graph.nodes[0]), Curve::default());
+        }
     }
 }
