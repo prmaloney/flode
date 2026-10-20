@@ -352,6 +352,17 @@ pub(super) fn draw_curve(frame: &mut Frame, curve: &[Point; 4], color: Color, wi
 /// widest layer is the faintest.
 const WIRE_GLOW: [(f32, f32); 2] = [(6.0, 0.04), (3.0, 0.08)];
 
+/// The header tag of an LFO or envelope that is past the limit and so makes no signal.
+pub(super) fn over_limit_label(graph: &Graph, index: usize) -> Option<&'static str> {
+    let wiring = graph.wiring();
+    let running = match graph.nodes[index].kind {
+        NodeKind::Lfo => wiring.lfo_index(index).is_some(),
+        NodeKind::Envelope => wiring.envelope_index(index).is_some(),
+        _ => true,
+    };
+    (!running).then_some("Over limit")
+}
+
 pub(super) fn draw_node(
     frame: &mut Frame,
     index: usize,
@@ -362,8 +373,11 @@ pub(super) fn draw_node(
     let node = &graph.nodes[index];
     let zoom = graph.view.zoom;
     let bounds = node.bounds();
-    // A muted or bypassed node is darker, and says which in its header.
-    let off = node.bypass_label();
+    // A muted or bypassed node is darker, and says which in its header. So is an LFO or envelope
+    // past the ones the audio thread runs, since it makes no signal.
+    let off = node
+        .bypass_label()
+        .or_else(|| over_limit_label(graph, index));
     let (body_color, header_color) = if off.is_some() {
         (NODE_OFF_BODY_COLOR, NODE_OFF_HEADER_COLOR)
     } else {

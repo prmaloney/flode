@@ -279,6 +279,8 @@ allocation on the audio thread, but how it sounds is still being tuned by ear. K
 
 - There are four instances of each effect kind, and four filters that run after an effect. A fifth
   passes its input through. The same goes for monitors, which show nothing past the fourth.
+- A patch runs up to 8 LFOs and 8 envelopes, counted in the order the nodes were added. One past
+  that is dimmed and tagged Over limit, and makes no signal.
 - A monitor takes one stage of its slot's 16. If the monitors push a slot past the limit, that slot
   runs without them rather than going silent.
 - A patch runs up to 24 map and math nodes together. One past that makes no signal, so a knob wired

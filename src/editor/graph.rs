@@ -898,7 +898,10 @@ impl Graph {
         if saved.nodes.is_empty() {
             return Self::default();
         }
-        let nodes: Vec<FlodeNode> = saved.nodes.iter().map(SavedNode::into_node).collect();
+        let mut nodes: Vec<FlodeNode> = saved.nodes.iter().map(SavedNode::into_node).collect();
+        if saved.version < OCTAVE_SPAN_VERSION {
+            migrate_octave_span(&mut nodes);
+        }
         let links: Vec<Connection> = saved
             .links
             .iter()
@@ -936,7 +939,7 @@ impl Graph {
             .collect();
         // Oscillators used to play every note. They now play the notes wired into them, so an
         // older save gets a MIDI input wired to each one, and keeps its glide and mono settings.
-        if saved.version < SAVE_VERSION {
+        if saved.version < NOTES_VERSION {
             migrate_notes(&mut nodes, &mut connections);
         }
         let mut graph = Self::with(nodes, connections);

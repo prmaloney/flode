@@ -11,7 +11,22 @@ use serde::{Deserialize, Serialize};
 
 /// The version of the save format this build writes. A graph without one is from before
 /// oscillators took their notes from a MIDI input node.
-pub(super) const SAVE_VERSION: u32 = 1;
+pub(super) const SAVE_VERSION: u32 = 2;
+
+/// The first version whose oscillators take their notes from a MIDI input node.
+pub(super) const NOTES_VERSION: u32 = 1;
+
+/// Saves from before this version have an Octave knob that spans -2 to 2. It spans -4 to 4 now.
+pub(super) const OCTAVE_SPAN_VERSION: u32 = 2;
+
+/// Rescales the Octave knob of a save from before it spanned -4 to 4, so each oscillator keeps
+/// its pitch. The knob is stored from 0 to 1, so the old position moves toward the middle.
+pub(super) fn migrate_octave_span(nodes: &mut [FlodeNode]) {
+    for node in nodes {
+        let old = node.value(KnobId::Octave);
+        node.set_value(KnobId::Octave, 0.5 + (old - 0.5) / 2.0);
+    }
+}
 
 /// The node graph as saved with the project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

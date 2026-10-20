@@ -9,7 +9,7 @@ use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::math::MathOp;
 
 /// The most LFO nodes that drive knobs. Extra LFOs make no signal.
-pub const MAX_LFOS: usize = 2;
+pub const MAX_LFOS: usize = 8;
 
 /// Where a control signal comes from. The indices are bytes, since every route carries a source
 /// and a patch holds many routes.

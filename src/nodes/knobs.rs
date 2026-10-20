@@ -56,7 +56,7 @@ pub enum KnobId {
     Coarse,
     /// An oscillator's fine transpose in cents, from -100 to 100.
     Fine,
-    /// An oscillator's transpose in octaves, from -2 to 2.
+    /// An oscillator's transpose in octaves, from -4 to 4.
     Octave,
     /// A mix node's blend, from 0.0 (just signal A) to 1.0 (fully the chosen combination).
     Mix,
@@ -336,8 +336,8 @@ impl KnobId {
                 max: 100.0,
             },
             KnobId::Octave => FloatRange::Linear {
-                min: -2.0,
-                max: 2.0,
+                min: -4.0,
+                max: 4.0,
             },
             KnobId::Mix
             | KnobId::Spread

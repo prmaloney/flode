@@ -5,7 +5,7 @@ use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::oscillator;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port};
-use crate::patch::control::{ControlLevels, MapStage, Source, MAX_ENVELOPES};
+use crate::patch::control::{ControlLevels, MapStage, Source, MAX_ENVELOPES, MAX_LFOS};
 use crate::patch::stage::{LaneGraph, StageParams};
 use nih_plug_iced::{Point, Rectangle};
 
@@ -304,7 +304,7 @@ mod lfo_and_category_tests {
         assert_eq!(route.source, Source::Lfo(0));
         let at = |lfo: f32| {
             route.apply(&ControlLevels {
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 ..ControlLevels::default()
             })
         };
@@ -317,20 +317,32 @@ mod lfo_and_category_tests {
         assert!((rate.plain(&ControlLevels::default()) - default).abs() < 1e-3);
     }
 
-    /// The first LFO is the one the audio thread runs. Later LFOs make no signal.
+    /// The first eight LFOs are the ones the audio thread runs. Later LFOs make no signal.
     #[test]
     fn only_the_first_lfos_are_run() {
         let mut graph = minimal_graph();
         let mut lfos = Vec::new();
-        for x in 0..3 {
+        for x in 0..9 {
             let lfo = graph.add_node(NodeKind::Lfo, Point::new(x as f32 * 10.0, 200.0));
             graph.connect(lfo, Port::Shape, 1, Port::Knob(KnobId::Gain));
             lfos.push(lfo);
         }
-        // The third LFO is past the two the audio thread runs.
-        assert_eq!(graph.wiring().lfo_index(lfos[2]), None);
-        assert_eq!(graph.wiring().lfo_index(lfos[1]), Some(1));
+        // The ninth LFO is past the eight the audio thread runs.
+        assert_eq!(graph.wiring().lfo_index(lfos[8]), None);
+        assert_eq!(graph.wiring().lfo_index(lfos[7]), Some(7));
         assert!(graph.patch().lfos.iter().all(Option::is_some));
+    }
+
+    /// An LFO or envelope past the limit is tagged in its header.
+    #[test]
+    fn a_node_past_the_limit_is_tagged() {
+        let mut graph = minimal_graph();
+        let lfos: Vec<usize> = (0..9)
+            .map(|x| graph.add_node(NodeKind::Lfo, Point::new(x as f32 * 10.0, 200.0)))
+            .collect();
+        assert_eq!(over_limit_label(&graph, lfos[7]), None);
+        assert_eq!(over_limit_label(&graph, lfos[8]), Some("Over limit"));
+        assert_eq!(over_limit_label(&graph, 0), None);
     }
 
     /// The pill's buttons open the Driver, Util, and Effects lists, and each list holds its kinds.
@@ -567,7 +579,7 @@ mod map_curve_tests {
         let at = |lfo: f32| {
             route.apply(&wiring.with_signals(ControlLevels {
                 envelope: [0.4; MAX_ENVELOPES],
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 ..ControlLevels::default()
             }))
         };
@@ -614,7 +626,7 @@ mod map_curve_tests {
         let route = wiring.control_route(4, KnobId::Cutoff).unwrap();
         let at = |lfo: f32, envelope: f32| {
             route.apply(&wiring.with_signals(ControlLevels {
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 envelope: [envelope; MAX_ENVELOPES],
                 ..ControlLevels::default()
             }))
@@ -857,7 +869,7 @@ mod map_curve_tests {
         let at = |lfo: f32| {
             route.apply(&wiring.with_signals(ControlLevels {
                 envelope: [0.4; MAX_ENVELOPES],
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 ..ControlLevels::default()
             }))
         };
@@ -3171,6 +3183,42 @@ mod notes_tests {
         assert!(!has_notes_wire(&loaded, 0));
     }
 
+    /// The Octave knob reaches four octaves each way.
+    #[test]
+    fn the_octave_knob_spans_four_octaves() {
+        assert_eq!(KnobId::Octave.to_plain(0.0), -4.0);
+        assert_eq!(KnobId::Octave.to_plain(1.0), 4.0);
+        assert_eq!(KnobId::Octave.to_plain(0.5), 0.0);
+    }
+
+    /// A version 1 save wrote the Octave knob over -2 to 2. Loading it keeps each oscillator's
+    /// pitch.
+    #[test]
+    fn an_older_save_keeps_its_octave() {
+        let mut graph = minimal_graph();
+        let mut saved = graph.to_saved();
+        saved.version = 1;
+        for node in &mut saved.nodes {
+            for knob in &mut node.knobs {
+                if knob.0 == KnobId::Octave {
+                    // Old +1 octave, which sat at 0.75 on the old -2 to 2 span.
+                    knob.1 = 0.75;
+                }
+            }
+        }
+        graph = Graph::from_saved(&saved);
+        assert_eq!(graph.nodes[0].plain(KnobId::Octave), 1.0);
+    }
+
+    /// A current save already has the new span, so loading it changes nothing.
+    #[test]
+    fn a_current_save_keeps_its_octave() {
+        let mut graph = minimal_graph();
+        graph.nodes[0].set_value(KnobId::Octave, KnobId::Octave.to_normalized(3.0));
+        let loaded = Graph::from_saved(&graph.to_saved());
+        assert_eq!(loaded.nodes[0].plain(KnobId::Octave), 3.0);
+    }
+
     /// A pre-upgrade save with an oscillator wired to a mix, two oscillators in all, wires both.
     #[test]
     fn the_upgrade_wires_every_oscillator() {
@@ -5302,7 +5350,7 @@ mod math_node_tests {
         assert!(!graph.is_driven(1, KnobId::MathB));
         for lfo in [0.0, 0.4, 1.0] {
             let levels = ControlLevels {
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 ..ControlLevels::default()
             };
             let at = level(&graph, 2, KnobId::Cutoff, levels);
@@ -5326,7 +5374,7 @@ mod math_node_tests {
         ];
         let graph = Graph::with(nodes, links);
         let levels = |lfo: f32, envelope: f32| ControlLevels {
-            lfo: [lfo, 0.0],
+            lfo: [lfo; MAX_LFOS],
             envelope: [envelope; MAX_ENVELOPES],
             ..ControlLevels::default()
         };
@@ -5376,7 +5424,7 @@ mod math_node_tests {
         assert_eq!(table.len(), 2);
         for lfo in [0.0, 0.25, 0.5] {
             let levels = ControlLevels {
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 ..ControlLevels::default()
             };
             let at = level(&graph, 3, KnobId::Cutoff, levels);
@@ -5408,7 +5456,7 @@ mod math_node_tests {
         assert!(graph.is_driven(2, KnobId::MapOffset));
         let at = |lfo: f32| {
             let levels = ControlLevels {
-                lfo: [lfo, 0.0],
+                lfo: [lfo; MAX_LFOS],
                 envelope: [0.2; MAX_ENVELOPES],
                 ..ControlLevels::default()
             };
@@ -5753,7 +5801,7 @@ mod map_polarity_tests {
         assert!(graph.is_driven(1, KnobId::MapRange));
         let levels = |lfo_level: f32| ControlLevels {
             envelope: [1.0; MAX_ENVELOPES],
-            lfo: [lfo_level, 0.0],
+            lfo: [lfo_level; MAX_LFOS],
             ..ControlLevels::default()
         };
         // The range follows the source from -1 to +1, so the top of the swing is the center plus
