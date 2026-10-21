@@ -238,7 +238,7 @@ impl Graph {
     /// What a monitor node's instance measured, or None if the node listens to nothing that
     /// reaches an output slot.
     pub(super) fn monitor_data(&self, node: usize) -> Option<&MonitorData> {
-        instance_of(&self.wiring().monitor_pools(), &self.monitors, node)
+        instance_of(&self.monitor_pools(), &self.monitors, node)
     }
 
     pub(super) fn monitor_history_of(&self, node: usize) -> Option<&MonitorHistory> {
@@ -255,7 +255,7 @@ impl Graph {
         {
             return;
         }
-        let pools = self.wiring().monitor_pools();
+        let pools = self.monitor_pools();
         for index in 0..self.nodes.len() {
             if self.nodes[index].kind != crate::nodes::NodeKind::Monitor {
                 continue;

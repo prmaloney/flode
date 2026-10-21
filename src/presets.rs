@@ -87,11 +87,16 @@ pub fn category_of(dir: &Path, path: &Path) -> String {
 /// The path with `.flode` on the end of the whole file name, unless it already ends that way. A
 /// dotted part of the name stays, so "My.Pad" becomes "My.Pad.flode".
 pub fn with_extension(path: &Path) -> PathBuf {
-    if path.extension().is_some_and(|ext| ext == EXTENSION) {
+    with_extension_of(path, EXTENSION)
+}
+
+/// `with_extension` for any extension, which saved groups use too.
+pub fn with_extension_of(path: &Path, extension: &str) -> PathBuf {
+    if path.extension().is_some_and(|ext| ext == extension) {
         return path.to_path_buf();
     }
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{EXTENSION}"));
+    name.push(format!(".{extension}"));
     path.with_file_name(name)
 }
 
@@ -127,10 +132,15 @@ pub fn save_in(dir: &Path, preset: &Preset) -> io::Result<()> {
 /// written whole next to the target and then renamed, so a failed write never leaves half a
 /// preset.
 pub fn save_to(path: &Path, preset: &Preset) -> io::Result<()> {
+    write_json(path, preset)
+}
+
+/// `save_to` for any value that serializes, which saved groups use too.
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder)?;
     }
-    let json = serde_json::to_vec_pretty(preset)
+    let json = serde_json::to_vec_pretty(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
@@ -139,8 +149,8 @@ pub fn save_to(path: &Path, preset: &Preset) -> io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
-/// The names of the presets in one folder, sorted without regard to case.
-fn names_in(folder: &Path) -> Vec<String> {
+/// The names of the files with `extension` in one folder, sorted without regard to case.
+fn names_in(folder: &Path, extension: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -148,7 +158,7 @@ fn names_in(folder: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
-        .filter(|path| path.extension().is_some_and(|ext| ext == EXTENSION))
+        .filter(|path| path.extension().is_some_and(|ext| ext == extension))
         .filter_map(|path| Some(path.file_stem()?.to_str()?.to_string()))
         .filter(|name| !name.starts_with('.'))
         .collect();
@@ -159,9 +169,14 @@ fn names_in(folder: &Path) -> Vec<String> {
 /// Every preset in `dir`. A folder with presets in it is a category, and a folder with none is
 /// left out. A missing folder has no presets.
 pub fn library_in(dir: &Path) -> Library {
+    library_with(dir, EXTENSION)
+}
+
+/// `library_in` for the files with `extension`, which saved groups use too.
+pub fn library_with(dir: &Path, extension: &str) -> Library {
     let mut library = Library {
         categories: Vec::new(),
-        loose: names_in(dir),
+        loose: names_in(dir, extension),
     };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return library;
@@ -173,7 +188,7 @@ pub fn library_in(dir: &Path) -> Library {
         if !path.is_dir() || name.starts_with('.') {
             continue;
         }
-        let presets = names_in(&path);
+        let presets = names_in(&path, extension);
         if !presets.is_empty() {
             library.categories.push(Category {
                 name: name.to_string(),

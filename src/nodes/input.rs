@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct Input;
 
 /// The MIDI sources an input node sends. Each one is a control signal from 0.0 to 1.0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MidiSource {
     /// The last note played, over the 0 to 127 MIDI range.
     Note,

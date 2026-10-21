@@ -5,23 +5,26 @@ use crate::dsp::monitor::MonitorData;
 use crate::editor::monitor::MonitorHistory;
 use crate::editor::piano::Piano;
 use crate::engine::POOL;
+use crate::groups::{self, GroupEntry};
 use crate::nodes::connection::Connection;
 use crate::nodes::eq;
 use crate::nodes::knobs::{self, KnobId};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::mix;
 use crate::nodes::output::MAX_SLOTS;
-use crate::nodes::{Category, FlodeNode, NodeKind, Port, HEADER_HEIGHT, NODE_WIDTH};
+use crate::nodes::{Category, FlodeNode, NodeKind, Port, Signal, HEADER_HEIGHT, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
 use crate::patch::Patch;
 use crate::presets::{self, Library, Preset};
 use nih_plug_iced::keyboard::KeyCode;
-use nih_plug_iced::{Point, Rectangle, Vector};
+use nih_plug_iced::{Point, Rectangle, Size, Vector};
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 use std::time::Instant;
 
+use super::group::{FlatCache, OpenGroup};
+use super::group_ui::{Rename, DEFAULT_CANVAS};
 use super::{draw::*, menus::*, saved::*, style::*, view::*};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +200,24 @@ pub(super) fn save_dialog_start(
     (folder, file)
 }
 
+/// What a save dialog is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveKind {
+    Preset,
+    Group,
+}
+
+impl SaveKind {
+    /// The title, file filter name, and file extension the dialog shows.
+    #[cfg(not(test))]
+    fn dialog_text(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            SaveKind::Preset => ("Save preset", "Flode preset", presets::EXTENSION),
+            SaveKind::Group => ("Save group", "Flode group", groups::EXTENSION),
+        }
+    }
+}
+
 /// Graph state that persists between frames.
 pub struct Graph {
     pub(super) nodes: Vec<FlodeNode>,
@@ -265,6 +286,14 @@ pub struct Graph {
     pub(super) preset_category: String,
     /// The open preset list, read when it opened.
     pub(super) preset_list: Option<PresetMenu>,
+    /// The folder saved groups live in. None if the home folder is unknown. Tests start with none,
+    /// so no test reads or writes the real folder.
+    pub(super) group_dir: Option<PathBuf>,
+    /// The open list of saved groups, read when it opened.
+    pub(super) group_list: Option<Vec<GroupEntry>>,
+    /// The group the open save dialog will write, as it was when "Save group" was chosen. It is
+    /// None while a preset dialog is open.
+    pub(super) group_save: Option<SavedGroupFile>,
     /// The answer of the save dialog, while one is open. It holds the chosen path, or None if the
     /// user canceled.
     /// The mutex only makes the editor `Sync`, which the receiver is not.
@@ -282,6 +311,24 @@ pub struct Graph {
     pub(super) status: Option<(String, Instant)>,
     /// The last press on an LFO's viewer, to tell a double click that adds or removes a point.
     pub(super) viewer_click: Option<nih_plug_iced::mouse::Click>,
+    /// The groups that are open, outermost first. While one is open, `nodes` and `connections`
+    /// hold the graph inside the innermost one, and each entry holds the state of the graph
+    /// outside it. Empty when the root graph is shown.
+    pub(super) open_groups: Vec<OpenGroup>,
+    /// The box that renames a group, a pin, or a macro knob, while one is open.
+    pub(super) rename: Option<Rename>,
+    /// Where a press landed on the dimmed margin around an open group's pane, until its release.
+    /// A release that has not moved far closes the group. A drag does not.
+    pub(super) margin_press: Option<Point>,
+    /// The last press on a group node's header, to tell a double click that opens the group.
+    pub(super) header_click: Option<nih_plug_iced::mouse::Click>,
+    /// The size of the editor as the last event saw it. The pane of an open group, and the view
+    /// that fits its graph, follow it.
+    pub(super) canvas_size: Size,
+    /// The graph compiled with its groups expanded, for queries about the shown graph. It is
+    /// checked against a fingerprint of the graph on every read, so it needs no clearing. See
+    /// `Graph::with_flat`. A mutex, and not a `RefCell`, so the editor stays `Sync`.
+    pub(super) flat_cache: Mutex<Option<FlatCache>>,
 }
 
 /// The part of a dropdown under the cursor.
@@ -348,7 +395,7 @@ impl Default for Graph {
 
 /// Sets how many slot pins each output node shows for these wires. A wire to a pin that is not
 /// shown is invalid, so a load calls this before it checks the wires it read.
-fn show_slots(nodes: &mut [FlodeNode], connections: &[Connection]) {
+pub(super) fn show_slots(nodes: &mut [FlodeNode], connections: &[Connection]) {
     for (index, node) in nodes.iter_mut().enumerate() {
         if node.kind != NodeKind::Output {
             continue;
@@ -399,6 +446,13 @@ impl Graph {
             preset_name: None,
             preset_category: String::new(),
             preset_list: None,
+            group_dir: if cfg!(test) {
+                None
+            } else {
+                groups::directory()
+            },
+            group_list: None,
+            group_save: None,
             save_dialog: None,
             knob_entry: None,
             quick_add: None,
@@ -410,6 +464,12 @@ impl Graph {
             save_dialog_sender: None,
             status: None,
             viewer_click: None,
+            open_groups: Vec::new(),
+            rename: None,
+            margin_press: None,
+            header_click: None,
+            canvas_size: Size::new(DEFAULT_CANVAS.0, DEFAULT_CANVAS.1),
+            flat_cache: Mutex::new(None),
         }
     }
 
@@ -508,41 +568,122 @@ impl Graph {
         self.menu = None;
         self.category_menu = None;
         self.preset_list = None;
+        self.group_list = None;
         self.dropdown_menu = None;
+        // The saved groups are read now, so one saved a moment ago is in the list. A drag back from
+        // an input lists only the groups with an output pin that can feed it.
+        let groups = self
+            .read_groups()
+            .into_iter()
+            .filter_map(|entry| match feed {
+                None => Some(QuickGroup { entry, out: None }),
+                Some((to, input)) => {
+                    let node = self.load_group(&entry).ok()?;
+                    let out = self.feeding_port_of(&node, to, input)?;
+                    Some(QuickGroup {
+                        entry,
+                        out: Some(out),
+                    })
+                }
+            })
+            .collect();
         self.quick_add = Some(QuickAdd {
             query: String::new(),
             selected: 0,
             screen: self.last_screen,
             world,
             feed,
+            groups,
             skip_char: feed.is_none(),
         });
+    }
+
+    /// Opens the list of saved groups, reading the folder now.
+    pub(super) fn open_group_list(&mut self) {
+        self.group_list = Some(self.read_groups());
+    }
+
+    /// The saved groups in the group folder. None if the folder is missing or unknown.
+    fn read_groups(&self) -> Vec<GroupEntry> {
+        self.group_dir
+            .as_deref()
+            .map(groups::list_in)
+            .unwrap_or_default()
+    }
+
+    /// Reads a saved group and builds its node. The error is a line for the status line.
+    pub(super) fn load_group(&self, entry: &GroupEntry) -> Result<FlodeNode, String> {
+        let dir = self.group_dir.as_deref().ok_or("no group folder")?;
+        groups::load_in(dir, entry)
+    }
+
+    /// Adds a copy of a saved group to the graph on show, which is the open group if one is open,
+    /// and returns its index. A file that can't be loaded adds nothing and says why.
+    pub(super) fn add_saved_group(&mut self, entry: &GroupEntry, position: Point) -> Option<usize> {
+        let mut node = match self.load_group(entry) {
+            Ok(node) => node,
+            Err(error) => {
+                self.say(format!("Could not load {}: {error}", entry.name));
+                return None;
+            }
+        };
+        node.position = position;
+        self.nodes.push(node);
+        let index = self.nodes.len() - 1;
+        self.select(index);
+        Some(index)
     }
 
     /// The output pin of a new node of `kind` that can feed input `input` of node `to`, if it has
     /// one. Only pins that carry the same kind of signal can join.
     pub(super) fn feeding_port(&self, kind: NodeKind, to: usize, input: Port) -> Option<Port> {
+        self.feeding_port_of(&FlodeNode::new(kind, Point::new(0.0, 0.0)), to, input)
+    }
+
+    /// `feeding_port` for a node that is already built, such as a saved group. It takes the first
+    /// output pin that carries the input's signal.
+    pub(super) fn feeding_port_of(
+        &self,
+        probe: &FlodeNode,
+        to: usize,
+        input: Port,
+    ) -> Option<Port> {
         self.nodes.get(to)?.input_point(input)?;
-        let probe = FlodeNode::new(kind, Point::new(0.0, 0.0));
         probe
             .output_ports()
             .into_iter()
             .find(|&out| out.signal() == input.signal() && probe.output_point(out).is_some())
     }
 
-    /// The kinds the quick add box lists for what is typed in it. Kinds the graph can't take
-    /// another of are left out, and so are the ones that can't feed the input the box was opened
-    /// from.
-    pub(super) fn quick_add_results(&self) -> Vec<NodeKind> {
+    /// What the quick add box lists for what is typed in it: node kinds, and saved groups. Kinds
+    /// the graph can't take another of are left out, and so are the ones that can't feed the input
+    /// the box was opened from.
+    pub(super) fn quick_add_picks(&self) -> Vec<QuickPick> {
         match &self.quick_add {
-            Some(open) => quick_add_results(&open.query, |kind| {
-                self.can_add(kind)
-                    && open
-                        .feed
-                        .is_none_or(|(to, input)| self.feeding_port(kind, to, input).is_some())
-            }),
+            Some(open) => quick_add_picks(
+                &open.query,
+                |kind| {
+                    self.can_add(kind)
+                        && open
+                            .feed
+                            .is_none_or(|(to, input)| self.feeding_port(kind, to, input).is_some())
+                },
+                &open.groups,
+            ),
             None => Vec::new(),
         }
+    }
+
+    /// The node kinds among `quick_add_picks`, for the tests that look at what the box offers.
+    #[cfg(test)]
+    pub(super) fn quick_add_results(&self) -> Vec<NodeKind> {
+        self.quick_add_picks()
+            .into_iter()
+            .filter_map(|pick| match pick {
+                QuickPick::Kind(kind) => Some(kind),
+                QuickPick::Group(_) => None,
+            })
+            .collect()
     }
 
     /// Opens the system save dialog on a worker thread, so the editor keeps running while it is
@@ -559,13 +700,48 @@ impl Graph {
         };
         let (folder, file) =
             save_dialog_start(&dir, &self.preset_category, self.preset_name.as_deref());
+        self.open_save_dialog(folder, file, SaveKind::Preset);
+    }
+
+    /// Opens the save dialog for group node `node` of the graph on show, starting in the group
+    /// folder with the group's name. The group is copied now, so it is saved as it stands at this
+    /// click, whatever is edited while the dialog is up. Does nothing while a dialog is open.
+    pub(super) fn start_group_save_dialog(&mut self, node: usize) {
+        if self.save_dialog.is_some() {
+            return;
+        }
+        let Some(node) = self.nodes.get(node).filter(|n| n.kind == NodeKind::Group) else {
+            return;
+        };
+        let name = node.label().into_owned();
+        let copy = node.duplicate(node.position);
+        self.start_group_save_of(&copy, &name);
+    }
+
+    /// `start_group_save_dialog` for a group node that is already built.
+    pub(super) fn start_group_save_of(&mut self, node: &FlodeNode, name: &str) {
+        if self.save_dialog.is_some() {
+            return;
+        }
+        let Some(dir) = self.group_dir.clone() else {
+            self.say("Could not save: no group folder");
+            return;
+        };
+        self.group_save = Some(SavedGroupFile::new(node, name));
+        // A slash in the name would read as a folder in the dialog.
+        let file = format!("{}.{}", name.replace(['/', '\\'], "-"), groups::EXTENSION);
+        self.open_save_dialog(dir, file, SaveKind::Group);
+    }
+
+    /// Opens the dialog in `folder` with `file` as the suggested name, for a save of `kind`.
+    fn open_save_dialog(&mut self, folder: PathBuf, file: String, kind: SaveKind) {
         // The panel can only start in a folder that exists.
         let _ = std::fs::create_dir_all(&folder);
         let (sender, receiver) = mpsc::channel();
         // Tests never open a real dialog. They read the request and send the answer themselves.
         #[cfg(test)]
         {
-            let _ = (&folder, &file);
+            let _ = (&folder, &file, kind);
             self.save_dialog_requests += 1;
             self.save_dialog_sender = Some(sender);
         }
@@ -577,11 +753,12 @@ impl Graph {
                     // rfd panics if the platform has no running application. The sender then
                     // drops without an answer, which the poll reports.
                     let picked = std::panic::catch_unwind(|| {
+                        let (title, filter, extension) = kind.dialog_text();
                         rfd::FileDialog::new()
-                            .set_title("Save preset")
+                            .set_title(title)
                             .set_directory(folder)
                             .set_file_name(file)
-                            .add_filter("Flode preset", &[presets::EXTENSION])
+                            .add_filter(filter, &[extension])
                             .save_file()
                     });
                     if let Ok(picked) = picked {
@@ -589,6 +766,7 @@ impl Graph {
                     }
                 });
             if spawned.is_err() {
+                self.group_save = None;
                 self.say("Could not open the save dialog");
                 return;
             }
@@ -596,8 +774,9 @@ impl Graph {
         self.save_dialog = Some(Mutex::new(receiver));
     }
 
-    /// Collects the save dialog's answer, if it has one. A chosen path waits in `pending_save`
-    /// for the editor to save, a cancel does nothing, and a dialog that died is reported.
+    /// Collects the save dialog's answer, if it has one. A chosen path for a preset waits in
+    /// `pending_save` for the editor to save, since the macro values are the host's. A chosen path
+    /// for a group is written here. A cancel does nothing, and a dialog that died is reported.
     pub(super) fn poll_save_dialog(&mut self) {
         let Some(receiver) = &self.save_dialog else {
             return;
@@ -609,14 +788,37 @@ impl Graph {
         match answer {
             Ok(Some(path)) => {
                 self.save_dialog = None;
-                self.pending_save = Some(path);
+                match self.group_save.take() {
+                    Some(file) => self.write_group(&path, file),
+                    None => self.pending_save = Some(path),
+                }
             }
-            Ok(None) => self.save_dialog = None,
+            Ok(None) => {
+                self.save_dialog = None;
+                self.group_save = None;
+            }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.save_dialog = None;
+                self.group_save = None;
                 self.say("Could not open the save dialog");
             }
+        }
+    }
+
+    /// Writes a saved group to the file the dialog chose. The file's name is the group's name in
+    /// the file. The group in the patch keeps the name it has.
+    fn write_group(&mut self, chosen: &std::path::Path, mut file: SavedGroupFile) {
+        let path = groups::with_extension(chosen);
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Group")
+            .to_string();
+        file.rename(&name);
+        match groups::save_to(&path, &file) {
+            Ok(()) => self.say(format!("Saved group {name}")),
+            Err(error) => self.say(format!("Could not save: {error}")),
         }
     }
 
@@ -690,17 +892,25 @@ impl Graph {
     /// piano's held keys, and where presets live stay as they were, and so do the menus' state,
     /// which is closed.
     fn replace_with(&mut self, fresh: Graph, macros: [f32; MACRO_COUNT]) {
-        let view = self.view;
+        // A load while a group is open leaves the group, so the root graph's view is the one to
+        // keep.
+        let view = self.open_groups.first().map_or(self.view, |open| open.view);
         let piano = std::mem::take(&mut self.piano);
         let computer_keys = self.computer_keys;
         let shift = self.shift;
         let dir = self.preset_dir.clone();
-        // A dialog that is open still answers after a load, and a second one must not open.
+        let group_dir = self.group_dir.clone();
+        let canvas_size = self.canvas_size;
+        // A dialog that is open still answers after a load, and a second one must not open. A
+        // group dialog still saves the group it was opened for.
         let dialog = self.save_dialog.take();
+        let group_save = self.group_save.take();
         #[cfg(test)]
         let (requests, sender) = (self.save_dialog_requests, self.save_dialog_sender.take());
         *self = fresh;
         self.save_dialog = dialog;
+        self.group_save = group_save;
+        self.group_dir = group_dir;
         #[cfg(test)]
         {
             self.save_dialog_requests = requests;
@@ -711,6 +921,7 @@ impl Graph {
         self.computer_keys = computer_keys;
         self.shift = shift;
         self.preset_dir = dir;
+        self.canvas_size = canvas_size;
         for (index, &value) in macros.iter().enumerate() {
             self.macro_edits.push(MacroEdit::Begin(index));
             self.macro_edits.push(MacroEdit::Set(index, value));
@@ -733,6 +944,9 @@ impl Graph {
 
     /// Notes the macro knob's current value, for the host. Any other knob is ignored.
     pub(super) fn macro_set(&mut self, node: usize, id: KnobId) {
+        // Every edit of a knob comes through here, so it is also where a knob on the input edge
+        // node of a group carries its new value to the knobs it feeds.
+        self.push_edge_values(node);
         if let Some(index) = self.macro_of(node, id) {
             let value = self.nodes[node].value(id);
             self.macro_edits.push(MacroEdit::Set(index, value));
@@ -753,7 +967,18 @@ impl Graph {
             Interaction::Knob { id, .. } => Some(id),
             _ => None,
         };
-        for node in self.nodes.iter_mut().filter(|n| n.kind == NodeKind::Macro) {
+        // The macro node can be in the graph outside an open group, which still shows its knobs
+        // when the group closes.
+        let outside = self
+            .open_groups
+            .iter_mut()
+            .flat_map(|open| open.nodes.iter_mut());
+        for node in self
+            .nodes
+            .iter_mut()
+            .chain(outside)
+            .filter(|n| n.kind == NodeKind::Macro)
+        {
             for (&id, &value) in KnobId::MACROS.iter().zip(&values) {
                 if dragged != Some(id) {
                     node.set_value(id, value);
@@ -843,7 +1068,8 @@ impl Graph {
         order
     }
 
-    /// The graph's wires as the compiler reads them.
+    /// The wires of the graph on show, as the compiler reads them. It does not look through
+    /// groups. The queries below do, and so does `patch`.
     pub fn wiring(&self) -> Wiring<'_> {
         Wiring::new(&self.nodes, &self.connections)
     }
@@ -855,12 +1081,51 @@ impl Graph {
         self.nodes[node].kind == NodeKind::Mix
             && which == 0
             && row == mix::FM_ROW
-            && self.wiring().runs_on_bus(node)
+            && self
+                .with_flat(node, |wiring, node| wiring.runs_on_bus(node))
+                .unwrap_or(false)
+    }
+
+    /// True if a control pin of the open group's input edge feeds knob `id` of `node`.
+    fn fed_by_pin(&self, node: usize, id: KnobId) -> bool {
+        !self.open_groups.is_empty()
+            && self.connections.iter().any(|c| {
+                c.to == node
+                    && c.input == Port::Knob(id)
+                    && matches!(c.out, Port::Pin(Signal::Control, _))
+                    && self
+                        .nodes
+                        .get(c.from)
+                        .is_some_and(|n| n.kind == NodeKind::GroupInput)
+            })
     }
 
     /// True if a control wire drives this knob. A driven knob can't be dragged.
     pub(super) fn is_driven(&self, node: usize, id: KnobId) -> bool {
-        self.wiring().is_driven(node, id)
+        // A knob on a group's face is driven by a wire into its pin.
+        if let Some(pin) = self.nodes[node].face_pin(id) {
+            let wired = |links: &[Connection], group: usize| {
+                links
+                    .iter()
+                    .any(|c| c.to == group && matches!(c.input, Port::Pin(_, n) if n == pin))
+            };
+            // The same knob on the input edge node inside is locked by a wire into the group
+            // node in the graph outside.
+            if self.nodes[node].kind == NodeKind::GroupInput {
+                return self
+                    .open_groups
+                    .last()
+                    .is_some_and(|open| wired(&open.connections, open.group));
+            }
+            return wired(&self.connections, node);
+        }
+        // Inside an open group, a pin of the group's input edge rules the knobs it feeds, so
+        // they are locked to the value on the group's face.
+        if self.fed_by_pin(node, id) {
+            return true;
+        }
+        self.with_flat(node, |wiring, node| wiring.is_driven(node, id))
+            .unwrap_or(false)
     }
 
     /// The spectrum an EQ node's analyzer shows, or None while the analyzer is off or the node
@@ -869,27 +1134,64 @@ impl Graph {
         if !eq::analyzer(&self.nodes[node]) {
             return None;
         }
-        let (_, pool) = self
-            .wiring()
-            .eq_pools()
-            .into_iter()
-            .find(|(found, _)| *found == node)?;
-        self.spectra.get(usize::from(pool))
+        let pool = self.with_flat(node, |wiring, node| {
+            wiring
+                .eq_pools()
+                .into_iter()
+                .find(|(found, _)| *found == node)
+        })??;
+        self.spectra.get(usize::from(pool.1))
     }
 
     /// The control route that drives a knob, if one does.
     pub fn control_route(&self, node: usize, id: KnobId) -> Option<Route> {
-        self.wiring().control_route(node, id)
+        self.with_flat(node, |wiring, node| wiring.control_route(node, id))?
     }
 
     /// The level arriving at a map's input, if a control source feeds it.
     pub(super) fn map_input_level(&self, node: usize, levels: &ControlLevels) -> Option<f32> {
-        self.wiring().map_input_level(node, levels)
+        self.with_flat(node, |wiring, node| wiring.map_input_level(node, levels))?
     }
 
-    /// Compiles the graph into the patch the audio thread plays.
+    /// The place of an LFO node among the LFOs the audio thread runs, or None if it is past them.
+    pub(super) fn lfo_index(&self, node: usize) -> Option<usize> {
+        self.with_flat(node, |wiring, node| wiring.lfo_index(node))?
+    }
+
+    /// The place of an envelope node among the envelopes the audio thread runs, or None if it is
+    /// past them.
+    pub(super) fn envelope_index(&self, node: usize) -> Option<usize> {
+        self.with_flat(node, |wiring, node| wiring.envelope_index(node))?
+    }
+
+    /// Which engine instance each monitor node on show runs on, as (node, pool number) pairs.
+    pub(super) fn monitor_pools(&self) -> Vec<(usize, u8)> {
+        if !self.has_groups() {
+            return self.wiring().monitor_pools();
+        }
+        self.with_flat_cache(|cache| {
+            let wiring = Wiring::new(&cache.flat.nodes, &cache.flat.links);
+            wiring
+                .monitor_pools()
+                .into_iter()
+                .filter_map(|(flat, pool)| {
+                    let shown = cache.shown.iter().position(|&found| found == Some(flat))?;
+                    Some((shown, pool))
+                })
+                .collect()
+        })
+    }
+
+    /// Compiles the whole graph, with every group expanded in place, into the patch the audio
+    /// thread plays. While a group is open this still compiles the graph from its root, with the
+    /// open group's edits in it.
     pub fn patch(&self) -> Patch {
-        self.wiring().patch()
+        if !self.has_groups() {
+            return self.wiring().patch();
+        }
+        let (nodes, links) = self.root_snapshot();
+        let flat = crate::patch::flatten::flatten(&nodes, &links);
+        Wiring::new(&flat.nodes, &flat.links).patch()
     }
 
     /// Rebuilds the graph from saved state. Empty state gives the default graph, and connections
@@ -949,15 +1251,22 @@ impl Graph {
         graph
     }
 
+    /// The graph as it saves. This is always the root graph, with the edits of any open group in
+    /// it, so a save made inside a group loses nothing and reopens at the root.
     pub fn to_saved(&self) -> SavedGraph {
-        SavedGraph {
+        let save = |nodes: &[FlodeNode], links: &[Connection]| SavedGraph {
             version: SAVE_VERSION,
             preset_name: self.preset_name.clone(),
             preset_category: self.preset_category.clone(),
-            nodes: self.nodes.iter().map(SavedNode::new).collect(),
+            nodes: nodes.iter().map(SavedNode::new).collect(),
             connections: Vec::new(),
-            links: self.connections.clone(),
+            links: links.to_vec(),
+        };
+        if self.open_groups.is_empty() {
+            return save(&self.nodes, &self.connections);
         }
+        let (nodes, links) = self.root_snapshot();
+        save(&nodes, &links)
     }
 
     /// Removes the connection on an input port and returns it.
@@ -968,6 +1277,7 @@ impl Graph {
             .position(|c| c.to == to && c.input == input)?;
         let link = self.connections.remove(index);
         self.refresh_slots();
+        self.refresh_edge_knobs();
         Some(link)
     }
 
@@ -1010,7 +1320,7 @@ impl Graph {
         let bounds = dragged.bounds();
         self.connections.iter().position(|c| {
             let fits = if audio_node {
-                c.out == Port::Audio && c.input.is_audio()
+                c.out.is_audio_out() && c.input.is_audio()
             } else {
                 c.out.is_control_out() && matches!(c.input, Port::Knob(_))
             };
@@ -1177,6 +1487,97 @@ impl Graph {
             .retain(|c| !(c.to == to && c.input == input));
         self.connections.push(link);
         self.refresh_slots();
+        self.refresh_edge_knobs();
+        self.take_face_value(link);
+    }
+
+    /// Carries the value of every knob on the input edge node `node` of the open group to the
+    /// knobs inside that its pins feed, and to the group node's face in the graph outside. Run
+    /// after a knob on the edge node changes.
+    pub(super) fn push_edge_values(&mut self, node: usize) {
+        if self.nodes.get(node).map(|n| n.kind) != Some(NodeKind::GroupInput) {
+            return;
+        }
+        let knobs = self.nodes[node].face_knobs();
+        for (pin, _) in knobs {
+            let value = self.nodes[node].outputs[pin].value;
+            let targets: Vec<(usize, KnobId)> = self
+                .connections
+                .iter()
+                .filter(|c| c.from == node && matches!(c.out, Port::Pin(_, n) if n == pin))
+                .filter_map(|c| match c.input {
+                    Port::Knob(id) => Some((c.to, id)),
+                    _ => None,
+                })
+                .collect();
+            for (to, id) in targets {
+                self.nodes[to].set_value(id, value);
+            }
+            if let Some(open) = self.open_groups.last_mut() {
+                if let Some(face) = open.nodes[open.group].inputs.get_mut(pin) {
+                    face.value = value;
+                }
+            }
+        }
+    }
+
+    /// Makes the knobs on the input edge node follow the wires inside the open group. A pin shows
+    /// a knob while it feeds one, and a pin that starts to feed one takes that knob's value. The
+    /// group node's face gets the same, so the two agree.
+    pub(super) fn refresh_edge_knobs(&mut self) {
+        let Some(edge) = self
+            .nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::GroupInput)
+        else {
+            return;
+        };
+        if self.open_groups.is_empty() {
+            return;
+        }
+        for pin in 0..self.nodes[edge].outputs.len() {
+            let first = self
+                .connections
+                .iter()
+                .filter(|c| c.from == edge && matches!(c.out, Port::Pin(_, n) if n == pin))
+                .find_map(|c| match c.input {
+                    Port::Knob(id) => Some((id, self.nodes.get(c.to)?.value(id))),
+                    _ => None,
+                });
+            let signal = self.nodes[edge].outputs[pin].signal;
+            let target = first.filter(|_| signal == Signal::Control);
+            let current = &mut self.nodes[edge].outputs[pin];
+            if current.knob.is_none() {
+                if let Some((_, inside)) = target {
+                    current.value = inside;
+                }
+            }
+            current.knob = target.map(|(id, _)| id);
+            let copy = current.clone();
+            if let Some(open) = self.open_groups.last_mut() {
+                if let Some(face) = open.nodes[open.group].inputs.get_mut(pin) {
+                    *face = copy;
+                }
+            }
+        }
+    }
+
+    /// A knob that a wire from an input pin of the open group now feeds takes the value on the
+    /// group's face, if that pin already stands for a knob, since the face rules it from now on.
+    fn take_face_value(&mut self, link: Connection) {
+        let (Port::Pin(Signal::Control, pin), Port::Knob(id)) = (link.out, link.input) else {
+            return;
+        };
+        if self.nodes[link.from].kind != NodeKind::GroupInput {
+            return;
+        }
+        let Some(open) = self.open_groups.last() else {
+            return;
+        };
+        let face = open.nodes[open.group].inputs.get(pin);
+        if let Some(value) = face.filter(|p| p.knob.is_some()).map(|p| p.value) {
+            self.nodes[link.to].set_value(id, value);
+        }
     }
 
     /// The name an output pin goes by, if it has one.
@@ -1250,9 +1651,14 @@ impl Graph {
     }
 
     /// True if a node of `kind` may be added. A kind that is one per graph, such as the output and
-    /// the macro node, can't be added while the graph has one.
+    /// the macro node, can't be added while the graph has one, and can't be added inside a group,
+    /// since the root graph has it. The group kinds are made by the group commands only.
     pub(super) fn can_add(&self, kind: NodeKind) -> bool {
-        !kind.is_unique() || !self.nodes.iter().any(|node| node.kind == kind)
+        if kind.is_group_part() {
+            return false;
+        }
+        !kind.is_unique()
+            || (self.open_groups.is_empty() && !self.nodes.iter().any(|node| node.kind == kind))
     }
 
     /// Adds a node and selects it. Returns its index.
@@ -1411,6 +1817,14 @@ impl Graph {
     /// Removes a node and its connections. Connections and the selection after it shift down
     /// to match the new node indices.
     pub(super) fn delete_node(&mut self, index: usize) {
+        // The edge nodes of a group go only with the group.
+        if self
+            .nodes
+            .get(index)
+            .is_some_and(|node| matches!(node.kind, NodeKind::GroupInput | NodeKind::GroupOutput))
+        {
+            return;
+        }
         // Slides name nodes by index, so they land before the indices shift.
         self.finish_slides();
         self.nodes.remove(index);
@@ -1426,6 +1840,7 @@ impl Graph {
             }
         }
         self.refresh_slots();
+        self.refresh_edge_knobs();
         self.selected = match self.selected {
             Some(selected) if selected == index => None,
             Some(selected) if selected > index => Some(selected - 1),

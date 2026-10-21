@@ -3,6 +3,7 @@
 //! `PatchLink`. The audio thread reads the newest one at the start of each block.
 
 pub mod control;
+pub mod flatten;
 pub mod link;
 pub mod stage;
 pub mod wiring;

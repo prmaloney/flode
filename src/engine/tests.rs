@@ -266,6 +266,41 @@ fn each_slot_uses_its_own_oscillator_settings() {
     assert!(engine.lanes[2].voices().next().is_none());
 }
 
+/// A note that is held follows the unison count and the detune when a later block brings new
+/// values. It does not wait for a new note.
+#[test]
+fn a_held_note_follows_unison_and_detune_changes() {
+    let stack = |unison: f32, detune: f32| {
+        patch_with(
+            0,
+            &[osc(OscillatorParams {
+                unison: Param::fixed(KnobId::Unison, unison),
+                detune: Param::fixed(KnobId::Detune, detune),
+                ..OscillatorParams::default()
+            })],
+        )
+    };
+    let mut engine = engine_on(&stack(1.0, 0.0));
+    engine.note_on(60, 1.0);
+    render(&mut engine, 500);
+
+    let ratios = |engine: &Engine| -> Vec<f32> {
+        match engine.lanes[0].voices().next().unwrap().stages[0] {
+            StageState::Oscillator(state) => state.detune_ratios().to_vec(),
+            _ => panic!("not an oscillator"),
+        }
+    };
+    assert_eq!(ratios(&engine), vec![1.0]);
+
+    engine.begin_block(&stack(3.0, 50.0), Transport::default());
+    render(&mut engine, 4000);
+    let held = ratios(&engine);
+    assert_eq!(held.len(), 3);
+    assert!(held[0] < 1.0 && held[1] == 1.0 && held[2] > 1.0);
+    // Still one voice, the same note.
+    assert_eq!(engine.lanes[0].voices().count(), 1);
+}
+
 fn envelope(release: f32, sustain: f32) -> EnvelopeSettings {
     EnvelopeSettings {
         attack: Param::fixed(KnobId::Attack, 0.001),
@@ -909,4 +944,99 @@ fn the_engine_reports_what_a_monitor_measured() {
     assert_eq!(monitors[0], MonitorData::default());
     engine.reset();
     assert_eq!(engine.monitors()[1], MonitorData::default());
+}
+
+/// A gain stage fed by `source`.
+fn gain_stage(gain_db: f32, pan: f32, invert: bool, source: u8) -> StageSpec {
+    use crate::patch::stage::GainParams;
+    StageSpec::new(StageParams::Gain(GainParams {
+        gain: Param::fixed(KnobId::UtilGain, gain_db),
+        pan: Param::fixed(KnobId::Pan, pan),
+        invert,
+    }))
+    .with_input(0, source)
+}
+
+/// Both channels of one note played through `stages`.
+fn play_stereo_through(stages: &[StageSpec]) -> Vec<Frame> {
+    let mut engine = engine_on(&patch_with(0, stages));
+    engine.note_on(60, 1.0);
+    render_stereo(&mut engine, 8000)
+}
+
+/// Checks that `out` is `dry` scaled by 6 dB, panned half right, and inverted.
+fn assert_inverted_scaled_and_panned(dry: &[Frame], out: &[Frame]) {
+    let gain = crate::dsp::gain::utility_db_to_linear(6.0);
+    assert!(peak(&dry.iter().map(|f| f.l).collect::<Vec<_>>()) > 0.05);
+    for (dry, out) in dry.iter().zip(out) {
+        assert!((out.l + dry.l * gain * 0.5).abs() < 1e-4, "{dry:?} {out:?}");
+        assert!((out.r + dry.r * gain).abs() < 1e-4, "{dry:?} {out:?}");
+    }
+}
+
+/// A played note comes out of a per-voice gain stage inverted, scaled, and panned as set.
+#[test]
+fn a_per_voice_gain_inverts_scales_and_pans_a_note() {
+    let source = osc(OscillatorParams::default());
+    let dry = play_stereo_through(&[source]);
+    let out = play_stereo_through(&[source, gain_stage(6.0, 0.5, true, 0)]);
+    assert_inverted_scaled_and_panned(&dry, &out);
+}
+
+/// The same stage on the bus, after an effect that changes nothing, does the same.
+#[test]
+fn a_bus_gain_inverts_scales_and_pans_a_note() {
+    let dry = play_stereo_through(&[tapped_source(), clear_effect(0)]);
+    let stages = [
+        tapped_source(),
+        clear_effect(0),
+        gain_stage(6.0, 0.5, true, 1).on_bus(),
+    ];
+    assert!(stages[2].bus);
+    let out = play_stereo_through(&stages);
+    assert_inverted_scaled_and_panned(&dry, &out);
+}
+
+/// A gain at its minimum silences the note, per voice and on the bus.
+#[test]
+fn a_gain_at_its_minimum_is_silent() {
+    let source = osc(OscillatorParams::default());
+    let per_voice = play_stereo_through(&[source, gain_stage(-60.0, 0.0, false, 0)]);
+    assert!(per_voice.iter().all(|f| *f == Frame::SILENT));
+    let bus = play_stereo_through(&[
+        tapped_source(),
+        clear_effect(0),
+        gain_stage(-60.0, 0.0, false, 1).on_bus(),
+    ]);
+    assert!(bus.iter().all(|f| *f == Frame::SILENT));
+}
+
+/// A gain that is bypassed compiles away, so the signal passes through. In the engine that is a
+/// slot with no gain stage in it, and a neutral gain stage sounds the same.
+#[test]
+fn a_neutral_gain_passes_the_signal_through() {
+    let source = osc(OscillatorParams::default());
+    let dry = play_stereo_through(&[source]);
+    let through = play_stereo_through(&[source, gain_stage(0.0, 0.0, false, 0)]);
+    assert_eq!(dry, through);
+}
+
+/// Moving the knob while a note plays eases. No two neighboring samples jump by more than the
+/// note itself could move them, so there is no click.
+#[test]
+fn a_gain_move_while_playing_does_not_click() {
+    let source = osc(OscillatorParams::default());
+    let loud = patch_with(0, &[source, gain_stage(0.0, 0.0, false, 0)]);
+    let quiet = patch_with(0, &[source, gain_stage(-40.0, 0.0, false, 0)]);
+    let mut engine = engine_on(&loud);
+    engine.note_on(60, 1.0);
+    render(&mut engine, 4000);
+    engine.begin_block(&quiet, Transport::default());
+    let out = render(&mut engine, 4000);
+    let biggest_step = out
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(biggest_step < 0.1, "{biggest_step}");
+    assert!(peak(&out[3000..]) < peak(&out[..200]) * 0.2);
 }

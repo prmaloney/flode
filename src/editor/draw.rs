@@ -13,10 +13,11 @@ use crate::nodes::{
 };
 use crate::patch::control::ControlLevels;
 use nih_plug_iced::widget::canvas::{Frame, Geometry, LineCap, Path, Stroke, Text};
-use nih_plug_iced::{alignment, Color, Point, Rectangle};
+use nih_plug_iced::{alignment, Color, Point, Rectangle, Vector};
 
 use super::depth::{self, draw_shadow, FLOAT_SHADOW, LIFTED_SHADOW, NODE_SHADOW};
-use super::{curve::*, graph::*, logo, menus::*, style::*};
+use super::group_ui::{inner_bounds, pane_bounds};
+use super::{curve::*, graph::*, logo, menus::*, pane, style::*};
 
 /// Draws one frame of the editor: the wires, the nodes, then the pill, key strip, and open
 /// lists on top.
@@ -71,8 +72,11 @@ pub(super) fn draw_editor(
             overlays.push(view.rect_to_world(submenu_bounds(bounds, &menu.library, open)));
         }
     }
+    if let Some(entries) = &graph.group_list {
+        overlays.push(view.rect_to_world(group_list_bounds(bounds, entries.len())));
+    }
     if let Some(open) = &graph.quick_add {
-        let rows = graph.quick_add_results().len();
+        let rows = graph.quick_add_picks().len();
         overlays.push(view.rect_to_world(quick_add_bounds(bounds, open.screen, rows)));
     }
     // The number box covers the label text of the node it sits on, which is in editor coordinates.
@@ -80,19 +84,18 @@ pub(super) fn draw_editor(
         overlays.push(rect);
     }
 
-    // The nodes and wires are drawn in editor coordinates, then the view scales and moves them.
-    frame.with_save(|frame| {
-        frame.translate(offset);
-        frame.scale(view.zoom);
+    // While a group is open, its graph floats in a pane over a dimmed backdrop. The backdrop and
+    // the pane's frame come first, so the pill and the strip draw over them.
+    let pane = (graph.group_depth() > 0).then(|| pane_bounds(bounds));
+    if let Some(pane) = pane {
+        pane::draw_pane(&mut frame, bounds, graph, pane);
+    }
 
-        // The dot grid is behind everything. It covers the part of the editor in view.
-        let screen = Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: bounds.width,
-            height: bounds.height,
-        };
-        depth::draw_grid(frame, view.rect_to_world(screen), view.zoom);
+    // The nodes and wires are drawn in editor coordinates, then the view scales and moves them.
+    // `visible` is the part of the editor in view, in editor coordinates.
+    let draw_graph = |frame: &mut Frame, visible: Rectangle| {
+        // The dot grid is behind everything.
+        depth::draw_grid(frame, visible, view.zoom);
 
         // Ordinary wires go under the nodes. The wire a dragged node would splice into, and the
         // wire being dragged, go over them so they stay visible.
@@ -179,7 +182,32 @@ pub(super) fn draw_editor(
         if let Interaction::Boxing { start, cursor } = graph.interaction {
             draw_selection_box(frame, start, cursor);
         }
-    });
+    };
+    match pane {
+        None => {
+            let screen = Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: bounds.width,
+                height: bounds.height,
+            };
+            frame.with_save(|frame| {
+                frame.translate(offset);
+                frame.scale(view.zoom);
+                draw_graph(frame, view.rect_to_world(screen));
+            });
+        }
+        // The pane clips its graph, so a node dragged past the edge is cut off. The clip is a
+        // frame of its own, which starts at the pane's corner.
+        Some(pane) => {
+            let inner = inner_bounds(pane);
+            frame.with_clip(inner, |frame| {
+                frame.translate(Vector::new(offset.x - inner.x, offset.y - inner.y));
+                frame.scale(view.zoom);
+                draw_graph(frame, view.rect_to_world(inner));
+            });
+        }
+    }
 
     // The pill stays fixed on screen. It is drawn after the nodes, so it covers them. Its buttons
     // light when the cursor is over them, and while their list is open.
@@ -189,10 +217,11 @@ pub(super) fn draw_editor(
         None
     };
     let item_place = |item: PillItem| PILL_ITEMS.iter().position(|candidate| *candidate == item);
-    let open_item = match (graph.category_menu, &graph.preset_list) {
-        (Some(category), _) => item_place(PillItem::Category(category)),
-        (None, Some(_)) => item_place(PillItem::Presets),
-        (None, None) => None,
+    let open_item = match (graph.category_menu, &graph.preset_list, &graph.group_list) {
+        (Some(category), _, _) => item_place(PillItem::Category(category)),
+        (None, Some(_), _) => item_place(PillItem::Presets),
+        (None, None, Some(_)) => item_place(PillItem::Groups),
+        (None, None, None) => None,
     };
     draw_pill(
         &mut frame,
@@ -231,57 +260,76 @@ pub(super) fn draw_editor(
     );
 
     // The open lists and the menu are drawn over the pill, in editor coordinates like the nodes.
-    frame.with_save(|frame| {
-        frame.translate(offset);
-        frame.scale(view.zoom);
+    let draw_top = |frame: &mut Frame| {
+        frame.with_save(|frame| {
+            frame.translate(offset);
+            frame.scale(view.zoom);
 
-        if let Some((index, which)) = graph.dropdown_menu {
-            let node = &graph.nodes[index];
-            if let Some(dropdown) = node.dropdowns().into_iter().find(|d| d.which == which) {
-                let list = dropdown_list_bounds(dropdown.bounds, dropdown.labels.len());
-                let hovered_row = match graph.hover {
-                    Some(Hover::Row {
-                        node,
-                        which: hovered,
-                        row,
-                    }) if node == index && hovered == which => Some(row),
-                    _ => None,
+            if let Some((index, which)) = graph.dropdown_menu {
+                let node = &graph.nodes[index];
+                if let Some(dropdown) = node.dropdowns().into_iter().find(|d| d.which == which) {
+                    let list = dropdown_list_bounds(dropdown.bounds, dropdown.labels.len());
+                    let hovered_row = match graph.hover {
+                        Some(Hover::Row {
+                            node,
+                            which: hovered,
+                            row,
+                        }) if node == index && hovered == which => Some(row),
+                        _ => None,
+                    };
+                    let disabled: Vec<bool> = (0..dropdown.labels.len())
+                        .map(|row| graph.dropdown_row_disabled(index, which, row))
+                        .collect();
+                    draw_list(
+                        frame,
+                        list,
+                        &dropdown.labels,
+                        dropdown.selected,
+                        hovered_row,
+                        &disabled,
+                        view.zoom,
+                    );
+                }
+            }
+        });
+
+        // The right-click menu is in screen coordinates, so it keeps one size at any zoom.
+        if let Some(menu) = graph.menu {
+            if let Some(node) = graph.nodes.get(menu.node) {
+                let hovered_row = if graph.cursor_in {
+                    menu_item_at(menu, graph.last_screen)
+                        .and_then(|item| menu.items.iter().position(|&i| i == item))
+                } else {
+                    None
                 };
-                let disabled: Vec<bool> = (0..dropdown.labels.len())
-                    .map(|row| graph.dropdown_row_disabled(index, which, row))
-                    .collect();
-                draw_list(
-                    frame,
-                    list,
-                    &dropdown.labels,
-                    dropdown.selected,
-                    hovered_row,
-                    &disabled,
-                    view.zoom,
-                );
+                draw_menu(frame, menu, node, hovered_row);
             }
         }
-    });
 
-    // The right-click menu is in screen coordinates, so it keeps one size at any zoom.
-    if let Some(menu) = graph.menu {
-        if let Some(node) = graph.nodes.get(menu.node) {
-            let hovered_row = if graph.cursor_in {
-                menu_item_at(menu, graph.last_screen)
-                    .and_then(|item| menu.items.iter().position(|&i| i == item))
-            } else {
-                None
-            };
-            draw_menu(&mut frame, menu, node, hovered_row);
+        if let Some(category) = graph.category_menu {
+            draw_category_list(frame, bounds, category, graph);
         }
-    }
-
-    if let Some(category) = graph.category_menu {
-        draw_category_list(&mut frame, bounds, category, graph);
-    }
-    draw_preset_list(&mut frame, bounds, graph);
-    if graph.quick_add.is_some() {
-        draw_quick_add(&mut frame, bounds, graph);
+        draw_preset_list(frame, bounds, graph);
+        draw_group_list(frame, bounds, graph);
+        if graph.quick_add.is_some() {
+            draw_quick_add(frame, bounds, graph);
+        }
+        pane::draw_rename(frame, bounds, graph);
+    };
+    // A pane's graph is a layer of its own, which sits over everything drawn so far. The menus
+    // and lists have to sit over the pane, so they go in a layer after it.
+    if pane.is_some() {
+        frame.with_clip(
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            draw_top,
+        );
+    } else {
+        draw_top(&mut frame);
     }
 
     vec![frame.into_geometry()]
@@ -354,10 +402,9 @@ const WIRE_GLOW: [(f32, f32); 2] = [(6.0, 0.04), (3.0, 0.08)];
 
 /// The header tag of an LFO or envelope that is past the limit and so makes no signal.
 pub(super) fn over_limit_label(graph: &Graph, index: usize) -> Option<&'static str> {
-    let wiring = graph.wiring();
     let running = match graph.nodes[index].kind {
-        NodeKind::Lfo => wiring.lfo_index(index).is_some(),
-        NodeKind::Envelope => wiring.envelope_index(index).is_some(),
+        NodeKind::Lfo => graph.lfo_index(index).is_some(),
+        NodeKind::Envelope => graph.envelope_index(index).is_some(),
         _ => true,
     };
     (!running).then_some("Over limit")
@@ -432,7 +479,7 @@ pub(super) fn draw_node(
         covered,
         zoom,
         Text {
-            content: node.title().to_string(),
+            content: node.label().into_owned(),
             position: Point::new(header.x + TITLE_INSET, header.y + HEADER_HEIGHT / 2.0),
             color: if off.is_some() {
                 DIM_TEXT_COLOR
@@ -465,6 +512,7 @@ pub(super) fn draw_node(
     }
 
     draw_collapse_arrow(frame, node);
+    draw_open_glyph(frame, node);
 
     // Each row has an optional input pin on the left edge, a knob with its name and value, and an
     // optional output pin on the right edge. A row in a folded section, or in a collapsed node,
@@ -502,7 +550,17 @@ pub(super) fn draw_node(
                 covered,
                 zoom,
                 Text {
-                    content: id.name().to_string(),
+                    content: if node.kind == NodeKind::Macro {
+                        super::group_ui::cut(
+                            &node.knob_name(id),
+                            super::group_ui::MACRO_NAME_MAX_LEN,
+                        )
+                    } else if matches!(node.kind, NodeKind::Group | NodeKind::GroupInput) {
+                        // The output pin's name shares the row, so a face name is shorter.
+                        super::group_ui::cut(&node.knob_name(id), 9)
+                    } else {
+                        id.name().to_string()
+                    },
                     position: Point::new(left + PIN_LABEL_INSET, y + NAME_OFFSET),
                     color: text_color,
                     size: PIN_LABEL_SIZE,
@@ -515,7 +573,7 @@ pub(super) fn draw_node(
                 covered,
                 zoom,
                 Text {
-                    content: id.format(node.value(id)),
+                    content: node.knob_format(id, node.value(id)),
                     position: Point::new(left + PIN_LABEL_INSET, y + VALUE_OFFSET),
                     color: text_color,
                     size: PIN_LABEL_SIZE,
@@ -531,15 +589,15 @@ pub(super) fn draw_node(
             // A pin with no knob to name it draws its own label, such as "Shape" or "A". A pin on
             // a dropdown's row has no room for one.
             if row.knob.is_none() && row.control.is_none() {
-                if let Some(label) = port.input_label() {
+                if let Some(label) = pin_label(node, port, false) {
                     draw_text(
                         frame,
                         covered,
                         zoom,
                         Text {
-                            content: label.to_string(),
+                            content: label,
                             position: Point::new(point.x + PIN_LABEL_INSET, point.y),
-                            color: TEXT_COLOR,
+                            color: pin_label_color(port),
                             size: PIN_LABEL_SIZE,
                             vertical_alignment: alignment::Vertical::Center,
                             ..Text::default()
@@ -552,15 +610,17 @@ pub(super) fn draw_node(
         if let Some(port) = row.output {
             let point = Point::new(right, y);
             draw_pin_dot(frame, point, port);
-            if let Some(label) = port.output_label() {
+            // The input edge node's knob already names its pin.
+            let named_by_knob = row.knob.is_some() && node.kind == NodeKind::GroupInput;
+            if let Some(label) = pin_label(node, port, true).filter(|_| !named_by_knob) {
                 draw_text(
                     frame,
                     covered,
                     zoom,
                     Text {
-                        content: label.to_string(),
+                        content: label,
                         position: Point::new(point.x - PIN_LABEL_INSET, point.y),
-                        color: TEXT_COLOR,
+                        color: pin_label_color(port),
                         size: PIN_LABEL_SIZE,
                         horizontal_alignment: alignment::Horizontal::Right,
                         vertical_alignment: alignment::Vertical::Center,
@@ -639,7 +699,7 @@ pub(super) fn draw_node(
             slot.center,
             ROW_KNOB_DIAMETER,
             value,
-            route.is_some(),
+            route.is_some() || (slot.pinned && graph.is_driven(index, slot.id)),
         );
     }
 }
@@ -725,9 +785,86 @@ pub(super) fn draw_collapse_arrow(frame: &mut Frame, node: &FlodeNode) {
     frame.fill(&path, TEXT_COLOR);
 }
 
+/// The most characters of a group pin's name drawn beside it. The two sides of a group node share
+/// a row, so a name has to leave the other side room.
+const PIN_NAME_CHARS: usize = 10;
+
+/// The name drawn beside a pin, if it has one. A pin of a group shows its own name, and the empty
+/// pin below them says what a wire dropped on it does. `output` says which edge the pin is on.
+fn pin_label(node: &FlodeNode, port: Port, output: bool) -> Option<String> {
+    if port == Port::NewPin {
+        return Some("New pin".to_string());
+    }
+    let fixed = if output {
+        port.output_label()
+    } else {
+        port.input_label()
+    };
+    fixed.map(str::to_string).or_else(|| {
+        node.pin_name(port, output)
+            .map(|name| super::group_ui::cut(name, PIN_NAME_CHARS))
+    })
+}
+
+/// The empty pin's label is dim, since it names nothing yet.
+fn pin_label_color(port: Port) -> Color {
+    if port == Port::NewPin {
+        DIM_TEXT_COLOR
+    } else {
+        TEXT_COLOR
+    }
+}
+
+/// The small glyph in a group node's header that says it opens: a box with an arrow leaving its
+/// corner.
+fn draw_open_glyph(frame: &mut Frame, node: &FlodeNode) {
+    let Some(area) = super::group_ui::open_glyph_bounds(node) else {
+        return;
+    };
+    let color = Color {
+        a: 0.75,
+        ..TEXT_COLOR
+    };
+    let box_area = Rectangle {
+        x: area.x + 1.0,
+        y: area.y + 3.0,
+        width: area.width - 4.0,
+        height: area.height - 4.0,
+    };
+    frame.stroke(
+        &rounded_rect(box_area, 2.0),
+        Stroke::default().with_color(color).with_width(1.2),
+    );
+    let tip = Point::new(area.x + area.width - 1.0, area.y + 1.0);
+    frame.stroke(
+        &Path::line(Point::new(tip.x - 6.0, tip.y + 6.0), tip),
+        Stroke::default()
+            .with_color(color)
+            .with_width(1.4)
+            .with_line_cap(LineCap::Round),
+    );
+    frame.fill(
+        &Path::new(|builder| {
+            builder.move_to(Point::new(tip.x - 5.0, tip.y));
+            builder.line_to(tip);
+            builder.line_to(Point::new(tip.x, tip.y + 5.0));
+            builder.close();
+        }),
+        color,
+    );
+}
+
 /// A pin without its label. Audio pins are grey and big, control pins are green, and notes pins
-/// are purple. The last two are the smaller size.
+/// are purple. The last two are the smaller size. The empty pin of a group's edge node is a dim
+/// ring.
 pub(super) fn draw_pin_dot(frame: &mut Frame, point: Point, port: Port) {
+    if port == Port::NewPin {
+        frame.stroke(
+            &Path::circle(point, PIN_RADIUS - 0.5),
+            Stroke::default().with_color(DIM_TEXT_COLOR).with_width(1.2),
+        );
+        return;
+    }
     match port.signal() {
         Signal::Audio => frame.fill(&Path::circle(point, PIN_RADIUS), TERMINAL_COLOR),
         Signal::Control => frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), CONTROL_COLOR),
@@ -873,10 +1010,9 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
             _ => None,
         })
         .collect();
-    let wiring = graph.wiring();
     let mut live = Live::new(node, |id| {
         if pinned.contains(&id) {
-            wiring
+            graph
                 .control_route(index, id)
                 .map(|route| route.apply(levels))
         } else {
@@ -886,14 +1022,14 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
     // An envelope and an LFO also say where their signal is, for the viewer's cursor.
     match node.kind {
         NodeKind::Envelope => {
-            if let Some(slot) = wiring.envelope_index(index) {
+            if let Some(slot) = graph.envelope_index(index) {
                 if let Some(phase) = levels.envelope_phase[slot] {
                     live = live.with_envelope(phase, levels.envelope[slot]);
                 }
             }
         }
         NodeKind::Lfo => {
-            if let Some(slot) = wiring.lfo_index(index) {
+            if let Some(slot) = graph.lfo_index(index) {
                 live = live.with_lfo(levels.lfo_phase[slot], levels.lfo[slot]);
             }
         }
@@ -1560,6 +1696,7 @@ pub(super) fn draw_pill(
             PillItem::Category(category) => category.label().to_string(),
             // The button names the current preset, cut short to fit.
             PillItem::Presets => preset_name.map_or("Presets".to_string(), shorten),
+            PillItem::Groups => "Groups".to_string(),
         };
         frame.fill_text(Text {
             content: label,
@@ -1571,13 +1708,13 @@ pub(super) fn draw_pill(
             ..Text::default()
         });
         // A category and the presets open a list, so their buttons have a chevron.
-        if let PillItem::Category(_) | PillItem::Presets = item {
+        if let PillItem::Category(_) | PillItem::Presets | PillItem::Groups = item {
             // The Presets button can hold a name, so its chevron sits further out.
             let chevron_x = center_x
                 + if *item == PillItem::Presets {
-                    50.0
+                    42.0
                 } else {
-                    36.0
+                    32.0
                 };
             let chevron = Path::new(|builder| {
                 builder.move_to(Point::new(chevron_x - 3.0, center_y - 2.0));
@@ -1726,6 +1863,45 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
 
     if let Some(open) = menu.open {
         draw_submenu(frame, bounds, graph, open);
+    }
+}
+
+/// The list under the Groups button, one row per saved group, with a note under it if the rows
+/// that fit above the keys are not all of them. An empty folder says so.
+pub(super) fn draw_group_list(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+    let Some(entries) = &graph.group_list else {
+        return;
+    };
+    let list = group_list_bounds(bounds, entries.len());
+    draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
+    frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
+    if graph.cursor_in {
+        if let Some(row) = group_row_at(bounds, entries.len(), graph.last_screen) {
+            light_row(frame, list, row);
+        }
+    }
+    let shown = group_rows_shown(bounds, entries.len());
+    if entries.is_empty() {
+        list_row_text(
+            frame,
+            list,
+            0,
+            "No saved groups".to_string(),
+            DIM_TEXT_COLOR,
+        );
+    }
+    for (row, entry) in entries.iter().take(shown).enumerate() {
+        list_row_text(frame, list, row, entry.label(), TEXT_COLOR);
+    }
+    if entries.len() > shown {
+        frame.fill_text(Text {
+            content: format!("{} more not shown", entries.len() - shown),
+            position: Point::new(list.x + 12.0, list.y + list.height + 10.0),
+            color: DIM_TEXT_COLOR,
+            size: 11.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
     }
 }
 
@@ -1894,7 +2070,7 @@ pub(super) fn draw_quick_add(frame: &mut Frame, bounds: Rectangle, graph: &Graph
     let Some(open) = &graph.quick_add else {
         return;
     };
-    let results = graph.quick_add_results();
+    let results = graph.quick_add_picks();
     let area = quick_add_bounds(bounds, open.screen, results.len());
     draw_shadow(frame, area, MENU_CORNER_RADIUS, FLOAT_SHADOW);
     frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
@@ -1907,7 +2083,7 @@ pub(super) fn draw_quick_add(frame: &mut Frame, bounds: Rectangle, graph: &Graph
     };
     frame.fill(&rounded_rect(field, DROPDOWN_CORNER_RADIUS), DROPDOWN_COLOR);
     let (shown, shade) = if open.query.is_empty() {
-        ("Search nodes|".to_string(), DIM_TEXT_COLOR)
+        ("Search nodes and groups|".to_string(), DIM_TEXT_COLOR)
     } else {
         (format!("{}|", open.query), TEXT_COLOR)
     };
@@ -1938,12 +2114,26 @@ pub(super) fn draw_quick_add(frame: &mut Frame, bounds: Rectangle, graph: &Graph
         return;
     }
     light_row(frame, list, open.selected.min(results.len() - 1));
-    for (row, kind) in results.iter().enumerate() {
-        text(
-            frame,
-            kind.title().to_string(),
-            list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
-            TEXT_COLOR,
-        );
+    for (row, pick) in results.iter().enumerate() {
+        let y = list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0;
+        match pick {
+            QuickPick::Kind(kind) => text(frame, kind.title().to_string(), y, TEXT_COLOR),
+            QuickPick::Group(index) => {
+                let Some(group) = open.groups.get(*index) else {
+                    continue;
+                };
+                text(frame, group.entry.name.clone(), y, TEXT_COLOR);
+                // A dim tag on the right tells a saved group from a node kind.
+                frame.fill_text(Text {
+                    content: "Group".to_string(),
+                    position: Point::new(area.x + area.width - 14.0, y),
+                    color: DIM_TEXT_COLOR,
+                    size: 11.0,
+                    horizontal_alignment: alignment::Horizontal::Right,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
+            }
+        }
     }
 }

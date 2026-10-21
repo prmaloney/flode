@@ -4,6 +4,7 @@
 use crate::dsp::curve::MAX_CURVE_POINTS;
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
+use crate::groups::GroupEntry;
 use crate::nodes::{envelope, eq};
 use crate::nodes::{NodeKind, Port, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
@@ -13,6 +14,7 @@ use nih_plug_iced::widget::canvas::{
 };
 use nih_plug_iced::{keyboard, mouse, Point, Rectangle, Vector};
 
+use super::group_ui::{canvas_rect, pane_bounds, rename_bounds};
 use super::shortcuts::{self, Shortcut};
 use super::{curve::*, draw::*, graph::*, menus::*, view::*};
 
@@ -59,14 +61,19 @@ impl<'a> NodeEditor<'a> {
             return (event::Status::Captured, Some(Message::GraphChanged));
         }
 
+        // The rename box takes every press. One outside it keeps the name and closes the box.
+        if self.graph.rename.is_some() {
+            return self.press_rename(screen, bounds);
+        }
+
         // The quick add box takes every press. A result adds its node, which then follows the
         // cursor. A press in the box off the results does nothing, and one outside closes it.
         if self.graph.quick_add.is_some() {
-            let results = self.graph.quick_add_results();
+            let results = self.graph.quick_add_picks();
             if let Some(open) = self.graph.quick_add.take() {
                 let area = quick_add_bounds(bounds, open.screen, results.len());
                 if let Some(row) = quick_add_row_at(area, screen, results.len()) {
-                    self.place_fed(results[row], open.world, open.feed);
+                    self.place_pick(results[row], open.world, open.feed, &open.groups);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 if area.contains(screen) {
@@ -109,6 +116,14 @@ impl<'a> NodeEditor<'a> {
                         }
                     }
                     MenuItem::AutoPack => self.graph.auto_pack(),
+                    MenuItem::Open
+                    | MenuItem::Rename
+                    | MenuItem::Ungroup
+                    | MenuItem::Group
+                    | MenuItem::SaveGroup
+                    | MenuItem::RemovePin => {
+                        self.group_menu_item(menu, item);
+                    }
                     MenuItem::Delete => {
                         if self.graph.is_selected(menu.node) {
                             self.graph.delete_selected();
@@ -168,6 +183,16 @@ impl<'a> NodeEditor<'a> {
             }
         }
 
+        // An open list of saved groups takes the press. Its row adds a copy of the group, which
+        // then follows the cursor. Any other press closes it.
+        let had_groups = self.graph.group_list.is_some();
+        if let Some(entries) = self.graph.group_list.take() {
+            if let Some(row) = group_row_at(bounds, entries.len(), screen) {
+                self.place_group(&entries[row], point, None, None);
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+        }
+
         // An open category list takes the press. Its row adds the node. Any other press closes it.
         let open_category = self.graph.category_menu.take();
         if let Some(category) = open_category {
@@ -196,7 +221,19 @@ impl<'a> NodeEditor<'a> {
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
+            Some(PillItem::Groups) => {
+                if !had_groups {
+                    self.graph.open_group_list();
+                }
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
             None => {}
+        }
+
+        // While a group is open the pane has its own parts, and a press beside it is on the
+        // margin.
+        if let Some(result) = self.press_pane(screen, bounds) {
+            return result;
         }
 
         match self.graph.terminal_at(point) {
@@ -365,10 +402,15 @@ impl<'a> NodeEditor<'a> {
             }
             if node.bounds().contains(point) {
                 let in_header = node.header_bounds().contains(point);
+                let is_group = node.kind == NodeKind::Group;
                 let grab = Vector::new(point.x - node.position.x, point.y - node.position.y);
                 // A node of the selection keeps its group, so its header drags all of it.
                 if !self.graph.is_selected(index) {
                     self.graph.select(index);
+                }
+                // A double click on a group's header, or a press on its open glyph, opens it.
+                if is_group && in_header && self.press_group_header(index, point, screen) {
+                    return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 if in_header {
                     // A drag takes the node over from any slide it is in.
@@ -478,6 +520,10 @@ impl<'a> NodeEditor<'a> {
     /// Runs a shortcut on the selected node. Returns true if the graph changed. With nothing
     /// selected, or on a node the action does not apply to, nothing happens.
     pub(super) fn run_shortcut(&mut self, shortcut: Shortcut) -> bool {
+        // The group shortcuts act on the selection, or on the open group.
+        if let Some(changed) = self.run_group_shortcut(shortcut) {
+            return changed;
+        }
         // The quick add box needs no selection. It waits while a node is being placed, so one
         // press sets down one node.
         if shortcut == Shortcut::QuickAdd {
@@ -491,7 +537,11 @@ impl<'a> NodeEditor<'a> {
             return false;
         };
         match shortcut {
-            Shortcut::QuickAdd => false,
+            Shortcut::QuickAdd
+            | Shortcut::Group
+            | Shortcut::Ungroup
+            | Shortcut::ToggleGroup
+            | Shortcut::Escape => false,
             Shortcut::ToggleBypass => self.graph.toggle_bypass(index),
             // The copy appears under the cursor. While a node is already being placed, the
             // shortcut waits, so one press sets down one node.
@@ -536,6 +586,16 @@ impl<'a> NodeEditor<'a> {
                 return true;
             }
         }
+        if let Some(entries) = &self.graph.group_list {
+            if group_row_at(bounds, entries.len(), screen).is_some() {
+                return true;
+            }
+        }
+        if let Some(rename) = &self.graph.rename {
+            if rename_bounds(bounds, rename.screen).contains(screen) {
+                return true;
+            }
+        }
         self.graph.quick_add.is_some()
     }
 
@@ -546,7 +606,7 @@ impl<'a> NodeEditor<'a> {
         &mut self,
         event: &keyboard::Event,
     ) -> (event::Status, Option<Message>) {
-        let results = self.graph.quick_add_results();
+        let results = self.graph.quick_add_picks();
         match event {
             keyboard::Event::CharacterReceived(c) => {
                 if let Some(open) = self.graph.quick_add.as_mut() {
@@ -582,10 +642,11 @@ impl<'a> NodeEditor<'a> {
                     keyboard::KeyCode::Escape => self.graph.quick_add = None,
                     keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter => {
                         let (world, feed) = (open.world, open.feed);
-                        let kind = results.get(open.selected).copied();
+                        let pick = results.get(open.selected).copied();
+                        let groups = std::mem::take(&mut open.groups);
                         self.graph.quick_add = None;
-                        if let Some(kind) = kind {
-                            self.place_fed(kind, world, feed);
+                        if let Some(pick) = pick {
+                            self.place_pick(pick, world, feed, &groups);
                             return (event::Status::Captured, Some(Message::GraphChanged));
                         }
                     }
@@ -708,6 +769,44 @@ impl<'a> NodeEditor<'a> {
         }
     }
 
+    /// Places the quick add result `pick`. A kind is added with `place_fed`. A saved group is
+    /// loaded from its file, and wired to the input a wire was dragged back from if there was one.
+    pub(super) fn place_pick(
+        &mut self,
+        pick: QuickPick,
+        point: Point,
+        feed: Option<(usize, Port)>,
+        groups: &[QuickGroup],
+    ) {
+        match pick {
+            QuickPick::Kind(kind) => self.place_fed(kind, point, feed),
+            QuickPick::Group(index) => {
+                if let Some(group) = groups.get(index) {
+                    self.place_group(&group.entry, point, feed, group.out);
+                }
+            }
+        }
+    }
+
+    /// Adds a copy of a saved group and makes it follow the cursor, like a node just added from
+    /// the pill. With a feed and an output pin, the first pin that fits is wired to the input. A
+    /// file that can't be loaded adds nothing and says why.
+    pub(super) fn place_group(
+        &mut self,
+        entry: &GroupEntry,
+        point: Point,
+        feed: Option<(usize, Port)>,
+        out: Option<Port>,
+    ) {
+        let Some(node) = self.graph.add_saved_group(entry, point) else {
+            return;
+        };
+        self.graph.start_placing(node, point);
+        if let (Some((to, input)), Some(out)) = (feed, out) {
+            self.graph.connect(node, out, to, input);
+        }
+    }
+
     /// Copies a node and makes the copy follow the cursor, like a node just added from the pill,
     /// until the next press sets it down. Returns false for a node that can't be copied.
     pub(super) fn duplicate_and_place(&mut self, index: usize, point: Point) -> bool {
@@ -741,14 +840,41 @@ impl<'a> NodeEditor<'a> {
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
+        // A press on the margin of an open pane is not on the graph.
+        if self.graph.group_depth() > 0
+            && !pane_bounds(canvas_rect(self.graph.canvas_size)).contains(screen)
+        {
+            return (event::Status::Captured, Some(Message::Hovered));
+        }
+        // A pin of a group, or a row of the macro node, has a menu of its own.
+        if self.secondary_group_target(point, screen) {
+            return (event::Status::Captured, Some(Message::GraphChanged));
+        }
         if let Some(index) = self.graph.node_at(point) {
+            // The edge nodes of a group can't be copied, switched off, or deleted, so they have
+            // no menu.
+            if matches!(
+                self.graph.nodes[index].kind,
+                NodeKind::GroupInput | NodeKind::GroupOutput
+            ) {
+                return (event::Status::Captured, Some(Message::Hovered));
+            }
             // A right press on a node of a group keeps the group, so the menu acts on all of it.
             if !self.graph.is_selected(index) {
                 self.graph.select(index);
             }
             let node = &self.graph.nodes[index];
             let items = if self.graph.selection().len() > 1 {
-                group_menu_items(node)
+                let groupable = self.graph.selection().iter().any(|&member| {
+                    !matches!(
+                        self.graph.nodes[member].kind,
+                        NodeKind::Output
+                            | NodeKind::Macro
+                            | NodeKind::GroupInput
+                            | NodeKind::GroupOutput
+                    )
+                });
+                group_menu_items(node, groupable)
             } else {
                 menu_items(node)
             };
@@ -756,6 +882,7 @@ impl<'a> NodeEditor<'a> {
                 node: index,
                 position: screen,
                 items,
+                target: MenuTarget::Node,
             });
         }
         (event::Status::Captured, Some(Message::GraphChanged))
@@ -788,6 +915,10 @@ impl<'a> NodeEditor<'a> {
         point: Point,
         bounds: Rectangle,
     ) -> (event::Status, Option<Message>) {
+        // A click on the margin round an open pane closes the group.
+        if let Some(result) = self.release_margin(bounds) {
+            return result;
+        }
         // Placing ends on the next press, not on the release of the press that started it.
         if let Interaction::Placing { .. } = self.graph.interaction {
             return (event::Status::Captured, None);
@@ -796,16 +927,21 @@ impl<'a> NodeEditor<'a> {
         match interaction {
             Interaction::Wiring { from, out, .. } => {
                 if let Some(Terminal::In(to, input)) = self.graph.terminal_at(point) {
-                    self.graph.connect(from, out, to, input);
+                    // A drop on a group's empty pin, or a drag from one, makes a pin first.
+                    self.graph.drop_wire(from, out, to, input);
                 }
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::BackWiring { to, input, .. } => {
                 match self.graph.terminal_at(point) {
-                    Some(Terminal::Out(from, out)) => self.graph.connect(from, out, to, input),
+                    Some(Terminal::Out(from, out)) => {
+                        self.graph.drop_wire(from, out, to, input);
+                    }
                     // Over another pin, or over a node, nothing happens.
                     Some(Terminal::In(..)) => {}
                     None if self.graph.node_at(point).is_some() => {}
+                    // The empty pin has no kind of node that feeds it.
+                    None if input == Port::NewPin => {}
                     // Empty canvas. The cursor is where the box opens and the node lands.
                     None => {
                         let screen = self.graph.last_screen;
@@ -978,6 +1114,11 @@ impl<'a> Program<Message> for NodeEditor<'a> {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> (event::Status, Option<Message>) {
+        // The pane of an open group follows the editor's size.
+        if bounds.width > 0.0 && bounds.height > 0.0 && bounds.size() != self.graph.canvas_size {
+            self.graph.canvas_size = bounds.size();
+            self.graph.refit_view();
+        }
         let mouse_event = match event {
             Event::Mouse(mouse_event) => mouse_event,
             Event::Keyboard(key_event) => {
@@ -994,6 +1135,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 // The number box takes the keys while it is open.
                 if self.graph.knob_entry.is_some() {
                     return self.knob_entry_event(&key_event);
+                }
+                // So does the rename box.
+                if self.graph.rename.is_some() {
+                    return self.rename_event(&key_event);
                 }
                 // So does the quick add box.
                 if self.graph.quick_add.is_some() {
@@ -1090,7 +1235,7 @@ impl<'a> Program<Message> for NodeEditor<'a> {
             mouse::Event::CursorMoved { .. } => {
                 let mut submenu_changed = self.hover_preset_menu(bounds, screen);
                 // The result under the cursor is the lit one.
-                let rows = self.graph.quick_add_results().len();
+                let rows = self.graph.quick_add_picks().len();
                 if let Some(open) = self.graph.quick_add.as_mut() {
                     let area = quick_add_bounds(bounds, open.screen, rows);
                     if let Some(row) = quick_add_row_at(area, screen, rows) {
@@ -1110,6 +1255,10 @@ impl<'a> Program<Message> for NodeEditor<'a> {
             }
             mouse::Event::WheelScrolled { delta } => {
                 if !cursor.is_over(&bounds) {
+                    return (event::Status::Ignored, None);
+                }
+                // Over an open pane the wheel works on the pane's graph, and nowhere else.
+                if self.graph.group_depth() > 0 && !pane_bounds(bounds).contains(screen) {
                     return (event::Status::Ignored, None);
                 }
                 match view_scroll(delta) {

@@ -1,11 +1,13 @@
 //! The pill of add buttons, the category lists, dropdown lists, and the right-click menu: the
 //! chrome that floats above the nodes.
 
+use crate::groups::GroupEntry;
 use crate::nodes::{Bypass, Category, FlodeNode, NodeKind, Port};
 use crate::presets::Library;
 use nih_plug_iced::{Point, Rectangle};
 
 use super::graph::PresetMenu;
+use super::group::PinSide;
 use super::style::*;
 
 /// The add buttons on the pill, from left to right.
@@ -16,15 +18,18 @@ pub(super) enum PillItem {
     Category(Category),
     /// Opens the list of presets, with the entry that saves one.
     Presets,
+    /// Opens the list of saved groups.
+    Groups,
 }
 
 /// The pill's buttons, from left to right.
-pub(super) const PILL_ITEMS: [PillItem; 5] = [
+pub(super) const PILL_ITEMS: [PillItem; 6] = [
     PillItem::Kind(NodeKind::Oscillator),
     PillItem::Category(Category::Driver),
     PillItem::Category(Category::Util),
     PillItem::Category(Category::Effects),
     PillItem::Presets,
+    PillItem::Groups,
 ];
 
 /// A row of the preset list or of a category's submenu.
@@ -175,6 +180,41 @@ pub(super) fn preset_row_at(
     }
 }
 
+/// How many saved groups the list under the Groups button shows. It stops short of the key
+/// strip, like the preset list, and the rest are cut off.
+pub(super) fn group_rows_shown(bounds: Rectangle, total: usize) -> usize {
+    total.min(preset_room(bounds))
+}
+
+/// The list under the Groups button, one row per saved group. With none saved it has one row that
+/// says so.
+pub(super) fn group_list_bounds(bounds: Rectangle, total: usize) -> Rectangle {
+    let index = PILL_ITEMS
+        .iter()
+        .position(|item| *item == PillItem::Groups)
+        .unwrap_or(0);
+    let segment = pill_segment(bounds, index);
+    let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
+    Rectangle {
+        // The list lines up with the pill's right end, so it stays inside the window.
+        x: segment.x + segment.width - width,
+        y: segment.y + segment.height + LIST_GAP,
+        width,
+        height: group_rows_shown(bounds, total).max(1) as f32 * MENU_ITEM_HEIGHT,
+    }
+}
+
+/// The saved group whose row of the list is under `point`. The note row for an empty list is not
+/// a row.
+pub(super) fn group_row_at(bounds: Rectangle, total: usize, point: Point) -> Option<usize> {
+    let list = group_list_bounds(bounds, total);
+    if !list.contains(point) {
+        return None;
+    }
+    let row = ((point.y - list.y) / MENU_ITEM_HEIGHT) as usize;
+    (row < group_rows_shown(bounds, total)).then_some(row)
+}
+
 /// The list that opens below a dropdown, with one row per label.
 pub(super) fn dropdown_list_bounds(dropdown: Rectangle, rows: usize) -> Rectangle {
     Rectangle {
@@ -204,6 +244,18 @@ pub(super) enum MenuItem {
     /// Arranges the selected nodes by how they are wired. Offered only for several nodes.
     AutoPack,
     Delete,
+    /// Shows the graph inside a group node.
+    Open,
+    /// Names a group node, a pin, or a macro knob, whichever the menu is for.
+    Rename,
+    /// Breaks a group node back into its nodes.
+    Ungroup,
+    /// Makes a group of the selected nodes. Offered only for several nodes.
+    Group,
+    /// Takes a pin off a group.
+    RemovePin,
+    /// Saves a group node to a file, to load into other patches.
+    SaveGroup,
 }
 
 impl MenuItem {
@@ -213,6 +265,12 @@ impl MenuItem {
             (MenuItem::Duplicate, _, _) => "Duplicate",
             (MenuItem::AutoPack, _, _) => "Auto pack",
             (MenuItem::Delete, _, _) => "Delete",
+            (MenuItem::Open, _, _) => "Open",
+            (MenuItem::Rename, _, _) => "Rename",
+            (MenuItem::Ungroup, _, _) => "Ungroup",
+            (MenuItem::Group, _, _) => "Group",
+            (MenuItem::RemovePin, _, _) => "Remove pin",
+            (MenuItem::SaveGroup, _, _) => "Save group",
             (MenuItem::Bypass, Bypass::Mute, false) => "Mute",
             (MenuItem::Bypass, Bypass::Mute, true) => "Unmute",
             (MenuItem::Bypass, _, false) => "Bypass",
@@ -224,6 +282,16 @@ impl MenuItem {
 /// The entries a node's menu offers, top to bottom. Every node can be deleted. Most can be
 /// duplicated, and the ones that can be switched off also offer that.
 pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
+    if node.kind == NodeKind::Group {
+        return &[
+            MenuItem::Open,
+            MenuItem::Rename,
+            MenuItem::Ungroup,
+            MenuItem::Duplicate,
+            MenuItem::SaveGroup,
+            MenuItem::Delete,
+        ];
+    }
     match (node.can_duplicate(), node.bypass() != Bypass::None) {
         (true, true) => &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete],
         (true, false) => &[MenuItem::Duplicate, MenuItem::Delete],
@@ -233,18 +301,60 @@ pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
 }
 
 /// The entries for a node in a group of several selected nodes, which add Auto pack above Delete.
-pub(super) fn group_menu_items(node: &FlodeNode) -> &'static [MenuItem] {
-    match (node.can_duplicate(), node.bypass() != Bypass::None) {
-        (true, true) => &[
+/// They add Group above that when `groupable` says some selected node can go in a group.
+pub(super) fn group_menu_items(node: &FlodeNode, groupable: bool) -> &'static [MenuItem] {
+    match (
+        node.can_duplicate(),
+        node.bypass() != Bypass::None,
+        groupable,
+    ) {
+        (true, true, false) => &[
             MenuItem::Duplicate,
             MenuItem::Bypass,
             MenuItem::AutoPack,
             MenuItem::Delete,
         ],
-        (true, false) => &[MenuItem::Duplicate, MenuItem::AutoPack, MenuItem::Delete],
-        (false, true) => &[MenuItem::Bypass, MenuItem::AutoPack, MenuItem::Delete],
-        (false, false) => &[MenuItem::AutoPack, MenuItem::Delete],
+        (true, true, true) => &[
+            MenuItem::Duplicate,
+            MenuItem::Bypass,
+            MenuItem::Group,
+            MenuItem::AutoPack,
+            MenuItem::Delete,
+        ],
+        (true, false, false) => &[MenuItem::Duplicate, MenuItem::AutoPack, MenuItem::Delete],
+        (true, false, true) => &[
+            MenuItem::Duplicate,
+            MenuItem::Group,
+            MenuItem::AutoPack,
+            MenuItem::Delete,
+        ],
+        (false, true, false) => &[MenuItem::Bypass, MenuItem::AutoPack, MenuItem::Delete],
+        (false, true, true) => &[
+            MenuItem::Bypass,
+            MenuItem::Group,
+            MenuItem::AutoPack,
+            MenuItem::Delete,
+        ],
+        (false, false, false) => &[MenuItem::AutoPack, MenuItem::Delete],
+        (false, false, true) => &[MenuItem::Group, MenuItem::AutoPack, MenuItem::Delete],
     }
+}
+
+/// The entries of the menu on a pin of a group.
+pub(super) const PIN_MENU_ITEMS: &[MenuItem] = &[MenuItem::Rename, MenuItem::RemovePin];
+
+/// The entries of the menu on a row of a macro node.
+pub(super) const MACRO_MENU_ITEMS: &[MenuItem] = &[MenuItem::Rename, MenuItem::Delete];
+
+/// What a right-click menu was opened on, besides the node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum MenuTarget {
+    /// The node as a whole.
+    Node,
+    /// A pin of a group. The node is the group node, or the edge node inside the group.
+    Pin(PinSide, usize),
+    /// A row of a macro node. It is the number of the macro, from 0.
+    Macro(usize),
 }
 
 /// The right-click menu for one node. `position` is its top-left corner in screen coordinates, so
@@ -254,6 +364,7 @@ pub(super) struct ContextMenu {
     pub(super) node: usize,
     pub(super) position: Point,
     pub(super) items: &'static [MenuItem],
+    pub(super) target: MenuTarget,
 }
 
 /// The pill at the top center of the editor.
@@ -357,9 +468,28 @@ pub(super) struct QuickAdd {
     /// that drag. The box then lists only the kinds that can feed the input, and the node it adds
     /// is wired to it.
     pub(super) feed: Option<(usize, Port)>,
+    /// The saved groups the box lists beside the node kinds, read when it opened.
+    pub(super) groups: Vec<QuickGroup>,
     /// True until the first key after opening. The A that opened the box also arrives as a typed
     /// character, and this drops it.
     pub(super) skip_char: bool,
+}
+
+/// A saved group in the quick add box.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct QuickGroup {
+    pub(super) entry: GroupEntry,
+    /// The output pin of the group that feeds the input a wire was dragged back from, when the box
+    /// opened from that drag. A group with no such pin is not listed then.
+    pub(super) out: Option<Port>,
+}
+
+/// One result of the quick add box: a node kind, or a saved group by its place in
+/// `QuickAdd::groups`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuickPick {
+    Kind(NodeKind),
+    Group(usize),
 }
 
 /// How well `query` matches `title`, lower being better, or None for no match. The best match is
@@ -379,28 +509,54 @@ fn match_rank(query: &str, title: &str) -> Option<u8> {
     }
 }
 
-/// The kinds that match `query`, best first, and in the menu's order among equals. An empty query
-/// lists every kind. `allowed` drops the kinds that can't be added, such as a second output.
-pub(super) fn quick_add_results(query: &str, allowed: impl Fn(NodeKind) -> bool) -> Vec<NodeKind> {
+/// The kinds and saved groups that match `query`, best first. Among equals the kinds come first,
+/// in the menu's order, then the groups in the order given. An empty query lists everything, so
+/// the kinds fill the rows. `allowed` drops the kinds that can't be added, such as a second
+/// output.
+pub(super) fn quick_add_picks(
+    query: &str,
+    allowed: impl Fn(NodeKind) -> bool,
+    groups: &[QuickGroup],
+) -> Vec<QuickPick> {
     let query = query.trim().to_lowercase();
-    let mut found: Vec<(u8, NodeKind)> = NodeKind::ALL
+    let kinds = NodeKind::ALL
         .iter()
         .copied()
         .filter(|&kind| allowed(kind))
-        .filter_map(|kind| {
+        .map(|kind| (QuickPick::Kind(kind), kind.title()));
+    let saved = groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (QuickPick::Group(index), group.entry.name.as_str()));
+    let mut found: Vec<(u8, QuickPick)> = kinds
+        .chain(saved)
+        .filter_map(|(pick, title)| {
             let rank = if query.is_empty() {
                 0
             } else {
-                match_rank(&query, kind.title())?
+                match_rank(&query, title)?
             };
-            Some((rank, kind))
+            Some((rank, pick))
         })
         .collect();
     found.sort_by_key(|(rank, _)| *rank);
     found
         .into_iter()
-        .map(|(_, kind)| kind)
+        .map(|(_, pick)| pick)
         .take(QUICK_ADD_ROWS)
+        .collect()
+}
+
+/// The node kinds `quick_add_picks` lists when no group is saved. The tests that check which
+/// kinds a box offers read it.
+#[cfg(test)]
+pub(super) fn quick_add_results(query: &str, allowed: impl Fn(NodeKind) -> bool) -> Vec<NodeKind> {
+    quick_add_picks(query, allowed, &[])
+        .into_iter()
+        .filter_map(|pick| match pick {
+            QuickPick::Kind(kind) => Some(kind),
+            QuickPick::Group(_) => None,
+        })
         .collect()
 }
 

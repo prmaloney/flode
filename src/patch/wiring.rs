@@ -9,7 +9,7 @@ use super::control::{
 };
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
-    FilterParams, FlangerParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
+    FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
     PhaserParams, ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
 use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
@@ -17,8 +17,8 @@ use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, eq, filter, input, lfo, map, math, mix, monitor, oscillator,
-    phaser, Bypass, FlodeNode, NodeKind, Port,
+    compressor, delay, distortion, eq, filter, gain, input, lfo, map, math, mix, monitor,
+    oscillator, phaser, Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 use std::cell::OnceCell;
@@ -549,6 +549,11 @@ impl<'a> Wiring<'a> {
                 mode: mix::mix_mode(n),
                 amount: knob(KnobId::Mix),
             })),
+            NodeKind::Gain => Some(StageParams::Gain(GainParams {
+                gain: knob(KnobId::UtilGain),
+                pan: knob(KnobId::Pan),
+                invert: gain::invert(n),
+            })),
             NodeKind::Distortion => Some(StageParams::Distortion(DistortionParams {
                 kind: distortion::kind(n),
                 drive: knob(KnobId::Drive),
@@ -621,15 +626,19 @@ impl<'a> Wiring<'a> {
             | NodeKind::Lfo
             | NodeKind::Input
             | NodeKind::Macro
-            | NodeKind::Envelope => None,
+            | NodeKind::Envelope
+            // Groups are flattened away before a graph compiles, so these never reach a stage.
+            | NodeKind::Group
+            | NodeKind::GroupInput
+            | NodeKind::GroupOutput => None,
         }
     }
 }
 
 /// The kinds of bus stage that keep memory, for counting how many of each a patch uses: the eight
-/// effects, the monitor, and the filter, which only runs on the bus when something on the bus
-/// feeds it.
-pub const EFFECT_KINDS: usize = 10;
+/// effects, the monitor, the filter, and the gain. The filter and the gain only run on the bus
+/// when something on the bus feeds them.
+pub const EFFECT_KINDS: usize = 11;
 /// The counter the monitors use.
 const MONITOR_KIND: usize = 9;
 
@@ -646,6 +655,7 @@ fn pool_kind(params: &StageParams) -> Option<usize> {
         StageParams::Filter(_) => Some(7),
         StageParams::Eq(_) => Some(8),
         StageParams::Monitor(_) => Some(MONITOR_KIND),
+        StageParams::Gain(_) => Some(10),
         StageParams::Oscillator(_) | StageParams::Mix(_) => None,
     }
 }
@@ -1176,7 +1186,12 @@ mod tests {
     /// A node that makes audio has as many audio inputs as its stage reads.
     #[test]
     fn each_audio_node_wires_as_many_inputs_as_its_stage_reads() {
-        for kind in [NodeKind::Oscillator, NodeKind::Filter, NodeKind::Mix] {
+        for kind in [
+            NodeKind::Oscillator,
+            NodeKind::Filter,
+            NodeKind::Mix,
+            NodeKind::Gain,
+        ] {
             let nodes = vec![node(kind)];
             let wiring = Wiring::new(&nodes, &[]);
             let params = wiring.stage_params(0).expect("an audio node makes a stage");
@@ -1735,5 +1750,91 @@ mod effect_tests {
         };
         assert_eq!(pools(&lanes[0]), [0, 1]);
         assert_eq!(pools(&lanes[1]), [2]);
+    }
+
+    /// A gain straight after an oscillator runs per voice and has no instance.
+    #[test]
+    fn a_gain_before_any_effect_runs_per_voice() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Gain),
+            node(NodeKind::Output),
+        ];
+        nodes[1].set_switch(0, true);
+        let links = [audio(0, 1, Port::Audio), audio(1, 2, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 2)[0];
+        assert_eq!(lane.stages.len(), 2);
+        let gain = &lane.stages[1];
+        assert!(matches!(gain.params, StageParams::Gain(p) if p.invert));
+        assert!(!gain.bus && !gain.tap);
+        assert_eq!(gain.inputs, [Some(0), None]);
+        assert!(!lane.stages[0].tap);
+    }
+
+    /// A gain after an effect runs on the bus, takes an instance, and taps nothing per voice.
+    /// Gains count their own instances, apart from the filters and the effects.
+    #[test]
+    fn a_gain_after_an_effect_runs_on_the_bus() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Reverb),
+            node(NodeKind::Gain),
+            node(NodeKind::Gain),
+            node(NodeKind::Filter),
+            node(NodeKind::Output),
+        ];
+        let links = [
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::Audio),
+            audio(2, 3, Port::Audio),
+            audio(3, 4, Port::Audio),
+            audio(4, 5, Port::Slot(0)),
+        ];
+        let lane = &lanes(&mut nodes, &links, 5)[0];
+        assert_eq!(lane.stages.len(), 5);
+        let gains: Vec<(bool, u8)> = lane
+            .stages
+            .iter()
+            .filter(|s| matches!(s.params, StageParams::Gain(_)))
+            .map(|s| (s.bus, s.pool))
+            .collect();
+        assert_eq!(gains, [(true, 0), (true, 1)]);
+        assert!(lane.stages[1].bus && !lane.stages[1].tap);
+        assert!(lane.stages[0].tap);
+        // The filter after them is on the bus too, with the first instance of its own kind.
+        assert!(lane.stages[4].bus);
+        assert_eq!(lane.stages[4].pool, 0);
+    }
+
+    /// A bypassed gain makes no stage. The signal passes through to whatever it feeds.
+    #[test]
+    fn a_bypassed_gain_makes_no_stage() {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Gain),
+            node(NodeKind::Output),
+        ];
+        nodes[1].bypassed = true;
+        let links = [audio(0, 1, Port::Audio), audio(1, 2, Port::Slot(0))];
+        let lane = &lanes(&mut nodes, &links, 2)[0];
+        assert_eq!(lane.stages.len(), 1);
+        assert!(matches!(lane.stages[0].params, StageParams::Oscillator(_)));
+    }
+
+    /// A wire into the Gain or Pan pin drives the knob.
+    #[test]
+    fn a_wire_drives_the_gain_and_pan_knobs() {
+        let nodes = vec![node(NodeKind::Gain), node(NodeKind::Lfo)];
+        let wire = |id| Connection {
+            from: 1,
+            out: Port::Shape,
+            to: 0,
+            input: Port::Knob(id),
+        };
+        let links = [wire(KnobId::UtilGain), wire(KnobId::Pan)];
+        let wiring = Wiring::new(&nodes, &links);
+        assert!(wiring.control_route(0, KnobId::UtilGain).is_some());
+        assert!(wiring.control_route(0, KnobId::Pan).is_some());
+        assert!(matches!(wiring.stage_params(0), Some(StageParams::Gain(_))));
     }
 }

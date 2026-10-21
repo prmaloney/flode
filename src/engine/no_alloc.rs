@@ -16,7 +16,7 @@ use crate::nodes::math::MathOp;
 use crate::patch::control::{MapNode, MapValue, MathNode, Param, Source};
 use crate::patch::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
-    FilterParams, FlangerParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
+    FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
     PhaserParams, ReverbParams, StageParams, StageSpec,
 };
 use crate::patch::{EnvelopeSettings, LfoSettings};
@@ -84,9 +84,24 @@ fn busy_patch() -> Patch {
     .with_input(0, 3)
     .with_input(1, 2)
     .on_bus();
-    patch.lanes[1]
-        .stages
-        .extend([warped_source, chorus, delay, bus_filter, add]);
+    // A gain on the bus after the mix, and one per voice after the FM mix of the next slot. Both
+    // pan, invert, and ease, so the guard covers the pooled and the per-voice gain.
+    let gain = |source| {
+        StageSpec::new(StageParams::Gain(GainParams {
+            gain: Param::fixed(KnobId::UtilGain, 3.0),
+            pan: Param::fixed(KnobId::Pan, -0.3),
+            invert: true,
+        }))
+        .with_input(0, source)
+    };
+    patch.lanes[1].stages.extend([
+        warped_source,
+        chorus,
+        delay,
+        bus_filter,
+        add,
+        gain(4).on_bus(),
+    ]);
     // A third slot mixes two oscillators by FM, which runs a delay line per voice.
     let fm_mix = MixParams {
         mode: MixMode::Fm,
@@ -101,6 +116,7 @@ fn busy_patch() -> Patch {
         StageSpec::new(StageParams::Mix(fm_mix))
             .with_input(0, 0)
             .with_input(1, 1),
+        gain(2),
     ]);
     // A fourth slot runs a saw through all seven effects, with the two switches on.
     let chain = [

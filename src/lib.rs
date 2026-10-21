@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 mod dsp;
 mod editor;
 mod engine;
+mod groups;
 mod nodes;
 mod patch;
 mod presets;

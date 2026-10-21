@@ -16,12 +16,23 @@ mod draw;
 #[cfg(test)]
 mod factory;
 pub mod graph;
+pub mod group;
+#[cfg(test)]
+mod group_file_tests;
+#[cfg(test)]
+mod group_knob_tests;
+#[cfg(test)]
+mod group_tests;
+mod group_ui;
+#[cfg(test)]
+mod group_ui_tests;
 pub mod knob;
 mod logo;
 mod menus;
 mod meter;
 mod monitor;
 mod pack;
+mod pane;
 pub mod piano;
 pub mod saved;
 mod shortcuts;

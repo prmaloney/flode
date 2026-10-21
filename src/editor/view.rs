@@ -32,6 +32,15 @@ impl View {
         )
     }
 
+    /// The screen point an editor point is drawn at.
+    #[cfg(test)]
+    pub(super) fn to_screen(&self, world: Point) -> Point {
+        Point::new(
+            world.x * self.zoom + self.offset.x,
+            world.y * self.zoom + self.offset.y,
+        )
+    }
+
     /// The editor rectangle that covers a screen rectangle.
     pub(super) fn rect_to_world(&self, rect: Rectangle) -> Rectangle {
         let origin = self.to_world(Point::new(rect.x, rect.y));

@@ -4,7 +4,7 @@ use super::{FlodeNode, Port};
 use serde::{Deserialize, Serialize};
 
 /// A wire from an output port on one node to an input port on another.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Connection {
     pub from: usize,
     pub out: Port,
@@ -14,12 +14,15 @@ pub struct Connection {
 
 impl Connection {
     /// True if the wire joins ports that exist and carry the same kind of signal. Audio goes to
-    /// audio, control goes to a knob, and notes go to notes.
+    /// audio, control goes to a knob, and notes go to notes. The empty pin on a group's edge node
+    /// takes no wire, since a drop on it makes a real pin first.
     pub fn is_valid(&self, nodes: &[FlodeNode]) -> bool {
         let (Some(from), Some(to)) = (nodes.get(self.from), nodes.get(self.to)) else {
             return false;
         };
         self.from != self.to
+            && self.out != Port::NewPin
+            && self.input != Port::NewPin
             && self.out.signal() == self.input.signal()
             && from.output_point(self.out).is_some()
             && to.input_point(self.input).is_some()

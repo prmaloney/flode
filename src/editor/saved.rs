@@ -4,14 +4,16 @@ use crate::dsp::curve::Curve;
 use crate::dsp::svf::FilterType;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::connection::Connection;
+use crate::nodes::group::{GroupData, GroupPin};
 use crate::nodes::knobs::KnobId;
 use crate::nodes::{FlodeNode, NodeKind, Port, NODE_WIDTH};
 use nih_plug_iced::Point;
 use serde::{Deserialize, Serialize};
 
 /// The version of the save format this build writes. A graph without one is from before
-/// oscillators took their notes from a MIDI input node.
-pub(super) const SAVE_VERSION: u32 = 2;
+/// oscillators took their notes from a MIDI input node. Version 3 added groups. A save from before
+/// it has none, and loads the same way.
+pub(super) const SAVE_VERSION: u32 = 3;
 
 /// The first version whose oscillators take their notes from a MIDI input node.
 pub(super) const NOTES_VERSION: u32 = 1;
@@ -94,6 +96,118 @@ pub struct SavedNode {
     pub(super) out_min: Option<f32>,
     #[serde(default, skip_serializing)]
     pub(super) out_max: Option<f32>,
+    /// A group node's graph. Missing on every other kind of node, and in saves from before groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) group: Option<SavedGroup>,
+    /// The pins that take a signal, on a group node or a group's output edge node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) inputs: Vec<GroupPin>,
+    /// The pins that send a signal, on a group node or a group's input edge node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) outputs: Vec<GroupPin>,
+    /// The names given to a macro node's four knobs. Empty when none was renamed, and in saves
+    /// from before macros could be renamed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) names: Vec<String>,
+}
+
+/// The graph a group node holds, as saved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedGroup {
+    pub(super) name: String,
+    pub(super) nodes: Vec<SavedNode>,
+    pub(super) links: Vec<Connection>,
+}
+
+/// The version of the group file format this build writes. A file with a higher one is from a
+/// newer build and is refused.
+pub const GROUP_FILE_VERSION: u32 = 1;
+
+/// A group saved on its own, to share between patches. It holds the group node as the patch
+/// saves it, so the graph inside, the pins, and the face knob values all come back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedGroupFile {
+    #[serde(default)]
+    version: u32,
+    /// The group's name. The file's own name wins when the file loads.
+    pub name: String,
+    node: SavedNode,
+}
+
+impl SavedGroupFile {
+    /// The file for group node `node`, saved under `name`. The node's place, fold, and bypass are
+    /// left out, since the copy that loads starts fresh.
+    pub fn new(node: &FlodeNode, name: &str) -> Self {
+        let mut saved = SavedNode::new(node);
+        saved.x = 0.0;
+        saved.y = 0.0;
+        saved.collapsed = false;
+        saved.bypassed = false;
+        if let Some(group) = saved.group.as_mut() {
+            group.name = name.to_string();
+        }
+        Self {
+            version: GROUP_FILE_VERSION,
+            name: name.to_string(),
+            node: saved,
+        }
+    }
+
+    /// Sets the group's name, in the file and in the group.
+    pub fn rename(&mut self, name: &str) {
+        self.name = name.to_string();
+        if let Some(group) = self.node.group.as_mut() {
+            group.name = name.to_string();
+        }
+    }
+
+    /// Builds the group node the file holds, or says why it can't. A file is refused if it is
+    /// from a newer build, does not hold a group, holds an Output or Macro node at any depth, or
+    /// has a wire that names a pin or node that is not there.
+    pub fn into_node(&self) -> Result<FlodeNode, String> {
+        if self.version > GROUP_FILE_VERSION {
+            return Err("it was saved by a newer Flode".to_string());
+        }
+        let saved = match (&self.node.kind, &self.node.group) {
+            (NodeKind::Group, Some(saved)) => saved,
+            _ => return Err("it does not hold a group".to_string()),
+        };
+        let node = self.node.into_node();
+        let data = node
+            .group
+            .as_ref()
+            .ok_or_else(|| "it does not hold a group".to_string())?;
+        check_group(saved, data)?;
+        Ok(node)
+    }
+}
+
+/// Checks a group as loaded against what the file said. The load drops a wire that has no pin to
+/// end on, so a count that differs means the file was broken.
+fn check_group(saved: &SavedGroup, data: &GroupData) -> Result<(), String> {
+    if saved.links.len() != data.links.len() {
+        return Err(format!("{} has a wire with no pin", data.name));
+    }
+    if data.find(NodeKind::GroupInput).is_none() || data.find(NodeKind::GroupOutput).is_none() {
+        return Err(format!("{} is missing its input or output node", data.name));
+    }
+    for (index, node) in data.nodes.iter().enumerate() {
+        match node.kind {
+            NodeKind::Output | NodeKind::Macro => {
+                return Err(format!("{} cannot hold a {} node", data.name, node.title()));
+            }
+            NodeKind::Group => {
+                let inner = node.group.as_ref();
+                let saved_inner = saved.nodes.get(index).and_then(|n| n.group.as_ref());
+                match (saved_inner, inner) {
+                    (Some(saved_inner), Some(inner)) => check_group(saved_inner, inner)?,
+                    _ => return Err(format!("{} has a group with no graph", data.name)),
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl SavedNode {
@@ -109,12 +223,25 @@ impl SavedNode {
             choice: 0,
             switches: node.switches.to_vec(),
             switched: false,
-            knobs: KnobId::ALL.iter().map(|&id| (id, node.value(id))).collect(),
+            // A group node's knob ids only name its face knobs, whose values the pins save.
+            knobs: if node.kind == NodeKind::Group {
+                Vec::new()
+            } else {
+                KnobId::ALL.iter().map(|&id| (id, node.value(id))).collect()
+            },
             points: node.points.clone(),
             waveform: None,
             filter_type: None,
             out_min: None,
             out_max: None,
+            group: node.group.as_ref().map(|group| SavedGroup {
+                name: group.name.clone(),
+                nodes: group.nodes.iter().map(SavedNode::new).collect(),
+                links: group.links.clone(),
+            }),
+            inputs: node.inputs.clone(),
+            outputs: node.outputs.clone(),
+            names: node.names.clone(),
         }
     }
 
@@ -168,6 +295,35 @@ impl SavedNode {
         }
         for &(id, value) in &self.knobs {
             node.set_value(id, value);
+        }
+        node.inputs = self.inputs.clone();
+        node.outputs = self.outputs.clone();
+        if self.kind == NodeKind::Macro {
+            for (index, name) in self.names.iter().enumerate() {
+                node.set_macro_name(index, name);
+            }
+        }
+        if self.kind == NodeKind::Group {
+            if let Some(saved) = &self.group {
+                // The graph inside loads like any other, so a group in a group does too.
+                let nodes: Vec<FlodeNode> = saved.nodes.iter().map(SavedNode::into_node).collect();
+                let links = saved
+                    .links
+                    .iter()
+                    .copied()
+                    .filter(|link| link.is_valid(&nodes))
+                    .collect();
+                let data = GroupData {
+                    name: saved.name.clone(),
+                    nodes,
+                    links,
+                };
+                node.group = Some(Box::new(data));
+                // The face pins are a copy of the edge nodes' pins, so the edge nodes decide the
+                // names and signals. The saved face keeps the knob values, and a save from before
+                // face knobs takes them from the knobs inside.
+                super::group::sync_face(&mut node);
+            }
         }
         node
     }

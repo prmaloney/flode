@@ -1,8 +1,8 @@
 //! The bus of every slot: the stages that run once per sample on the slot's summed voices, after
-//! the per-voice stages. These are the effects, and any filter or mix that something on the bus
-//! feeds. The engine keeps a few instances of each effect kind and of the filter, built when the
-//! sample rate is set, since their memory can't be allocated on the audio thread. A patch hands
-//! each such stage an instance by its `pool` number.
+//! the per-voice stages. These are the effects, and any filter, gain, or mix that something on the
+//! bus feeds. The engine keeps a few instances of each effect kind, of the filter, and of the
+//! gain, built when the sample rate is set, since their memory can't be allocated on the audio
+//! thread. A patch hands each such stage an instance by its `pool` number.
 //!
 //! This module reads the knobs and passes plain numbers to the effects in `dsp::effects`. It does
 //! no signal processing of its own, apart from combining the two signals of a mix.
@@ -17,6 +17,7 @@ use crate::dsp::effects::flanger::{Flanger, FlangerParams};
 use crate::dsp::effects::phaser::{Phaser, PhaserParams};
 use crate::dsp::effects::reverb::{Reverb, ReverbParams};
 use crate::dsp::frame::Frame;
+use crate::dsp::gain::Utility;
 use crate::dsp::mix::MixMode;
 use crate::dsp::monitor::{Monitor, MonitorData};
 use crate::engine::stage::FilterState;
@@ -45,6 +46,8 @@ pub struct Effects {
     /// The filters that run on the bus. One starts at its knob values the first time it plays,
     /// so it holds `None` until then.
     filter: Vec<Option<FilterState>>,
+    /// The gains that run on the bus, which start the same way.
+    gain: Vec<Option<Utility>>,
 }
 
 impl Effects {
@@ -54,6 +57,7 @@ impl Effects {
         Self {
             sample_rate,
             filter: vec![None; POOL],
+            gain: vec![None; POOL],
             distortion: (0..POOL).map(|_| Distortion::new(sample_rate)).collect(),
             compressor: (0..POOL).map(|_| Compressor::new(sample_rate)).collect(),
             reverb: (0..POOL).map(|_| Reverb::new(sample_rate)).collect(),
@@ -98,6 +102,7 @@ impl Effects {
         self.eq.iter_mut().for_each(Eq::reset);
         self.monitor.iter_mut().for_each(Monitor::reset);
         self.filter.iter_mut().for_each(|filter| *filter = None);
+        self.gain.iter_mut().for_each(|gain| *gain = None);
     }
 
     /// Runs the bus stages of one slot for one sample and returns what the last stage makes, or
@@ -277,6 +282,16 @@ impl Effects {
                 Some(state) => state
                     .get_or_insert_with(|| FilterState::new(p, levels))
                     .tick(p, input, levels, smooth, self.sample_rate),
+                None => input,
+            },
+            StageParams::Gain(p) => match self.gain.get_mut(pool) {
+                Some(state) => {
+                    let gain_db = p.gain.plain(levels);
+                    let pan = p.pan.plain(levels);
+                    state
+                        .get_or_insert_with(|| Utility::new(gain_db, pan, p.invert))
+                        .tick(input, gain_db, pan, p.invert, smooth)
+                }
                 None => input,
             },
             StageParams::Mix(p) => {

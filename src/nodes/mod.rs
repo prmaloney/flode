@@ -16,6 +16,8 @@ pub mod envelope;
 pub mod eq;
 pub mod filter;
 pub mod flanger;
+pub mod gain;
+pub mod group;
 pub mod input;
 pub mod knobs;
 pub mod lfo;
@@ -31,6 +33,7 @@ pub mod reverb;
 pub mod viewer;
 
 use crate::editor::knob;
+use group::{GroupData, GroupPin};
 use nih_plug_iced::{Point, Rectangle};
 use serde::{Deserialize, Serialize};
 use viewer::{Live, Trace, TRACE_SAMPLES};
@@ -122,7 +125,7 @@ pub struct RowPlace {
     pub shape: RowShape,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     Oscillator,
     Envelope,
@@ -143,6 +146,13 @@ pub enum NodeKind {
     Math,
     Monitor,
     Macro,
+    Gain,
+    /// A node that holds a graph of its own. Wires cross into it through numbered pins.
+    Group,
+    /// The inside edge of a group where its input pins enter. One per group graph.
+    GroupInput,
+    /// The inside edge of a group where its output pins leave. One per group graph.
+    GroupOutput,
 }
 
 /// The groups the add menu sorts the node kinds into.
@@ -176,6 +186,7 @@ impl Category {
                 NodeKind::Monitor,
                 NodeKind::Input,
                 NodeKind::Mix,
+                NodeKind::Gain,
             ],
             Category::Effects => &[
                 NodeKind::Filter,
@@ -194,7 +205,7 @@ impl Category {
 
 impl NodeKind {
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 19] = [
+    pub const ALL: [NodeKind; 23] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
@@ -214,12 +225,29 @@ impl NodeKind {
         NodeKind::Math,
         NodeKind::Monitor,
         NodeKind::Macro,
+        NodeKind::Gain,
+        NodeKind::Group,
+        NodeKind::GroupInput,
+        NodeKind::GroupOutput,
     ];
 
-    /// True for a kind a graph holds at most one of. The output node decides what plays, and the
-    /// macro knobs are one fixed set of host parameters.
+    /// True for a kind a graph holds at most one of. The output node decides what plays, the
+    /// macro knobs are one fixed set of host parameters, and a group graph has one edge node on
+    /// each side.
     pub fn is_unique(self) -> bool {
-        matches!(self, NodeKind::Output | NodeKind::Macro)
+        matches!(
+            self,
+            NodeKind::Output | NodeKind::Macro | NodeKind::GroupInput | NodeKind::GroupOutput
+        )
+    }
+
+    /// True for the kinds that make up a group: the group node and the two edge nodes inside it.
+    /// The add menus never offer them, since only the group commands make them.
+    pub fn is_group_part(self) -> bool {
+        matches!(
+            self,
+            NodeKind::Group | NodeKind::GroupInput | NodeKind::GroupOutput
+        )
     }
 
     /// What sets this kind apart from the others.
@@ -244,6 +272,10 @@ impl NodeKind {
             NodeKind::Math => &math::Math,
             NodeKind::Monitor => &monitor::Monitor,
             NodeKind::Macro => &macros::Macros,
+            NodeKind::Gain => &gain::Gain,
+            NodeKind::Group => &group::Group,
+            NodeKind::GroupInput => &group::GroupInput,
+            NodeKind::GroupOutput => &group::GroupOutput,
         }
     }
 
@@ -255,7 +287,7 @@ impl NodeKind {
 /// A socket on a node. Audio ports carry sound. The shape port carries a control signal. A knob
 /// port takes a control signal in place of the knob's own value. A slot port is an audio input
 /// on an output node, and each slot plays its own chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Port {
     Audio,
     /// One of several audio inputs on a node, such as the two signals a mix node combines.
@@ -270,10 +302,17 @@ pub enum Port {
     Notes,
     /// Macro knob `n` on a macro node, sent as a control signal.
     Macro(usize),
+    /// Pin `n` of a group boundary node, carrying the given kind of signal. Whether it takes a
+    /// signal or sends one depends on the node and the row it is on, as with `Audio`.
+    Pin(Signal, usize),
+    /// The empty pin below the last pin of a group's edge node. A wire dropped on it makes a new
+    /// pin. It carries no signal of its own and never ends a wire, so `Connection::is_valid`
+    /// refuses any wire that names it.
+    NewPin,
 }
 
 /// The kinds of signal a wire can carry. A wire joins two ports of the same kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Signal {
     /// Sound.
     Audio,
@@ -290,6 +329,9 @@ impl Port {
             Port::Audio | Port::AudioIn(_) | Port::Slot(_) => Signal::Audio,
             Port::Shape | Port::Knob(_) | Port::Midi(_) | Port::Macro(_) => Signal::Control,
             Port::Notes => Signal::Notes,
+            Port::Pin(signal, _) => signal,
+            // An empty pin has no signal. Audio is the grey a pin falls back to.
+            Port::NewPin => Signal::Audio,
         }
     }
 
@@ -298,9 +340,17 @@ impl Port {
         self.signal() == Signal::Audio
     }
 
-    /// True for a control output: a shape pin, a MIDI source, or a macro.
+    /// True for a control output: a shape pin, a MIDI source, a macro, or a control pin.
     pub fn is_control_out(self) -> bool {
-        matches!(self, Port::Shape | Port::Midi(_) | Port::Macro(_))
+        matches!(
+            self,
+            Port::Shape | Port::Midi(_) | Port::Macro(_) | Port::Pin(Signal::Control, _)
+        )
+    }
+
+    /// True for an output that sends sound along a wire: a plain audio output or an audio pin.
+    pub fn is_audio_out(self) -> bool {
+        matches!(self, Port::Audio | Port::Pin(Signal::Audio, _))
     }
 
     /// The name drawn beside an output pin, for the ones that need one.
@@ -536,6 +586,20 @@ pub struct FlodeNode {
     pub slots: usize,
     /// Output nodes only. The number of slots with a chain wired in.
     pub used: usize,
+    /// Group parts only. The pins that take a signal. On a group node these are the pins on its
+    /// left edge, which take signals into the group, and they equal the `outputs` of the inner
+    /// `GroupInput` node. A `GroupOutput` node holds its own pins here, and they equal the
+    /// `outputs` of the group node.
+    pub inputs: Vec<GroupPin>,
+    /// Group parts only. The pins that send a signal. On a group node these are the pins on its
+    /// right edge, and they equal the `inputs` of the inner `GroupOutput` node. A `GroupInput`
+    /// node holds its own pins here, and they equal the `inputs` of the group node.
+    pub outputs: Vec<GroupPin>,
+    /// Group nodes only. The graph the node holds.
+    pub group: Option<Box<GroupData>>,
+    /// Macro nodes only. The name shown for each of the four knobs. An empty name, or a missing
+    /// one, shows the knob's own name. The host keeps listing the parameters as Macro 1 to 4.
+    pub names: Vec<String>,
     /// Drag state for each knob.
     pub knob_states: [knob::State; KnobId::COUNT],
 }
@@ -559,6 +623,10 @@ impl FlodeNode {
             points: Vec::new(),
             slots: 1,
             used: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            group: (kind == NodeKind::Group).then(|| Box::new(GroupData::new("Group"))),
+            names: Vec::new(),
             knob_states: std::array::from_fn(|_| Default::default()),
         };
         // A kind can start a knob somewhere other than the knob's own default, such as a
@@ -575,7 +643,8 @@ impl FlodeNode {
     }
 
     /// A copy of the node at `position`, with the same knob values, dropdown choices, switches,
-    /// custom wave points, and on/off state. It has no wires, since those belong to the graph.
+    /// custom wave points, and on/off state. A group node copies its pins and the whole graph it
+    /// holds. It has no wires, since those belong to the graph.
     pub fn duplicate(&self, position: Point) -> FlodeNode {
         let mut copy = FlodeNode::new(self.kind, position);
         copy.collapsed = self.collapsed;
@@ -585,7 +654,40 @@ impl FlodeNode {
         copy.choices = self.choices.clone();
         copy.switches = self.switches.clone();
         copy.points = self.points.clone();
+        copy.slots = self.slots;
+        copy.used = self.used;
+        copy.inputs = self.inputs.clone();
+        copy.outputs = self.outputs.clone();
+        copy.group = self.group.as_ref().map(|group| Box::new(group.duplicate()));
+        copy.names = self.names.clone();
         copy
+    }
+
+    /// Feeds everything about the node that changes what it compiles to into `state`. The editor
+    /// compares the result to tell whether a cached compile of a graph with groups is still good.
+    /// Names, positions, and folds are left out, since they change nothing the compiler reads.
+    pub fn hash_compile_state<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.kind.hash(state);
+        self.bypassed.hash(state);
+        for value in self.values {
+            state.write_u32(value.to_bits());
+        }
+        self.choices.hash(state);
+        self.switches.hash(state);
+        for point in &self.points {
+            state.write_u32(point[0].to_bits());
+            state.write_u32(point[1].to_bits());
+        }
+        self.slots.hash(state);
+        self.used.hash(state);
+        for pin in self.inputs.iter().chain(&self.outputs) {
+            pin.signal.hash(state);
+        }
+        state.write_usize(self.inputs.len());
+        if let Some(group) = &self.group {
+            group.hash_compile_state(state);
+        }
     }
 
     /// What switching this node off does. A node can only be bypassed if its kind has a bypass.
@@ -616,6 +718,70 @@ impl FlodeNode {
         self.kind.title()
     }
 
+    /// The name shown in the node's header. A group shows its own name, or "Group" while that is
+    /// empty. Every other kind shows its title.
+    pub fn label(&self) -> std::borrow::Cow<'_, str> {
+        match &self.group {
+            Some(group) if self.kind == NodeKind::Group && !group.name.trim().is_empty() => {
+                std::borrow::Cow::Borrowed(group.name.as_str())
+            }
+            _ => std::borrow::Cow::Borrowed(self.title()),
+        }
+    }
+
+    /// The name of a group pin, for the pin `port` on this node. `output` says which edge it is
+    /// on. None for any port that is not a pin, or a pin the node does not have.
+    pub fn pin_name(&self, port: Port, output: bool) -> Option<&str> {
+        let Port::Pin(_, index) = port else {
+            return None;
+        };
+        let pins = if output { &self.outputs } else { &self.inputs };
+        pins.get(index).map(|pin| pin.name.as_str())
+    }
+
+    /// The name shown beside a knob. A macro knob shows the name given to it, if there is one,
+    /// and a knob on a group's face shows its pin's name. Every other knob shows its own name.
+    pub fn knob_name(&self, id: KnobId) -> std::borrow::Cow<'_, str> {
+        if let Some((pin, _)) = self.face_slot(id) {
+            return std::borrow::Cow::Borrowed(self.knob_pins()[pin].name.as_str());
+        }
+        let custom = id
+            .macro_index()
+            .filter(|_| self.kind == NodeKind::Macro)
+            .and_then(|index| self.names.get(index))
+            .filter(|name| !name.trim().is_empty());
+        match custom {
+            Some(name) => std::borrow::Cow::Borrowed(name.as_str()),
+            None => std::borrow::Cow::Borrowed(id.name()),
+        }
+    }
+
+    /// Names macro knob `index`. A name with nothing in it puts the default name back. Returns
+    /// false if this is not a macro node or `index` is not a macro.
+    pub fn set_macro_name(&mut self, index: usize, name: &str) -> bool {
+        if self.kind != NodeKind::Macro || index >= macros::MACRO_COUNT {
+            return false;
+        }
+        if self.names.len() <= index {
+            self.names.resize(index + 1, String::new());
+        }
+        self.names[index] = name.trim().to_string();
+        // A node with every name back at the default keeps no list, so it saves as before.
+        if self.names.iter().all(String::is_empty) {
+            self.names.clear();
+        }
+        true
+    }
+
+    /// The name of macro knob `index` as the node shows it, which is what a rename box starts
+    /// with.
+    pub fn macro_name(&self, index: usize) -> String {
+        KnobId::MACROS
+            .get(index)
+            .map(|&id| self.knob_name(id).into_owned())
+            .unwrap_or_default()
+    }
+
     /// How wide the node is.
     pub fn width(&self) -> f32 {
         self.kind.behavior().width()
@@ -626,22 +792,115 @@ impl FlodeNode {
         self.kind.behavior().rows(self)
     }
 
+    /// The pins of a group node that show a knob on its face, as the pin's number and the knob it
+    /// feeds inside. They are the control pins that feed a knob, up to `GROUP_KNOB_COUNT`. The
+    /// first one uses the first of `GROUP_KNOBS` and so on. The input edge node inside a group
+    /// shows the same knobs on the same pins. Empty for any other kind of node.
+    pub fn face_knobs(&self) -> Vec<(usize, KnobId)> {
+        self.knob_pins()
+            .iter()
+            .enumerate()
+            .filter(|(_, pin)| pin.signal == Signal::Control)
+            .filter_map(|(index, pin)| Some((index, pin.knob?)))
+            .take(group::GROUP_KNOB_COUNT)
+            .collect()
+    }
+
+    /// The pins that can show a knob. On a group node they are its input pins, and on the input
+    /// edge node inside a group they are its pins, which are the same ones.
+    fn knob_pins(&self) -> &[GroupPin] {
+        match self.kind {
+            NodeKind::Group => &self.inputs,
+            NodeKind::GroupInput => &self.outputs,
+            _ => &[],
+        }
+    }
+
+    /// The pin and the inner knob a face knob id stands for, if `id` is one on this node.
+    fn face_slot(&self, id: KnobId) -> Option<(usize, KnobId)> {
+        if self.knob_pins().is_empty() {
+            return None;
+        }
+        let slot = group::GROUP_KNOBS.iter().position(|&known| known == id)?;
+        self.face_knobs().get(slot).copied()
+    }
+
+    /// The number of the pin that face knob `id` is on.
+    pub fn face_pin(&self, id: KnobId) -> Option<usize> {
+        self.face_slot(id).map(|(pin, _)| pin)
+    }
+
+    /// The knob whose range, snapping, default, and units knob `id` follows. It is `id` itself
+    /// except on a group node's face, where it is the knob the pin feeds.
+    pub fn knob_kind(&self, id: KnobId) -> KnobId {
+        self.face_slot(id).map_or(id, |(_, target)| target)
+    }
+
     /// A knob's value, normalized from 0.0 to 1.0.
     pub fn value(&self, id: KnobId) -> f32 {
-        self.values[id as usize]
+        match self.face_slot(id) {
+            Some((pin, _)) => self.knob_pins()[pin].value,
+            None => self.values[id as usize],
+        }
     }
 
     pub fn set_value(&mut self, id: KnobId, normalized: f32) {
-        self.values[id as usize] = id.snap(normalized);
+        match self.face_slot(id) {
+            Some((pin, target)) => {
+                let value = target.snap(normalized);
+                match self.kind {
+                    NodeKind::Group => self.inputs[pin].value = value,
+                    _ => self.outputs[pin].value = value,
+                }
+                self.push_face_value(pin, value);
+            }
+            None => self.values[id as usize] = id.snap(normalized),
+        }
+    }
+
+    /// Writes a face value into every knob inside the group that pin `pin` feeds, so the flat
+    /// copies the compiler reads, and the viewers of the nodes inside, already hold it. A pin that
+    /// feeds a shape pin or another group's pin gives that nothing.
+    fn push_face_value(&mut self, pin: usize, value: f32) {
+        let Some(data) = self.group.as_mut() else {
+            return;
+        };
+        let Some(edge) = data.find(NodeKind::GroupInput) else {
+            return;
+        };
+        // The edge node keeps a copy of the pin, so the two stay equal.
+        if let Some(copy) = data.nodes[edge].outputs.get_mut(pin) {
+            copy.value = value;
+        }
+        let targets: Vec<(usize, KnobId)> = data
+            .links
+            .iter()
+            .filter(|link| link.from == edge && matches!(link.out, Port::Pin(_, n) if n == pin))
+            .filter_map(|link| match link.input {
+                Port::Knob(id) => Some((link.to, id)),
+                _ => None,
+            })
+            .collect();
+        for (to, id) in targets {
+            if let Some(node) = data.nodes.get_mut(to) {
+                node.set_value(id, value);
+            }
+        }
     }
 
     /// A knob's value in its own units.
     pub fn plain(&self, id: KnobId) -> f32 {
-        id.to_plain(self.value(id))
+        self.knob_kind(id).to_plain(self.value(id))
     }
 
     pub fn reset_value(&mut self, id: KnobId) {
-        self.values[id as usize] = id.default_normalized();
+        let default = self.knob_kind(id).default_normalized();
+        self.set_value(id, default);
+    }
+
+    /// The text beside a knob that shows `normalized`, in the knob's units.
+    pub fn knob_format(&self, id: KnobId, normalized: f32) -> String {
+        self.knob_kind(id).format(normalized)
     }
 
     /// Whether section `n` is folded.
@@ -756,13 +1015,13 @@ impl FlodeNode {
     /// The number shown in the box for typing over knob `id`: its value in the units the knob
     /// reads in.
     pub fn knob_entry_text(&self, id: KnobId) -> String {
-        knobs::entry_text(id.to_entry(self.value(id)))
+        knobs::entry_text(self.knob_kind(id).to_entry(self.value(id)))
     }
 
     /// Sets knob `id` from a number typed in the units `knob_entry_text` uses. The value stops at
     /// the ends of the knob's range.
     pub fn enter_knob_value(&mut self, id: KnobId, number: f32) {
-        let normalized = id.from_entry(number);
+        let normalized = self.knob_kind(id).from_entry(number);
         self.set_value(id, if normalized.is_nan() { 0.0 } else { normalized });
     }
 
@@ -1139,7 +1398,9 @@ impl FlodeNode {
                         self.position.x + ROW_KNOB_CENTER_X,
                         self.position.y + places[index].y,
                     ),
-                    pinned: row.input == Some(Port::Knob(id)),
+                    // A knob on a group's face sits on its pin, which a wire can drive.
+                    pinned: row.input == Some(Port::Knob(id))
+                        || matches!(self.kind, NodeKind::Group | NodeKind::GroupInput),
                 })
             })
             .collect()
@@ -1165,7 +1426,8 @@ mod tests {
     fn every_kind_has_rows() {
         for kind in NodeKind::ALL {
             let node = FlodeNode::new(kind, Point::new(0.0, 0.0));
-            assert!(!node.rows().is_empty(), "{kind:?}");
+            // A group part has a row for each pin, so a new one has none.
+            assert!(kind.is_group_part() || !node.rows().is_empty(), "{kind:?}");
             let knobs: Vec<KnobId> = node.rows().iter().filter_map(|row| row.knob).collect();
             for (i, id) in knobs.iter().enumerate() {
                 assert!(!knobs[..i].contains(id), "{kind:?} lists {id:?} twice");

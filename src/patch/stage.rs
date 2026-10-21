@@ -98,6 +98,26 @@ impl Default for MixParams {
     }
 }
 
+/// A gain stage: one audio input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GainParams {
+    /// The level in dB.
+    pub gain: Param,
+    /// The balance, from -1.0 (left) to 1.0 (right).
+    pub pan: Param,
+    pub invert: bool,
+}
+
+impl Default for GainParams {
+    fn default() -> Self {
+        Self {
+            gain: Param::default_of(KnobId::UtilGain),
+            pan: Param::default_of(KnobId::Pan),
+            invert: false,
+        }
+    }
+}
+
 /// A distortion stage: one audio input.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DistortionParams {
@@ -205,6 +225,7 @@ pub enum StageParams {
     Oscillator(OscillatorParams),
     Filter(FilterParams),
     Mix(MixParams),
+    Gain(GainParams),
     Distortion(DistortionParams),
     Compressor(CompressorParams),
     Reverb(ReverbParams),
@@ -228,12 +249,16 @@ impl StageParams {
         }
     }
 
-    /// True for the effects. They always run once on a slot's summed voices, on the bus. A filter
-    /// or a mix runs per voice, unless something on the bus feeds it. Then it runs on the bus too.
+    /// True for the effects. They always run once on a slot's summed voices, on the bus. A filter,
+    /// a mix, or a gain runs per voice, unless something on the bus feeds it. Then it runs on the
+    /// bus too.
     pub fn is_effect(&self) -> bool {
         !matches!(
             self,
-            StageParams::Oscillator(_) | StageParams::Filter(_) | StageParams::Mix(_)
+            StageParams::Oscillator(_)
+                | StageParams::Filter(_)
+                | StageParams::Mix(_)
+                | StageParams::Gain(_)
         )
     }
 }
@@ -253,9 +278,9 @@ pub struct StageSpec {
     /// True for a per-voice stage that a bus stage reads. The engine adds its output across the
     /// voices to feed the bus stage.
     pub tap: bool,
-    /// Which instance of its kind a bus stage uses. The engine keeps a few of each effect kind
-    /// and of the filter, and a stage past the last one passes its input through. Unused by the
-    /// per-voice stages and by a bus mix, which has no memory.
+    /// Which instance of its kind a bus stage uses. The engine keeps a few of each effect kind,
+    /// of the filter, and of the gain, and a stage past the last one passes its input through.
+    /// Unused by the per-voice stages and by a bus mix, which has no memory.
     pub pool: u8,
 }
 

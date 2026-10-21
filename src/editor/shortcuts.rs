@@ -4,7 +4,11 @@
 //! captures the press, its repeats, and its release, so the system does not beep at them.
 //!
 //! Control, Alt, and Command are left alone. The host and the system use those for their own
-//! shortcuts, so a binding never claims a key pressed with one of them.
+//! shortcuts, so a binding never claims a key pressed with one of them. The group shortcuts are
+//! the exception. Ableton Live takes Command+G and Command+Shift+G for its own track groups, so
+//! Shift+G groups and Shift+Alt+G ungroups. The command key, which is Command on macOS and
+//! Control elsewhere, groups and ungroups too, for the standalone app and for hosts that pass it
+//! on. The other one of the pair still passes through.
 //!
 //! The computer keyboard also plays notes in the standalone app, on the keys A to P and
 //! semicolon, and Z and X shift the octave. A shortcut on one of those keys needs Shift, which
@@ -21,44 +25,134 @@ pub(super) enum Shortcut {
     Duplicate,
     /// Opens the quick add box at the cursor. It needs no selected node.
     QuickAdd,
+    /// Makes a group of the selected nodes.
+    Group,
+    /// Breaks the selected group node back into its nodes.
+    Ungroup,
+    /// Opens the selected group node. With none selected, closes the open group.
+    ToggleGroup,
+    /// Closes the open group, or closes an open menu first.
+    Escape,
 }
 
-/// One key and whether Shift must be held with it.
+/// One key, and whether Shift, Alt, and the command key must be held with it.
 struct Binding {
     key: KeyCode,
     shift: bool,
+    alt: bool,
+    command: bool,
     shortcut: Shortcut,
 }
 
 /// Every shortcut.
-const BINDINGS: [Binding; 3] = [
+const BINDINGS: [Binding; 9] = [
     Binding {
         key: KeyCode::A,
         shift: true,
+        alt: false,
+        command: false,
         shortcut: Shortcut::QuickAdd,
     },
     Binding {
         key: KeyCode::M,
         shift: false,
+        alt: false,
+        command: false,
         shortcut: Shortcut::ToggleBypass,
     },
     Binding {
         key: KeyCode::D,
         shift: true,
+        alt: false,
+        command: false,
         shortcut: Shortcut::Duplicate,
+    },
+    Binding {
+        key: KeyCode::G,
+        shift: true,
+        alt: false,
+        command: false,
+        shortcut: Shortcut::Group,
+    },
+    Binding {
+        key: KeyCode::G,
+        shift: true,
+        alt: true,
+        command: false,
+        shortcut: Shortcut::Ungroup,
+    },
+    Binding {
+        key: KeyCode::G,
+        shift: false,
+        alt: false,
+        command: true,
+        shortcut: Shortcut::Group,
+    },
+    Binding {
+        key: KeyCode::G,
+        shift: true,
+        alt: false,
+        command: true,
+        shortcut: Shortcut::Ungroup,
+    },
+    Binding {
+        key: KeyCode::Tab,
+        shift: false,
+        alt: false,
+        command: false,
+        shortcut: Shortcut::ToggleGroup,
+    },
+    Binding {
+        key: KeyCode::Escape,
+        shift: false,
+        alt: false,
+        command: false,
+        shortcut: Shortcut::Escape,
     },
 ];
 
+/// True if the key that the system uses for its own shortcuts is down: Command on macOS, Control
+/// everywhere else.
+fn command(modifiers: Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.logo()
+    } else {
+        modifiers.control()
+    }
+}
+
+/// True if the other one of Control and Command is down. It never makes a shortcut.
+fn foreign_command(modifiers: Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.control()
+    } else {
+        modifiers.logo()
+    }
+}
+
 /// The shortcut for a key pressed with these modifiers, if there is one.
 pub(super) fn lookup(key: KeyCode, modifiers: Modifiers) -> Option<Shortcut> {
-    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+    if foreign_command(modifiers) {
         return None;
     }
     BINDINGS
         .iter()
-        .find(|binding| binding.key == key && binding.shift == modifiers.shift())
+        .find(|binding| {
+            binding.key == key
+                && binding.shift == modifiers.shift()
+                && binding.alt == modifiers.alt()
+                && binding.command == command(modifiers)
+        })
         .map(|binding| binding.shortcut)
 }
+
+/// The modifier a test holds to press the command key on this system.
+#[cfg(test)]
+pub(super) const COMMAND: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::LOGO
+} else {
+    Modifiers::CTRL
+};
 
 #[cfg(test)]
 mod tests {
@@ -113,6 +207,57 @@ mod tests {
         }
     }
 
+    /// Shift+G groups and Shift+Alt+G ungroups. Live keeps the command versions for itself.
+    #[test]
+    fn shift_g_groups_and_shift_alt_g_ungroups() {
+        assert_eq!(lookup(KeyCode::G, Modifiers::SHIFT), Some(Shortcut::Group));
+        assert_eq!(
+            lookup(KeyCode::G, Modifiers::SHIFT | Modifiers::ALT),
+            Some(Shortcut::Ungroup)
+        );
+        // A plain G is a piano key, and Alt alone is not bound.
+        assert_eq!(lookup(KeyCode::G, Modifiers::default()), None);
+        assert_eq!(lookup(KeyCode::G, Modifiers::ALT), None);
+        // Control and Command stay with the host with Shift and Alt held.
+        assert_eq!(
+            lookup(KeyCode::G, Modifiers::SHIFT | Modifiers::ALT | COMMAND),
+            None
+        );
+    }
+
+    /// The command key groups and ungroups too, with Shift for ungroup.
+    #[test]
+    fn command_g_groups_and_command_shift_g_ungroups() {
+        assert_eq!(lookup(KeyCode::G, COMMAND), Some(Shortcut::Group));
+        assert_eq!(
+            lookup(KeyCode::G, COMMAND | Modifiers::SHIFT),
+            Some(Shortcut::Ungroup)
+        );
+        // The other of Control and Command, and Alt, stay with the system.
+        let foreign = if cfg!(target_os = "macos") {
+            Modifiers::CTRL
+        } else {
+            Modifiers::LOGO
+        };
+        assert_eq!(lookup(KeyCode::G, foreign), None);
+        assert_eq!(lookup(KeyCode::G, COMMAND | Modifiers::ALT), None);
+    }
+
+    /// Tab and Escape are bound with no modifier, and a held one changes nothing about them.
+    #[test]
+    fn tab_and_escape_are_bound_plain() {
+        assert_eq!(
+            lookup(KeyCode::Tab, Modifiers::default()),
+            Some(Shortcut::ToggleGroup)
+        );
+        assert_eq!(
+            lookup(KeyCode::Escape, Modifiers::default()),
+            Some(Shortcut::Escape)
+        );
+        assert_eq!(lookup(KeyCode::Tab, Modifiers::SHIFT), None);
+        assert_eq!(lookup(KeyCode::Tab, COMMAND), None);
+    }
+
     /// Keys with no shortcut are not claimed.
     #[test]
     fn unbound_keys_are_not_claimed() {
@@ -120,7 +265,8 @@ mod tests {
         assert_eq!(lookup(KeyCode::Q, Modifiers::SHIFT), None);
     }
 
-    /// No shortcut shadows a piano key without Shift, or the octave keys at all.
+    /// No shortcut shadows a piano key without Shift or the command key, or the octave keys at
+    /// all.
     #[test]
     fn shortcuts_do_not_steal_piano_keys() {
         use crate::editor::piano::Piano;
@@ -131,7 +277,11 @@ mod tests {
                 modifiers: Modifiers::default(),
             };
             if Piano::uses(&event) {
-                assert!(binding.shift, "{:?} would shadow a piano key", binding.key);
+                assert!(
+                    binding.shift || binding.command,
+                    "{:?} would shadow a piano key",
+                    binding.key
+                );
             }
         }
     }

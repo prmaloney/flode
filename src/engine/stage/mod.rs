@@ -6,18 +6,21 @@
 //! never allocates or calls through a trait object.
 
 mod filter;
+mod gain;
 mod mix;
 mod oscillator;
 
 use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::Adsr;
 use crate::dsp::frame::Frame;
+use crate::dsp::gain::Utility;
 use crate::dsp::rng::Rng;
 use crate::dsp::wavetable::WaveTables;
 use crate::patch::control::{ControlLevels, ENV_SLOTS};
 use crate::patch::stage::{LaneGraph, StageParams, MAX_INPUTS, MAX_STAGES};
 
 pub use filter::{Filter, FilterState};
+pub use gain::Gain;
 pub use mix::{Mix, MixState};
 pub use oscillator::{Oscillator, OscillatorState};
 
@@ -113,6 +116,7 @@ pub enum StageState {
     Oscillator(OscillatorState),
     Filter(FilterState),
     Mix(MixState),
+    Gain(Utility),
 }
 
 impl StageState {
@@ -125,6 +129,7 @@ impl StageState {
             StageParams::Oscillator(p) => Self::Oscillator(Oscillator::start(p, ctx)),
             StageParams::Filter(p) => Self::Filter(Filter::start(p, ctx)),
             StageParams::Mix(p) => Self::Mix(Mix::start(p, ctx)),
+            StageParams::Gain(p) => Self::Gain(Gain::start(p, ctx)),
             // An effect runs once on the summed voices, so a voice keeps nothing for it.
             _ => Self::Empty,
         }
@@ -144,6 +149,7 @@ impl StageState {
             }
             (StageParams::Filter(p), Self::Filter(s)) => Filter::process(p, s, inputs, tick),
             (StageParams::Mix(p), Self::Mix(s)) => Mix::process(p, s, inputs, tick),
+            (StageParams::Gain(p), Self::Gain(s)) => Gain::process(p, s, inputs, tick),
             _ => Frame::SILENT,
         }
     }
@@ -260,7 +266,7 @@ mod tests {
     use crate::dsp::wavetable::Waveform;
     use crate::nodes::knobs::KnobId;
     use crate::patch::control::Param;
-    use crate::patch::stage::{FilterParams, MixParams, OscillatorParams, StageSpec};
+    use crate::patch::stage::{FilterParams, GainParams, MixParams, OscillatorParams, StageSpec};
 
     fn osc(waveform: Waveform) -> StageSpec {
         StageSpec::new(StageParams::Oscillator(OscillatorParams {
@@ -399,7 +405,9 @@ mod tests {
         let osc = StageParams::Oscillator(OscillatorParams::default());
         let filter = StageParams::Filter(FilterParams::default());
         let mix = StageParams::Mix(MixParams::default());
+        let gain = StageParams::Gain(GainParams::default());
         assert_eq!(osc.input_count(), 0);
+        assert_eq!(gain.input_count(), 1);
         assert_eq!(filter.input_count(), 1);
         assert_eq!(mix.input_count(), 2);
     }

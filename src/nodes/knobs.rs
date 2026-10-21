@@ -14,7 +14,7 @@ pub const MAX_UNISON: usize = 7;
 
 /// The kinds of knob. A node uses the ones its rows list. Wires name a knob by this id, so the
 /// names are part of the saved graph format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KnobId {
     Gain,
     Attack,
@@ -115,6 +115,8 @@ pub enum KnobId {
     Macro2,
     Macro3,
     Macro4,
+    /// The Gain node's level in dB. It runs from -60 dB, which is silent, up to +24 dB.
+    UtilGain,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -128,7 +130,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 65;
+    pub const COUNT: usize = 66;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -209,6 +211,7 @@ impl KnobId {
         KnobId::Macro2,
         KnobId::Macro3,
         KnobId::Macro4,
+        KnobId::UtilGain,
     ];
 
     /// The name shown beside the knob.
@@ -279,6 +282,7 @@ impl KnobId {
             KnobId::Macro2 => "Macro 2",
             KnobId::Macro3 => "Macro 3",
             KnobId::Macro4 => "Macro 4",
+            KnobId::UtilGain => "Gain",
         }
     }
 
@@ -292,6 +296,10 @@ impl KnobId {
             | KnobId::OscGain => FloatRange::Linear {
                 min: GAIN_MIN_DB,
                 max: 0.0,
+            },
+            KnobId::UtilGain => FloatRange::Linear {
+                min: crate::dsp::gain::UTILITY_MIN_DB,
+                max: 24.0,
             },
             KnobId::Attack | KnobId::Decay | KnobId::Release => time_range(),
             KnobId::Glide => FloatRange::Skewed {
@@ -437,6 +445,7 @@ impl KnobId {
         match self {
             KnobId::Gain => -10.0,
             KnobId::Slot1 | KnobId::Slot2 | KnobId::Slot3 | KnobId::Slot4 | KnobId::OscGain => 0.0,
+            KnobId::UtilGain => 0.0,
             KnobId::Attack => 0.001,
             KnobId::Decay => 1.0,
             KnobId::Sustain => 1.0,
@@ -573,6 +582,13 @@ impl KnobId {
                     format!("{plain:.1} dB")
                 }
             }
+            KnobId::UtilGain => {
+                if plain <= crate::dsp::gain::UTILITY_MIN_DB {
+                    "-inf".to_string()
+                } else {
+                    format!("{plain:.1} dB")
+                }
+            }
             KnobId::Attack | KnobId::Decay | KnobId::Release => format!("{plain:.3} s"),
             KnobId::Glide => format!("{plain:.2} s"),
             KnobId::Sustain | KnobId::Resonance | KnobId::PhaseRandom => format!("{plain:.2}"),
@@ -690,6 +706,20 @@ mod tests {
     fn unison_moves_in_whole_voices() {
         let snapped = KnobId::Unison.snap(0.4);
         assert_eq!(KnobId::Unison.to_plain(snapped).fract(), 0.0);
+    }
+
+    /// The Gain node's knob runs from silence at -60 dB to +24 dB and starts at 0 dB.
+    #[test]
+    fn the_utility_gain_runs_from_minus_60_to_plus_24() {
+        assert_eq!(KnobId::UtilGain.to_plain(0.0), -60.0);
+        assert!((KnobId::UtilGain.to_plain(1.0) - 24.0).abs() < 1e-4);
+        assert_eq!(KnobId::UtilGain.default_plain(), 0.0);
+        assert_eq!(KnobId::UtilGain.format(0.0), "-inf");
+        assert_eq!(
+            KnobId::UtilGain.format(KnobId::UtilGain.default_normalized()),
+            "0.0 dB"
+        );
+        assert_eq!(KnobId::UtilGain.format(1.0), "24.0 dB");
     }
 
     #[test]

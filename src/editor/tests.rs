@@ -211,6 +211,10 @@ mod slot_tests {
             out_min: None,
             out_max: None,
             points: Vec::new(),
+            group: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            names: Vec::new(),
         };
         let saved = SavedGraph {
             version: 0,
@@ -256,6 +260,10 @@ mod slot_tests {
             out_min: None,
             out_max: None,
             points: Vec::new(),
+            group: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            names: Vec::new(),
         };
         assert_eq!(
             oscillator::waveform(&legacy.into_node()),
@@ -355,7 +363,7 @@ mod lfo_and_category_tests {
             height: 712.0,
         };
         assert_eq!(
-            pill_button_at(bounds, Point::new(450.0, 30.0)),
+            pill_button_at(bounds, Point::new(350.0, 30.0)),
             Some(PillItem::Category(Category::Driver))
         );
         assert_eq!(
@@ -371,7 +379,10 @@ mod lfo_and_category_tests {
     /// Every kind is in exactly one category, except the oscillator, which has its own button.
     #[test]
     fn every_kind_is_categorised_or_on_the_pill() {
-        for kind in NodeKind::ALL {
+        for kind in NodeKind::ALL
+            .into_iter()
+            .filter(|kind| !kind.is_group_part())
+        {
             let in_category = [Category::Driver, Category::Util, Category::Effects]
                 .iter()
                 .any(|c| c.kinds().contains(&kind));
@@ -904,6 +915,10 @@ mod envelope_migration_tests {
             out_min: None,
             out_max: None,
             points: Vec::new(),
+            group: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            names: Vec::new(),
         };
         let saved = SavedGraph {
             version: 0,
@@ -1424,7 +1439,10 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Macro
                 | NodeKind::Map
                 | NodeKind::Math
-                | NodeKind::Monitor => crate::nodes::Bypass::None,
+                | NodeKind::Monitor
+                | NodeKind::Group
+                | NodeKind::GroupInput
+                | NodeKind::GroupOutput => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
             };
             assert_eq!(node.bypass(), expected, "{kind:?}");
@@ -1650,6 +1668,7 @@ mod bypass_and_duplicate_tests {
             node: 0,
             position: Point::new(50.0, 60.0),
             items: menu_items(&node),
+            target: crate::editor::menus::MenuTarget::Node,
         };
         let area = menu_bounds(menu);
         assert_eq!(area.height, 3.0 * MENU_ITEM_HEIGHT);
@@ -7025,5 +7044,91 @@ mod lfo_curve_tests {
             assert!(graph.nodes[0].points.is_empty(), "{bad}");
             assert_eq!(lfo::curve(&graph.nodes[0]), Curve::default());
         }
+    }
+}
+
+#[cfg(test)]
+mod gain_node_tests {
+    use super::*;
+    use crate::nodes::{gain, Bypass, Control};
+
+    /// An oscillator, a gain node, and the output, wired in that order.
+    fn chain() -> (Graph, usize) {
+        let mut graph = minimal_graph();
+        graph.connections.clear();
+        let osc = add_oscillator(&mut graph, Point::new(0.0, 0.0));
+        let node = graph.add_node(NodeKind::Gain, Point::new(0.0, 0.0));
+        graph.connect(osc, Port::Audio, node, Port::Audio);
+        graph.connect(node, Port::Audio, 1, Port::Slot(0));
+        graph.refresh_slots();
+        (graph, node)
+    }
+
+    #[test]
+    fn a_new_gain_node_has_the_expected_rows_and_defaults() {
+        let node = FlodeNode::new(NodeKind::Gain, Point::new(0.0, 0.0));
+        let rows = node.rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[1].knob, Some(KnobId::UtilGain));
+        assert_eq!(rows[1].input, Some(Port::Knob(KnobId::UtilGain)));
+        assert_eq!(rows[2].knob, Some(KnobId::Pan));
+        assert_eq!(rows[2].input, Some(Port::Knob(KnobId::Pan)));
+        assert_eq!(rows[3].control, Some(Control::Switch(0)));
+        assert_eq!(node.switch_labels(), &["Invert"]);
+        assert_eq!(node.plain(KnobId::UtilGain), 0.0);
+        assert_eq!(node.plain(KnobId::Pan), 0.0);
+        assert!(!node.switch(0));
+        assert_eq!(
+            node.input_ports(),
+            vec![
+                Port::Audio,
+                Port::Knob(KnobId::UtilGain),
+                Port::Knob(KnobId::Pan)
+            ]
+        );
+        assert_eq!(node.output_ports(), vec![Port::Audio]);
+        assert_eq!(node.bypass(), Bypass::PassThrough);
+    }
+
+    #[test]
+    fn the_settings_reach_the_patch() {
+        let (mut graph, node) = chain();
+        graph.nodes[node].set_value(KnobId::UtilGain, KnobId::UtilGain.to_normalized(-6.0));
+        graph.nodes[node].set_value(KnobId::Pan, KnobId::Pan.to_normalized(0.5));
+        graph.nodes[node].set_switch(0, true);
+        let lane = graph.patch().lanes[0].clone();
+        let StageParams::Gain(params) = lane.stages[1].params else {
+            panic!("not a gain stage");
+        };
+        let levels = ControlLevels::default();
+        assert!((params.gain.plain(&levels) + 6.0).abs() < 1e-3);
+        assert!((params.pan.plain(&levels) - 0.5).abs() < 1e-3);
+        assert!(params.invert);
+        assert!(!lane.stages[1].bus);
+    }
+
+    #[test]
+    fn saving_and_loading_keeps_the_settings() {
+        let (mut graph, node) = chain();
+        graph.nodes[node].set_value(KnobId::UtilGain, KnobId::UtilGain.to_normalized(12.0));
+        graph.nodes[node].set_value(KnobId::Pan, KnobId::Pan.to_normalized(-0.25));
+        graph.nodes[node].set_switch(0, true);
+        let json = serde_json::to_string(&graph.to_saved()).unwrap();
+        let loaded = Graph::from_saved(&serde_json::from_str::<SavedGraph>(&json).unwrap());
+        let node = loaded
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Gain)
+            .expect("the gain node loads");
+        assert!((node.plain(KnobId::UtilGain) - 12.0).abs() < 1e-3);
+        assert!((node.plain(KnobId::Pan) + 0.25).abs() < 1e-3);
+        assert!(gain::invert(node));
+    }
+
+    #[test]
+    fn the_util_menu_and_the_quick_add_box_offer_the_gain_node() {
+        assert!(NodeKind::ALL.contains(&NodeKind::Gain));
+        assert!(Category::Util.kinds().contains(&NodeKind::Gain));
+        assert_eq!(quick_add_results("gain", |_| true), vec![NodeKind::Gain]);
     }
 }
