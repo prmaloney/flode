@@ -796,3 +796,136 @@ fn making_a_group_selects_it_alone() {
     assert_eq!(graph.selection(), vec![FILTER]);
     assert_eq!(graph.nodes[OUTPUT].kind, NodeKind::Output);
 }
+
+/// The graph of the chain with the filter and reverb gone, and the oscillator wired to the
+/// output.
+fn direct() -> Graph {
+    let mut graph = Graph::with(
+        vec![
+            node(NodeKind::Input, 0.0),
+            node(NodeKind::Oscillator, 200.0),
+            node(NodeKind::Output, DEFAULT_OUTPUT_X),
+            node(NodeKind::Lfo, 300.0),
+        ],
+        vec![
+            wire(0, Port::Notes, 1, Port::Notes),
+            wire(1, Port::Audio, 2, Port::Slot(0)),
+        ],
+    );
+    graph.refresh_slots();
+    graph
+}
+
+#[test]
+fn a_switched_off_group_plays_as_if_it_were_a_wire() {
+    let mut graph = grouped();
+    let on = graph.patch();
+    assert!(graph.toggle_bypass(2));
+    let off = graph.patch();
+    assert_ne!(off, on);
+    assert_eq!(off, direct().patch());
+    // Switching it back on restores the sound.
+    assert!(graph.toggle_bypass(2));
+    assert_eq!(graph.patch(), on);
+}
+
+#[test]
+fn the_nodes_of_a_switched_off_group_take_no_lfo_or_effect() {
+    let mut graph = chain();
+    assert!(graph.create_group(&[FILTER, REVERB, LFO]).is_some());
+    assert!(graph.patch().lfos.iter().any(Option::is_some));
+    let group = graph
+        .nodes
+        .iter()
+        .position(|n| n.kind == NodeKind::Group)
+        .unwrap();
+    assert!(graph.toggle_bypass(group));
+    let patch = graph.patch();
+    assert!(patch.lfos.iter().all(Option::is_none));
+    assert!(!format!("{patch:?}").contains("Reverb"));
+}
+
+#[test]
+fn a_switched_off_group_works_while_it_is_open() {
+    let mut graph = grouped();
+    assert!(graph.toggle_bypass(2));
+    let off = graph.patch();
+    assert!(graph.open_group(2));
+    assert_eq!(graph.patch(), off);
+    assert!(graph.close_group());
+    assert_eq!(graph.patch(), off);
+    assert!(graph.nodes[2].bypassed);
+}
+
+#[test]
+fn a_switched_off_group_survives_saving_and_copying() {
+    let mut graph = grouped();
+    graph.toggle_bypass(2);
+    let loaded = Graph::from_saved(&graph.to_saved());
+    assert!(loaded.nodes[2].bypassed);
+    assert_eq!(loaded.patch(), graph.patch());
+    let copy = graph.nodes[2].duplicate(Point::new(0.0, 0.0));
+    assert!(copy.bypassed);
+}
+
+#[test]
+fn a_new_input_pin_is_named_after_the_first_knob_it_feeds() {
+    let mut graph = grouped();
+    assert!(graph.open_group(2));
+    let pin = graph.add_pin(PinSide::Input, "", Signal::Control).unwrap();
+    assert!(graph.nodes[0].outputs[pin].name.starts_with("In "));
+    graph.connect(0, control_pin(pin), 2, Port::Knob(KnobId::Resonance));
+    assert_eq!(graph.nodes[0].outputs[pin].name, "Resonance");
+    // The group's face carries the name too.
+    assert!(graph.close_group());
+    assert_eq!(graph.nodes[2].inputs[pin].name, "Resonance");
+}
+
+#[test]
+fn a_second_wire_does_not_rename_a_pin() {
+    let mut graph = grouped();
+    assert!(graph.open_group(2));
+    let pin = graph.add_pin(PinSide::Input, "", Signal::Control).unwrap();
+    graph.connect(0, control_pin(pin), 2, Port::Knob(KnobId::Resonance));
+    graph.connect(0, control_pin(pin), 3, Port::Knob(KnobId::Mix));
+    assert_eq!(graph.nodes[0].outputs[pin].name, "Resonance");
+}
+
+#[test]
+fn a_pin_named_by_hand_keeps_its_name() {
+    let mut graph = grouped();
+    assert!(graph.open_group(2));
+    let pin = graph
+        .add_pin(PinSide::Input, "Tone", Signal::Control)
+        .unwrap();
+    graph.connect(0, control_pin(pin), 2, Port::Knob(KnobId::Resonance));
+    assert_eq!(graph.nodes[0].outputs[pin].name, "Tone");
+    // A default name that is renamed to another default looking name is still a default.
+    let other = graph.add_pin(PinSide::Input, "", Signal::Control).unwrap();
+    assert!(graph.rename_pin(PinSide::Input, other, "Mine"));
+    graph.connect(0, control_pin(other), 3, Port::Knob(KnobId::Mix));
+    assert_eq!(graph.nodes[0].outputs[other].name, "Mine");
+}
+
+#[test]
+fn an_output_pin_is_named_after_the_first_output_that_feeds_it() {
+    let mut graph = grouped();
+    assert!(graph.open_group(2));
+    let pin = graph.add_pin(PinSide::Output, "", Signal::Control).unwrap();
+    // A shape pin is the control output of an LFO.
+    let lfo = graph.add_node(NodeKind::Lfo, Point::new(300.0, 300.0));
+    graph.connect(lfo, Port::Shape, 1, control_pin(pin));
+    assert_eq!(graph.nodes[1].inputs[pin].name, "Shape");
+}
+
+#[test]
+fn a_name_that_is_taken_gets_a_number() {
+    let mut graph = grouped();
+    assert!(graph.open_group(2));
+    let first = graph.add_pin(PinSide::Input, "", Signal::Control).unwrap();
+    graph.connect(0, control_pin(first), 2, Port::Knob(KnobId::Resonance));
+    let second = graph.add_pin(PinSide::Input, "", Signal::Control).unwrap();
+    graph.connect(0, control_pin(second), 2, Port::Knob(KnobId::Resonance));
+    assert_eq!(graph.nodes[0].outputs[first].name, "Resonance");
+    assert_eq!(graph.nodes[0].outputs[second].name, "Resonance 2");
+}

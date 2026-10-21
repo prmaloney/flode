@@ -84,6 +84,9 @@ fn place<'a>(
     });
     for (index, node) in nodes.iter().enumerate() {
         match node.kind {
+            // A switched-off group leaves its nodes out. They make no signal and take no
+            // LFO, envelope or effect, and the wires go straight through its pins.
+            NodeKind::Group if node.bypassed => {}
             NodeKind::Group => {
                 if let Some(group) = &node.group {
                     path.push(index);
@@ -141,6 +144,12 @@ fn source(
         return None;
     };
     match graph.nodes.get(node)?.kind {
+        // A switched-off group hands an input straight to the matching output.
+        NodeKind::Group if graph.nodes[node].bypassed => {
+            let input = graph.nodes[node].pass_through_input(pin)?;
+            let link = into_pin(graph.links, node, input)?;
+            source(levels, level, link.from, link.out, hops + 1)
+        }
         NodeKind::Group => {
             let inner = (*graph.kids.get(node)?)?;
             let edge = levels[inner]
@@ -283,6 +292,63 @@ mod tests {
         let flat = flatten(&nodes, &links);
         assert_eq!(flat.nodes.len(), 2);
         assert_eq!(flat.links, vec![audio(0, 1)]);
+    }
+
+    /// A switched-off group leaves its filter out and wires the source to what the group fed.
+    #[test]
+    fn a_switched_off_group_passes_its_input_through_and_drops_its_nodes() {
+        let mut group = filter_group();
+        group.bypassed = true;
+        let nodes = [node(NodeKind::Oscillator), group, node(NodeKind::Reverb)];
+        let links = [
+            Connection {
+                from: 0,
+                out: Port::Audio,
+                to: 1,
+                input: pin(0),
+            },
+            Connection {
+                from: 1,
+                out: pin(0),
+                to: 2,
+                input: Port::Audio,
+            },
+        ];
+        let flat = flatten(&nodes, &links);
+        let kinds: Vec<NodeKind> = flat.nodes.iter().map(|n| n.kind).collect();
+        assert_eq!(kinds, vec![NodeKind::Oscillator, NodeKind::Reverb]);
+        assert_eq!(flat.links, vec![audio(0, 1)]);
+    }
+
+    /// A switched-off group that makes sound by itself, with no input to hand on, goes silent.
+    #[test]
+    fn a_switched_off_source_group_goes_silent() {
+        let mut group = node(NodeKind::Group);
+        group.outputs = vec![GroupPin::new("Audio", Signal::Audio)];
+        let data = group.group.as_mut().unwrap();
+        data.nodes[1].inputs = group.outputs.clone();
+        data.nodes.push(node(NodeKind::Oscillator));
+        data.links = vec![Connection {
+            from: 2,
+            out: Port::Audio,
+            to: 1,
+            input: pin(0),
+        }];
+        let links = [Connection {
+            from: 0,
+            out: pin(0),
+            to: 1,
+            input: Port::Audio,
+        }];
+        let mut off = group.duplicate(Point::new(0.0, 0.0));
+        off.bypassed = true;
+        let flat = flatten(&[group, node(NodeKind::Reverb)], &links);
+        // Switched on, the oscillator inside feeds the reverb.
+        assert_eq!(flat.nodes.len(), 2);
+        assert_eq!(flat.links, vec![audio(0, 1)]);
+        let flat_off = flatten(&[off, node(NodeKind::Reverb)], &links);
+        assert_eq!(flat_off.nodes.len(), 1);
+        assert!(flat_off.links.is_empty());
     }
 
     #[test]

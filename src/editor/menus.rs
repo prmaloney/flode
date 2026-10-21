@@ -286,6 +286,7 @@ pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
         return &[
             MenuItem::Open,
             MenuItem::Rename,
+            MenuItem::Bypass,
             MenuItem::Ungroup,
             MenuItem::Duplicate,
             MenuItem::SaveGroup,

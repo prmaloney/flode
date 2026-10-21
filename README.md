@@ -219,7 +219,7 @@ them into one. Each wire that crossed the edge of the selection goes through a p
 its pins. Ableton Live takes `Cmd+G` and `Cmd+Shift+G` for its track groups, which is why these
 are not the keys. They also work in the standalone app and in hosts that pass them on, as `Cmd+G`
 and `Cmd+Shift+G` (`Ctrl` on Windows and Linux). Both are also in the right-click menu, where a group node
-offers Open, Rename, Ungroup, Duplicate, Save group and Delete, and a selection of several nodes offers Group.
+offers Open, Rename, Bypass, Ungroup, Duplicate, Save group and Delete, and a selection of several nodes offers Group.
 
 - `Tab` opens the selected group. With no group selected, it closes the open one. `Esc` closes the
   open group too, or closes an open menu first. Double clicking a group's header, or clicking the
@@ -239,7 +239,15 @@ offers Open, Rename, Ungroup, Duplicate, Save group and Delete, and a selection 
 - A pin carries one kind of signal, which it takes from the wire that made it. Audio pins are grey,
   control pins are green, and notes pins are purple. Right-click a pin, on the group node or inside,
   for Rename and Remove pin. Rename opens a box at the pin. `Enter` keeps the new name, `Esc`
-  cancels, and an empty name keeps the old one. Removing a pin drops its wires on both sides.
+  cancels, and an empty name keeps the old one. Removing a pin drops its wires on both sides. A
+  new pin takes its name from the first wire that reaches it. A pin that feeds a filter's Cutoff
+  becomes "Cutoff", and a pin that takes an LFO's output becomes "Shape". Only a pin that still has
+  its starting name, such as "In 2", is renamed, so a name you typed stays, and a second wire does
+  not rename it. A name that is taken gets a number.
+- Press `M` on a selected group, or pick Bypass in its menu, to switch it off. A switched-off group
+  hands each input to the output of the same kind in the same order, so audio goes straight
+  through, and an output with no input to take goes silent. Its nodes make no signal and use no
+  LFOs, envelopes or effect slots. The header says "bypass", or "mute" when nothing passes.
 - Right-click a group node and pick Rename to name it, or click its name in the pane's title.
 - A control pin that feeds a knob inside the group shows that knob on the group node, with the
   pin's name. It reads and snaps like the knob it feeds, so a pin on a Cutoff reads in Hz. Drag

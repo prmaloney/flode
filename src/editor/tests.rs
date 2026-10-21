@@ -1440,7 +1440,6 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Map
                 | NodeKind::Math
                 | NodeKind::Monitor
-                | NodeKind::Group
                 | NodeKind::GroupInput
                 | NodeKind::GroupOutput => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,

@@ -685,7 +685,8 @@ fn dropping_a_wire_on_the_empty_output_pin_makes_a_pin() {
     let edge = &graph.nodes[1];
     assert_eq!(edge.inputs.len(), 2);
     assert_eq!(edge.inputs[1].signal, Signal::Audio);
-    assert_eq!(edge.inputs[1].name, "Out 2");
+    // The pin takes the name of the wire's port, and a second "Audio" gets a number.
+    assert_eq!(edge.inputs[1].name, "Audio 2");
     assert!(graph
         .connections
         .contains(&wire(2, Port::Audio, 1, audio_pin(1))));

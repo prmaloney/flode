@@ -7,7 +7,7 @@
 //! opening the graph inside. The editor keeps the copy in step with the edge nodes.
 
 use super::connection::Connection;
-use super::{FlodeNode, KnobId, NodeBehavior, NodeKind, Port, Row, Signal};
+use super::{Bypass, FlodeNode, KnobId, NodeBehavior, NodeKind, Port, Row, Signal};
 use nih_plug_iced::Point;
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,12 @@ impl NodeBehavior for Group {
                 ..Row::default()
             })
             .collect()
+    }
+
+    /// A switched-off group hands each input to the output of the same signal kind in the same
+    /// order, and an output with no such input goes silent. See `FlodeNode::pass_through_input`.
+    fn bypass(&self) -> Bypass {
+        Bypass::PassThrough
     }
 }
 
@@ -306,8 +312,8 @@ mod tests {
     }
 
     #[test]
-    fn group_parts_cannot_be_bypassed_or_copied_in_pieces() {
-        for kind in [NodeKind::Group, NodeKind::GroupInput, NodeKind::GroupOutput] {
+    fn edge_nodes_cannot_be_bypassed_or_copied_in_pieces() {
+        for kind in [NodeKind::GroupInput, NodeKind::GroupOutput] {
             let mut part = node(kind);
             assert!(kind.is_group_part());
             assert!(!part.toggle_bypass());
@@ -315,5 +321,51 @@ mod tests {
         assert!(node(NodeKind::Group).can_duplicate());
         assert!(!node(NodeKind::GroupInput).can_duplicate());
         assert!(!node(NodeKind::GroupOutput).can_duplicate());
+    }
+
+    /// A group can be switched off, like a processor.
+    #[test]
+    fn a_group_can_be_switched_off() {
+        let mut group = node(NodeKind::Group);
+        assert!(group.toggle_bypass());
+        assert!(group.bypassed);
+    }
+
+    /// An output takes the input of its signal kind that holds the same place, and one with no
+    /// such input goes silent.
+    #[test]
+    fn an_output_passes_through_the_input_in_its_place() {
+        let mut group = node(NodeKind::Group);
+        group.inputs = vec![
+            GroupPin::new("Freq", Signal::Control),
+            GroupPin::new("L", Signal::Audio),
+            GroupPin::new("R", Signal::Audio),
+        ];
+        group.outputs = vec![
+            GroupPin::new("A", Signal::Audio),
+            GroupPin::new("B", Signal::Audio),
+            GroupPin::new("C", Signal::Audio),
+            GroupPin::new("Shape", Signal::Control),
+        ];
+        assert_eq!(group.pass_through_input(0), Some(1));
+        assert_eq!(group.pass_through_input(1), Some(2));
+        // There is no third audio input.
+        assert_eq!(group.pass_through_input(2), None);
+        assert_eq!(group.pass_through_input(3), Some(0));
+        assert_eq!(group.pass_through_input(9), None);
+    }
+
+    /// A switched-off group says "bypass" if anything passes through, and "mute" if nothing does.
+    #[test]
+    fn the_header_names_how_a_group_is_off() {
+        let mut group = node(NodeKind::Group);
+        group.toggle_bypass();
+        // No pins at all, so nothing passes through.
+        assert_eq!(group.bypass_label(), Some("mute"));
+        group.inputs = vec![GroupPin::new("In", Signal::Audio)];
+        group.outputs = vec![GroupPin::new("Out", Signal::Audio)];
+        assert_eq!(group.bypass_label(), Some("bypass"));
+        group.toggle_bypass();
+        assert_eq!(group.bypass_label(), None);
     }
 }

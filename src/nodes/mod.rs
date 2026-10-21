@@ -695,13 +695,36 @@ impl FlodeNode {
         self.kind.behavior().bypass()
     }
 
-    /// The word to show on the node while it is switched off, or None while it is on.
+    /// The word to show on the node while it is switched off, or None while it is on. A group
+    /// that passes nothing through, because no output has an input to take, is muted.
     pub fn bypass_label(&self) -> Option<&'static str> {
-        if self.bypassed {
-            self.bypass().label()
-        } else {
-            None
+        if !self.bypassed {
+            return None;
         }
+        if self.kind == NodeKind::Group
+            && (0..self.outputs.len()).all(|output| self.pass_through_input(output).is_none())
+        {
+            return Bypass::Mute.label();
+        }
+        self.bypass().label()
+    }
+
+    /// Group nodes only. The input pin that a switched-off group hands to output pin `output`.
+    /// It is the input of the same signal kind that holds the same place among the inputs of that
+    /// kind as the output does among the outputs of that kind. None means the output goes
+    /// silent.
+    pub fn pass_through_input(&self, output: usize) -> Option<usize> {
+        let signal = self.outputs.get(output)?.signal;
+        let place = self.outputs[..output]
+            .iter()
+            .filter(|pin| pin.signal == signal)
+            .count();
+        self.inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, pin)| pin.signal == signal)
+            .nth(place)
+            .map(|(index, _)| index)
     }
 
     /// Switches the node off or on. Returns false, and changes nothing, for a kind that can't be

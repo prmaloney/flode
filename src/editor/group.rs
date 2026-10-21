@@ -149,6 +149,15 @@ fn natural_name(port: Port) -> Option<String> {
     }
 }
 
+/// True for a name that `add_pin` gave, such as "In 2" or "Out 1". A pin that still has one has
+/// not been named by hand or by a wire.
+fn is_default_name(name: &str) -> bool {
+    let number = name
+        .strip_prefix("In ")
+        .or_else(|| name.strip_prefix("Out "));
+    number.is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// `name`, or `name` with a number after it if a pin in `pins` already has it.
 fn unique_name(pins: &[GroupPin], name: String) -> String {
     let taken = |candidate: &str| pins.iter().any(|pin| pin.name == candidate);
@@ -814,6 +823,47 @@ impl Graph {
         }
         self.connect(link.from, link.out, link.to, link.input);
         true
+    }
+
+    /// Names a pin of the open group after the first wire that reaches it. A pin that feeds a
+    /// filter's Cutoff becomes "Cutoff", and a pin that takes a shape becomes "Shape". Only a pin
+    /// that still has the name `add_pin` gave it, and has just this one wire, is renamed, so a
+    /// name typed by hand stays. A port with no natural name leaves the pin alone.
+    pub(super) fn name_pin_after_wire(&mut self, link: Connection) {
+        let kind = |node: usize| self.nodes.get(node).map(|n| n.kind);
+        let (side, edge, index, port) = match (kind(link.from), link.out, kind(link.to), link.input)
+        {
+            (Some(NodeKind::GroupInput), Port::Pin(_, n), _, _) => {
+                (PinSide::Input, link.from, n, link.input)
+            }
+            (_, _, Some(NodeKind::GroupOutput), Port::Pin(_, n)) => {
+                (PinSide::Output, link.to, n, link.out)
+            }
+            _ => return,
+        };
+        let Some(natural) = natural_name(port) else {
+            return;
+        };
+        let wires = self
+            .connections
+            .iter()
+            .filter(|c| match side {
+                PinSide::Input => c.from == edge && pin_number(c.out) == Some(index),
+                PinSide::Output => c.to == edge && pin_number(c.input) == Some(index),
+            })
+            .count();
+        if wires != 1 {
+            return;
+        }
+        let pins = side.edge_pins(&mut self.nodes[edge]);
+        let Some(pin) = pins.get(index) else {
+            return;
+        };
+        if !is_default_name(&pin.name) {
+            return;
+        }
+        let name = unique_name(pins, natural);
+        self.rename_pin(side, index, &name);
     }
 
     /// Adds a pin to the open group and returns its number, or None if no group is open. The pin

@@ -1489,6 +1489,7 @@ impl Graph {
         self.refresh_slots();
         self.refresh_edge_knobs();
         self.take_face_value(link);
+        self.name_pin_after_wire(link);
     }
 
     /// Carries the value of every knob on the input edge node `node` of the open group to the
