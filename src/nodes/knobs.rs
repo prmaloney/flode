@@ -52,7 +52,8 @@ pub enum KnobId {
     WarpAmount,
     /// An oscillator's own gain in dB, before its output slot's gain and the filter.
     OscGain,
-    /// An oscillator's coarse transpose in semitones, from -12 to 12.
+    /// An oscillator's coarse transpose in semitones, from -12 to 12. Continuous, not snapped to
+    /// whole semitones, so it can sit between them like Fine.
     Coarse,
     /// An oscillator's fine transpose in cents, from -100 to 100.
     Fine,
@@ -554,11 +555,7 @@ impl KnobId {
     pub fn to_plain(self, normalized: f32) -> f32 {
         let plain = self.range().unnormalize(normalized);
         match self {
-            KnobId::Unison
-            | KnobId::LfoSync
-            | KnobId::Coarse
-            | KnobId::Octave
-            | KnobId::ArpOctaves => plain.round(),
+            KnobId::Unison | KnobId::LfoSync | KnobId::Octave | KnobId::ArpOctaves => plain.round(),
             KnobId::SamplerRoot => plain.round(),
             _ => plain,
         }
@@ -571,11 +568,9 @@ impl KnobId {
     /// Rounds a normalized value to the knob's step, if it has one. Unison moves in whole voices.
     pub fn snap(self, normalized: f32) -> f32 {
         match self {
-            KnobId::Unison
-            | KnobId::LfoSync
-            | KnobId::Coarse
-            | KnobId::Octave
-            | KnobId::ArpOctaves => self.to_normalized(self.to_plain(normalized)),
+            KnobId::Unison | KnobId::LfoSync | KnobId::Octave | KnobId::ArpOctaves => {
+                self.to_normalized(self.to_plain(normalized))
+            }
             KnobId::SamplerRoot => self.to_normalized(self.to_plain(normalized)),
             _ => normalized.clamp(0.0, 1.0),
         }
@@ -663,7 +658,7 @@ impl KnobId {
             }
             KnobId::MapOffset => format!("{:+.0}%", plain * 100.0),
             KnobId::MapCenter | KnobId::MapRange => format!("{:.0}%", plain * 100.0),
-            KnobId::Coarse => format!("{:+} st", plain.round() as i32),
+            KnobId::Coarse => format!("{plain:+.2} st"),
             KnobId::Fine => format!("{plain:+.0} ct"),
             KnobId::Octave => format!("{:+} oct", plain.round() as i32),
             KnobId::Mix
@@ -784,6 +779,16 @@ mod tests {
     fn unison_moves_in_whole_voices() {
         let snapped = KnobId::Unison.snap(0.4);
         assert_eq!(KnobId::Unison.to_plain(snapped).fract(), 0.0);
+    }
+
+    /// Unlike Unison and Octave, Coarse does not snap to whole semitones: a typed or dragged
+    /// value can sit between them, and the display shows it to two decimal places.
+    #[test]
+    fn coarse_sits_between_semitones() {
+        let fractional = KnobId::Coarse.from_entry(3.25);
+        assert_eq!(KnobId::Coarse.to_plain(fractional), 3.25);
+        assert_eq!(KnobId::Coarse.snap(fractional), fractional);
+        assert_eq!(KnobId::Coarse.format(fractional), "+3.25 st");
     }
 
     /// The Gain node's knob runs from silence at -60 dB to +24 dB and starts at 0 dB.

@@ -5,7 +5,7 @@ use super::{AudioStage, StartContext, Tick};
 use crate::dsp::frame::{pan_gains, Frame};
 use crate::dsp::gain::db_to_linear;
 use crate::dsp::noise::NoiseState;
-use crate::dsp::pitch::transpose_ratio;
+use crate::dsp::pitch::{ratio_of_semitones, semitones_of};
 use crate::dsp::rng::Rng;
 use crate::dsp::warp::{warp_phase, warp_value};
 use crate::dsp::wavetable::Waveform;
@@ -48,6 +48,11 @@ pub struct OscillatorState {
     placed_noise: bool,
     /// True when nothing is easing, so a sample needs no upkeep.
     settled: bool,
+    /// The octave, coarse and fine transpose, as a sum of semitones, eased toward the knob values.
+    /// Easing in semitones keeps the step even in frequency, since a transpose is a log-frequency
+    /// quantity. A step on Coarse or Octave still lands on a whole semitone, but reaching it now
+    /// takes a few milliseconds instead of jumping, so it does not click or zipper.
+    transpose_semitones: f32,
 }
 
 /// Where copy `i` of `count` sits across the spread: -1.0 for the first copy, 1.0 for the last,
@@ -181,6 +186,11 @@ impl AudioStage for Oscillator {
             placed_cents: 0.0,
             placed_noise: noise,
             settled: true,
+            transpose_semitones: semitones_of(
+                p.octave.plain(ctx.levels),
+                p.coarse.plain(ctx.levels),
+                p.fine.plain(ctx.levels),
+            ),
         };
         state.update(
             p.pan.plain(ctx.levels),
@@ -217,11 +227,14 @@ impl AudioStage for Oscillator {
         let raw = if noise {
             state.gains[0] * state.noise.sample(p.noise, tick.rng)
         } else {
-            let transpose = transpose_ratio(
+            let semitones_target = semitones_of(
                 p.octave.plain(levels),
                 p.coarse.plain(levels),
                 p.fine.plain(levels),
             );
+            state.transpose_semitones +=
+                (semitones_target - state.transpose_semitones) * tick.smooth;
+            let transpose = ratio_of_semitones(state.transpose_semitones);
             let warp_amount = p.warp_amount.plain(levels);
 
             let mut sum = Frame::SILENT;
@@ -637,6 +650,26 @@ mod tests {
         assert!(state.settled);
         run_on(&mut state, &mut rig, &params, 100);
         assert!(state.settled);
+    }
+
+    /// A jump on the coarse knob while a note sounds eases toward the new pitch instead of
+    /// snapping, so the step does not click like an instant pitch jump would.
+    #[test]
+    fn a_coarse_jump_eases_instead_of_snapping() {
+        let mut rig = Rig::new();
+        let low = OscillatorParams::default();
+        let high = OscillatorParams {
+            coarse: Param::fixed(KnobId::Coarse, 12.0),
+            ..OscillatorParams::default()
+        };
+        let mut state = Oscillator::start(&low, &mut rig.start_context());
+        run_on(&mut state, &mut rig, &low, 100);
+        assert_eq!(state.transpose_semitones, 0.0);
+        run_on(&mut state, &mut rig, &high, 1);
+        // One sample of easing moves toward the target but does not reach it outright.
+        assert!(state.transpose_semitones > 0.0 && state.transpose_semitones < 12.0);
+        run_on(&mut state, &mut rig, &high, 10000);
+        assert!((state.transpose_semitones - 12.0).abs() < 1e-3);
     }
 
     /// Noise ignores the count and the detune, and a switch to a wave still places its copies.

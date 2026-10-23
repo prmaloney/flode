@@ -1,10 +1,21 @@
 //! Pitch math.
 
+/// The octave, coarse and fine transpose knobs, combined into one sum of semitones. Each octave is
+/// twelve semitones, and each semitone is a hundred cents.
+pub fn semitones_of(octave: f32, coarse: f32, fine: f32) -> f32 {
+    octave * 12.0 + coarse + fine / 100.0
+}
+
+/// The frequency ratio for a transpose given as a sum of semitones. A ratio of 2.0 is up an
+/// octave.
+pub fn ratio_of_semitones(semitones: f32) -> f32 {
+    (semitones / 12.0).exp2()
+}
+
 /// The frequency ratio for a transpose. Each octave is twelve semitones, each semitone is a
 /// hundred cents, and a ratio of 2.0 is up an octave.
 pub fn transpose_ratio(octave: f32, coarse: f32, fine: f32) -> f32 {
-    let semitones = octave * 12.0 + coarse + fine / 100.0;
-    (semitones / 12.0).exp2()
+    ratio_of_semitones(semitones_of(octave, coarse, fine))
 }
 
 #[cfg(test)]
