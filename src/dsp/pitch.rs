@@ -12,15 +12,13 @@ pub fn ratio_of_semitones(semitones: f32) -> f32 {
     (semitones / 12.0).exp2()
 }
 
-/// The frequency ratio for a transpose. Each octave is twelve semitones, each semitone is a
-/// hundred cents, and a ratio of 2.0 is up an octave.
-pub fn transpose_ratio(octave: f32, coarse: f32, fine: f32) -> f32 {
-    ratio_of_semitones(semitones_of(octave, coarse, fine))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn transpose_ratio(octave: f32, coarse: f32, fine: f32) -> f32 {
+        ratio_of_semitones(semitones_of(octave, coarse, fine))
+    }
 
     /// Zero on every knob is unity, each octave doubles, and twelve semitones make an octave.
     #[test]
