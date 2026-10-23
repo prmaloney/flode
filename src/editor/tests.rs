@@ -353,44 +353,6 @@ mod lfo_and_category_tests {
         assert_eq!(over_limit_label(&graph, 0), None);
     }
 
-    /// The pill's buttons open the Driver, Util, and Effects lists, and each list holds its kinds.
-    #[test]
-    fn categories_list_their_kinds() {
-        let bounds = Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: 1024.0,
-            height: 712.0,
-        };
-        assert_eq!(
-            pill_button_at(bounds, Point::new(350.0, 30.0)),
-            Some(PillItem::Category(Category::Driver))
-        );
-        assert_eq!(
-            category_row_at(bounds, Category::Driver, Point::new(400.0, 98.0)),
-            Some(NodeKind::Lfo)
-        );
-        assert!(Category::Effects.kinds().contains(&NodeKind::Filter));
-        assert!(!Category::Driver.kinds().contains(&NodeKind::Filter));
-        assert!(Category::Util.kinds().contains(&NodeKind::Output));
-        assert!(Category::Util.kinds().contains(&NodeKind::Map));
-    }
-
-    /// Every kind is in exactly one category, except the oscillator, which has its own button.
-    #[test]
-    fn every_kind_is_categorised_or_on_the_pill() {
-        for kind in NodeKind::ALL
-            .into_iter()
-            .filter(|kind| !kind.is_group_part())
-        {
-            let in_category = [Category::Driver, Category::Util, Category::Effects]
-                .iter()
-                .any(|c| c.kinds().contains(&kind));
-            let on_pill = PILL_ITEMS.contains(&PillItem::Kind(kind));
-            assert!(in_category ^ on_pill, "{kind:?}");
-        }
-    }
-
     /// An envelope can drive an LFO's rate, and the LFO reports that route.
     #[test]
     fn an_envelope_can_drive_an_lfo_rate() {
@@ -1302,10 +1264,12 @@ mod layering_tests {
         ));
     }
 
-    /// In a plugin the computer keyboard plays nothing, but a click on the strip still does, and
-    /// the octave keys still shift the strip.
+    /// A click on the strip plays a note, and the octave keys shift the strip. This used to also
+    /// check that a plugin, as opposed to the standalone app, kept the computer keyboard from
+    /// playing. That gate is gone: see `mode_tests` for what replaced it. A new graph starts in
+    /// Keyboard mode either way, so the keyboard plays here too.
     #[test]
-    fn in_a_plugin_only_clicks_play() {
+    fn a_click_on_the_strip_plays_and_the_octave_keys_shift_it() {
         use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
         let bounds = Rectangle {
             x: 0.0,
@@ -1314,7 +1278,6 @@ mod layering_tests {
             height: 712.0,
         };
         let mut graph = minimal_graph();
-        graph.computer_keys = false;
         let key = |graph: &mut Graph, key_code| {
             let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
             editor
@@ -1328,7 +1291,6 @@ mod layering_tests {
                 )
                 .1
         };
-        assert!(key(&mut graph, KeyCode::A).is_none());
         key(&mut graph, KeyCode::X);
         assert_eq!(graph.piano.octave(), 1);
 
@@ -1436,6 +1398,8 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Envelope
                 | NodeKind::Lfo
                 | NodeKind::Input
+                | NodeKind::Arpeggiator
+                | NodeKind::Chord
                 | NodeKind::Macro
                 | NodeKind::Map
                 | NodeKind::Math
@@ -1629,17 +1593,34 @@ mod bypass_and_duplicate_tests {
         let items = |kind| menu_items(&FlodeNode::new(kind, Point::new(0.0, 0.0)));
         assert_eq!(
             items(NodeKind::Oscillator),
-            &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete]
+            &[
+                MenuItem::Duplicate,
+                MenuItem::Bypass,
+                MenuItem::DeleteInPlace,
+                MenuItem::Delete
+            ]
         );
         assert_eq!(
             items(NodeKind::Reverb),
-            &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete]
+            &[
+                MenuItem::Duplicate,
+                MenuItem::Bypass,
+                MenuItem::DeleteInPlace,
+                MenuItem::Delete
+            ]
         );
         assert_eq!(
             items(NodeKind::Lfo),
-            &[MenuItem::Duplicate, MenuItem::Delete]
+            &[
+                MenuItem::Duplicate,
+                MenuItem::DeleteInPlace,
+                MenuItem::Delete
+            ]
         );
-        assert_eq!(items(NodeKind::Output), &[MenuItem::Delete]);
+        assert_eq!(
+            items(NodeKind::Output),
+            &[MenuItem::DeleteInPlace, MenuItem::Delete]
+        );
     }
 
     /// The bypass entry says what it will do, and flips after it is used.
@@ -1670,12 +1651,13 @@ mod bypass_and_duplicate_tests {
             target: crate::editor::menus::MenuTarget::Node,
         };
         let area = menu_bounds(menu);
-        assert_eq!(area.height, 3.0 * MENU_ITEM_HEIGHT);
+        assert_eq!(area.height, 4.0 * MENU_ITEM_HEIGHT);
         let at = |row: f32| Point::new(60.0, 60.0 + (row + 0.5) * MENU_ITEM_HEIGHT);
         assert_eq!(menu_item_at(menu, at(0.0)), Some(MenuItem::Duplicate));
         assert_eq!(menu_item_at(menu, at(1.0)), Some(MenuItem::Bypass));
-        assert_eq!(menu_item_at(menu, at(2.0)), Some(MenuItem::Delete));
-        assert_eq!(menu_item_at(menu, at(3.0)), None);
+        assert_eq!(menu_item_at(menu, at(2.0)), Some(MenuItem::DeleteInPlace));
+        assert_eq!(menu_item_at(menu, at(3.0)), Some(MenuItem::Delete));
+        assert_eq!(menu_item_at(menu, at(4.0)), None);
         assert_eq!(menu_item_at(menu, Point::new(10.0, 70.0)), None);
     }
 
@@ -2468,12 +2450,24 @@ mod preset_ui_tests {
         message
     }
 
-    fn presets_button() -> Point {
-        let segment = pill_segment(bounds(), 4);
+    fn burger_button() -> Point {
+        let burger = burger_bounds();
         Point::new(
-            segment.x + segment.width / 2.0,
-            segment.y + segment.height / 2.0,
+            burger.x + burger.width / 2.0,
+            burger.y + burger.height / 2.0,
         )
+    }
+
+    fn presets_row() -> Point {
+        let row = burger_row_bounds(BURGER_PRESETS_ROW);
+        Point::new(row.x + row.width / 2.0, row.y + row.height / 2.0)
+    }
+
+    /// Opens the Presets list the way a person does now: press the burger button, then its
+    /// Presets row.
+    fn open_presets(editor: &mut NodeEditor) {
+        click(editor, burger_button());
+        click(editor, presets_row());
     }
 
     /// What the list shows for the presets in a test's folder.
@@ -2514,7 +2508,7 @@ mod preset_ui_tests {
         let dir = graph.preset_dir.clone().unwrap();
         let library = crate::presets::library_in(&dir);
         let mut editor = NodeEditor::new(graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         click(&mut editor, list_row(&library, 0));
         assert!(editor.graph.save_dialog.is_some());
         answer_dialog(
@@ -2561,7 +2555,7 @@ mod preset_ui_tests {
         assert_eq!(other.nodes.len(), 2);
         let mut editor = NodeEditor::new(&mut other, ControlLevels::default(), [0; 2], [0.0; 2]);
         // The list shows the category. Clicking it opens its submenu, and the preset is in that.
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         assert_eq!(
             editor.graph.preset_list.as_ref().map(|m| m.library.clone()),
             Some(library.clone())
@@ -2615,11 +2609,11 @@ mod preset_ui_tests {
         let mut graph = graph_in(&dir);
         let library = Library::default();
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         click(&mut editor, list_row(&library, 0));
         assert_eq!(editor.graph.save_dialog_requests, 1);
         assert!(editor.graph.save_dialog.is_some() && editor.graph.preset_list.is_none());
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         click(&mut editor, list_row(&library, 0));
         assert_eq!(editor.graph.save_dialog_requests, 1);
         // Nothing is saved until the dialog answers.
@@ -2834,17 +2828,18 @@ mod preset_ui_tests {
         assert_eq!(graph.save_dialog_requests, 1);
     }
 
-    /// The button opens the list, and pressing it again or pressing elsewhere closes it.
+    /// The Presets row opens the list, and reopening the burger menu and pressing it again, or
+    /// pressing elsewhere, closes it.
     #[test]
-    fn the_presets_button_toggles_the_list() {
+    fn the_presets_row_toggles_the_list() {
         let dir = TempDir::new("toggle");
         let mut graph = graph_in(&dir);
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         assert!(editor.graph.preset_list.is_some());
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         assert!(editor.graph.preset_list.is_none());
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         click(&mut editor, Point::new(400.0, 400.0));
         assert!(editor.graph.preset_list.is_none());
     }
@@ -2968,7 +2963,7 @@ mod preset_ui_tests {
         assert_eq!(library.categories.len(), 1);
 
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         let move_to = |editor: &mut NodeEditor, at: Point| {
             editor.update(
                 Event::Mouse(mouse::Event::CursorMoved { position: at }),
@@ -3015,7 +3010,7 @@ mod preset_ui_tests {
         let library = library_of(&dir);
 
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         let message = click(&mut editor, list_row(&library, 1));
         assert!(matches!(message, Some(Message::GraphChanged)));
 
@@ -3055,7 +3050,7 @@ mod preset_ui_tests {
 
         let mut graph = graph_in(&dir);
         let mut editor = NodeEditor::new(&mut graph, ControlLevels::default(), [0; 2], [0.0; 2]);
-        click(&mut editor, presets_button());
+        open_presets(&mut editor);
         click(&mut editor, list_row(&library, 2));
         assert!(editor.graph.nodes.iter().any(|n| n.kind == NodeKind::Delay));
         assert_eq!(editor.graph.preset_name.as_deref(), Some("Plain"));
@@ -5106,7 +5101,6 @@ mod knob_entry_tests {
     #[test]
     fn the_box_keeps_the_keys_from_the_piano() {
         let (mut graph, _, at) = graph_with(NodeKind::Filter, KnobId::Cutoff);
-        graph.computer_keys = true;
         let mut editor = editor(&mut graph);
         double_click(&mut editor, at);
         let event = Event::Keyboard(keyboard::Event::KeyPressed {
@@ -5678,10 +5672,10 @@ mod math_node_tests {
         assert_eq!(graph.link_under(node), None);
     }
 
-    /// The node is in the add menu with the utilities, and takes no audio.
+    /// The node is in the add menu with Modulation, and takes no audio.
     #[test]
-    fn the_math_node_is_in_the_util_menu() {
-        assert!(Category::Util.kinds().contains(&NodeKind::Math));
+    fn the_math_node_is_in_the_modulation_menu() {
+        assert!(Category::Modulation.kinds().contains(&NodeKind::Math));
         let node = FlodeNode::new(NodeKind::Math, Point::new(0.0, 0.0));
         assert!(!node.kind.behavior().audio_in() && !node.kind.behavior().audio_out());
         // The knobs take control wires and the output makes one.
@@ -6204,9 +6198,9 @@ mod monitor_tests {
     }
 
     #[test]
-    fn the_quick_add_box_and_the_util_list_offer_the_monitor() {
+    fn the_quick_add_box_and_the_utility_list_offer_the_monitor() {
         assert!(NodeKind::ALL.contains(&NodeKind::Monitor));
-        assert!(Category::Util.kinds().contains(&NodeKind::Monitor));
+        assert!(Category::Utility.kinds().contains(&NodeKind::Monitor));
         let found = quick_add_results("monit", |_| true);
         assert_eq!(found, vec![NodeKind::Monitor]);
     }
@@ -7125,9 +7119,9 @@ mod gain_node_tests {
     }
 
     #[test]
-    fn the_util_menu_and_the_quick_add_box_offer_the_gain_node() {
+    fn the_utility_menu_and_the_quick_add_box_offer_the_gain_node() {
         assert!(NodeKind::ALL.contains(&NodeKind::Gain));
-        assert!(Category::Util.kinds().contains(&NodeKind::Gain));
+        assert!(Category::Utility.kinds().contains(&NodeKind::Gain));
         assert_eq!(quick_add_results("gain", |_| true), vec![NodeKind::Gain]);
     }
 }

@@ -250,9 +250,9 @@ mod tests {
         assert_eq!(meter.update([0.0, 0.0], 2.0), [0.0, 0.0]);
     }
 
-    /// The meter sits at the top right, clear of the pill in the default window.
+    /// The meter sits at the top right, clear of the burger button at the top left.
     #[test]
-    fn the_meter_sits_right_of_the_pill() {
+    fn the_meter_sits_right_of_the_burger_button() {
         let bounds = Rectangle {
             x: 0.0,
             y: 0.0,
@@ -260,8 +260,8 @@ mod tests {
             height: 712.0,
         };
         let meter = meter_bounds(bounds);
-        let pill = super::super::menus::pill_bounds(bounds);
-        assert!(meter.x > pill.x + pill.width);
+        let burger = super::super::menus::burger_bounds();
+        assert!(meter.x > burger.x + burger.width);
         assert!(meter.x + meter.width <= bounds.width);
     }
 }

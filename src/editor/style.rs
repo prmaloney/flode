@@ -20,16 +20,21 @@ pub(super) const LIST_GAP: f32 = 2.0;
 
 pub(super) const CHECKBOX_SIZE: f32 = 12.0;
 
-pub(super) const PILL_WIDTH: f32 = 600.0;
+/// The height of the controls docked at the top of the editor: the burger button, the meter, and
+/// the status line's gap under them.
 pub(super) const PILL_HEIGHT: f32 = 36.0;
 pub(super) const PILL_TOP: f32 = 12.0;
-/// A lit pill button sits this far in from the pill's edges and its dividers.
-pub(super) const PILL_LIGHT_INSET: f32 = 4.0;
+/// The side of the square burger button, the same height as the other top controls.
+pub(super) const BURGER_SIZE: f32 = PILL_HEIGHT;
+/// How wide the burger menu's top-level list is.
+pub(super) const BURGER_MENU_WIDTH: f32 = 190.0;
+/// The gap the burger menu's divider takes, between Utility and Presets.
+pub(super) const BURGER_DIVIDER_HEIGHT: f32 = 9.0;
 
 /// The narrowest a category list is, so short labels still get a usable row.
 pub(super) const CATEGORY_MIN_WIDTH: f32 = 160.0;
 
-/// How long the line under the pill stays up.
+/// How long the line under the burger menu stays up.
 pub(super) const STATUS_SECONDS: std::time::Duration = std::time::Duration::from_secs(3);
 /// The preset list is at least this wide, so most names fit on a row.
 pub(super) const PRESET_LIST_MIN_WIDTH: f32 = 220.0;

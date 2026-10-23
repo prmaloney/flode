@@ -1,18 +1,17 @@
-//! The flode mark at the left of the pill: an F built from wired node cards.
+//! The flode mark at the top left of the editor: an F built from wired node cards.
 
 use nih_plug_iced::widget::canvas::{Frame, LineCap, Path, Stroke};
 use nih_plug_iced::{Color, Point, Rectangle};
 
 use super::draw::rounded_rect;
-use super::menus::pill_bounds;
 use super::style::*;
 
 /// The logo's side on screen, in pixels.
 pub(super) const LOGO_SIZE: f32 = 30.0;
 /// The gap between the window's left edge and the logo.
-const LOGO_MARGIN: f32 = 16.0;
-/// The least free space kept between the logo and the pill.
-const LOGO_GAP: f32 = 12.0;
+pub(super) const LOGO_MARGIN: f32 = 16.0;
+/// The gap the logo keeps from whatever sits to its right, such as the burger button.
+pub(super) const LOGO_GAP: f32 = 12.0;
 
 /// The side of the mark's design square, which the coordinates below are in.
 const SVG_SIZE: f32 = 512.0;
@@ -39,17 +38,15 @@ const LOGO_TILE_COLOR: Color = Color::from_rgb(0.114, 0.118, 0.161);
 /// The dark ring around each pin.
 const LOGO_PIN_OUTLINE_COLOR: Color = Color::from_rgb(0.078, 0.082, 0.106);
 
-/// Where the logo goes, in screen coordinates: top-aligned with the pill, in the free space to its
-/// left. It is `None` when that space is too small to hold the logo, so it never meets the pill
-/// or the window edge.
+/// Where the logo goes, in screen coordinates: a fixed margin from the window's top left corner.
+/// It is `None` when the window is too narrow to hold it at all.
 pub(super) fn logo_bounds(bounds: Rectangle) -> Option<Rectangle> {
-    let pill = pill_bounds(bounds);
-    if LOGO_MARGIN + LOGO_SIZE + LOGO_GAP > pill.x {
+    if LOGO_MARGIN + LOGO_SIZE > bounds.width {
         return None;
     }
     Some(Rectangle {
         x: LOGO_MARGIN,
-        y: pill.y,
+        y: PILL_TOP,
         width: LOGO_SIZE,
         height: LOGO_SIZE,
     })
@@ -124,31 +121,16 @@ mod tests {
     }
 
     #[test]
-    fn logo_fits_the_editor_and_clears_the_pill() {
+    fn logo_sits_at_its_fixed_top_left_position() {
         let bounds = window(1024.0);
         let logo = logo_bounds(bounds).expect("fits at 1024");
-        let pill = pill_bounds(bounds);
-        assert_eq!(logo.y, pill.y);
-        assert!(logo.x >= 0.0);
-        assert!(logo.x + logo.width < pill.x);
+        assert_eq!(logo.x, LOGO_MARGIN);
+        assert_eq!(logo.y, PILL_TOP);
+        assert_eq!(logo.width, LOGO_SIZE);
     }
 
     #[test]
     fn logo_hides_when_the_window_is_too_narrow() {
-        assert!(logo_bounds(window(PILL_WIDTH)).is_none());
-        assert!(logo_bounds(window(100.0)).is_none());
-    }
-
-    #[test]
-    fn logo_never_overlaps_the_pill() {
-        let mut width = 0.0;
-        while width < 1600.0 {
-            let bounds = window(width);
-            if let Some(logo) = logo_bounds(bounds) {
-                let pill = pill_bounds(bounds);
-                assert!(logo.x >= 0.0 && logo.x + logo.width <= pill.x, "{width}");
-            }
-            width += 7.0;
-        }
+        assert!(logo_bounds(window(10.0)).is_none());
     }
 }

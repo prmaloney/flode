@@ -10,6 +10,8 @@ use crate::dsp::mix::MixMode;
 use crate::dsp::monitor::MonitorMode;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
+use crate::nodes::arpeggiator::ArpPattern;
+use crate::nodes::chord::ChordType;
 use crate::nodes::eq;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::math::MathOp;
@@ -19,23 +21,46 @@ use crate::patch::stage::{
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
     PhaserParams, ReverbParams, StageParams, StageSpec,
 };
-use crate::patch::{EnvelopeSettings, LfoSettings};
+use crate::patch::{
+    ArpeggiatorSettings, ChordSettings, EnvelopeSettings, LfoSettings, NoteSourceSpec,
+};
 use assert_no_alloc::assert_no_alloc;
 
 /// A patch that uses every stage kind: two oscillators with unison, an envelope, noise, a filter
-/// inside one mix branch, a second filter after the mix, and an LFO.
+/// inside one mix branch, a second filter after the mix, and an LFO. Slot 0's notes come from an
+/// arpeggiator reading a MIDI input slot, rather than straight from the host, so the guard also
+/// covers that path: the arpeggiator's own step clock and the notes it dispatches into a lane. A
+/// third note-source slot is a chord reading the same MIDI input directly, so the guard covers its
+/// per-sample diff and the chord it dispatches too, even though nothing plays from it today.
 fn busy_patch() -> Patch {
     let saw = OscillatorParams {
         waveform: Waveform::Saw,
         unison: Param::fixed(KnobId::Unison, 5.0),
         envelope: Some(0),
+        notes: Some(1),
         ..OscillatorParams::default()
     };
     let noise = OscillatorParams {
         waveform: Waveform::Noise,
+        notes: Some(1),
         ..OscillatorParams::default()
     };
     let mut patch = Patch::silent();
+    patch.note_sources[0] = Some(NoteSourceSpec::Input);
+    patch.note_sources[1] = Some(NoteSourceSpec::Arpeggiator(ArpeggiatorSettings {
+        input: Some(0),
+        pattern: ArpPattern::Up,
+        rate: Param::fixed(KnobId::LfoRate, 8.0),
+        sync: Param::fixed(KnobId::LfoSync, 0.0),
+        octaves: Param::fixed(KnobId::ArpOctaves, 2.0),
+        gate: Param::fixed(KnobId::ArpGate, 0.8),
+    }));
+    patch.note_sources[2] = Some(NoteSourceSpec::Chord(ChordSettings {
+        input: Some(0),
+        chord: ChordType::Major7,
+        spread: Param::fixed(KnobId::ChordSpread, 0.5),
+    }));
+    patch.lanes[0].notes_slot = Some(1);
     patch.lanes[0].stages.extend([
         StageSpec::new(StageParams::Oscillator(saw)),
         StageSpec::new(StageParams::Oscillator(noise)),

@@ -297,8 +297,9 @@ pub struct StripView {
     pub sounding: [u64; 2],
     /// The key the mouse holds, if any.
     pub pressed: Option<u8>,
-    /// True when the computer keyboard plays notes, which is in the standalone app. The strip
-    /// then marks the keys it plays.
+    /// True while the editor is in Keyboard mode, where the computer keyboard plays notes. The
+    /// strip then marks the keys it plays. In Edit mode those same keys are shortcuts instead, so
+    /// the strip leaves the mark off rather than show a legend for keys that do something else.
     pub computer_keys: bool,
     /// The octave button under the cursor, if any.
     pub hover: Option<i32>,

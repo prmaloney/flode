@@ -7,7 +7,7 @@ pub(super) const ZOOM_MIN: f32 = 0.25;
 pub(super) const ZOOM_MAX: f32 = 3.0;
 
 /// The canvas view: nodes are drawn at `zoom` and moved by `offset`. A screen point is
-/// `world * zoom + offset`. The pill and the mouse position stay in screen coordinates.
+/// `world * zoom + offset`. The burger button and the mouse position stay in screen coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct View {
     pub(super) zoom: f32,

@@ -1,4 +1,4 @@
-//! Everything the editor paints: wires, nodes, knobs, dropdowns, the pill, and the lists.
+//! Everything the editor paints: wires, nodes, knobs, dropdowns, the burger menu, and the lists.
 
 use crate::dsp::analyzer::{BINS, FLOOR_DB};
 use crate::editor::knob::{self};
@@ -19,7 +19,7 @@ use super::depth::{self, draw_shadow, FLOAT_SHADOW, LIFTED_SHADOW, NODE_SHADOW};
 use super::group_ui::{inner_bounds, pane_bounds};
 use super::{curve::*, graph::*, logo, menus::*, pane, style::*};
 
-/// Draws one frame of the editor: the wires, the nodes, then the pill, key strip, and open
+/// Draws one frame of the editor: the wires, the nodes, then the burger menu, key strip, and open
 /// lists on top.
 pub(super) fn draw_editor(
     graph: &Graph,
@@ -34,18 +34,23 @@ pub(super) fn draw_editor(
 
     // Iced draws all text above all shapes in a frame. Node text under an open overlay would
     // show through it, so node text is hidden inside the overlays. The overlays are kept in
-    // editor coordinates. The pill is in screen coordinates, so it is converted.
+    // editor coordinates. The burger button is in screen coordinates, so it is converted.
     // The key strip covers nodes too, so its area is an overlay as well.
     let mut overlays = vec![
-        view.rect_to_world(pill_bounds(bounds)),
+        view.rect_to_world(burger_bounds()),
         view.rect_to_world(piano::strip_bounds(bounds)),
     ];
     // The logo sits over the canvas too, so node text under it is hidden as well. It goes right
-    // after the pill and strip, and `fixed` counts the overlays that are not open menus.
+    // after the burger button and strip, and `fixed` counts the overlays that are not open menus.
     let logo = logo::logo_bounds(bounds);
     let fixed = overlays.len() + usize::from(logo.is_some());
     if let Some(rect) = logo {
         overlays.push(view.rect_to_world(rect));
+    }
+    // The burger menu's own top-level list is open whenever any of its nested lists are, so it
+    // needs an overlay of its own too.
+    if graph.burger_menu {
+        overlays.push(view.rect_to_world(burger_list_bounds()));
     }
     if let Some((index, which)) = graph.dropdown_menu {
         let node = &graph.nodes[index];
@@ -85,7 +90,7 @@ pub(super) fn draw_editor(
     }
 
     // While a group is open, its graph floats in a pane over a dimmed backdrop. The backdrop and
-    // the pane's frame come first, so the pill and the strip draw over them.
+    // the pane's frame come first, so the burger button and the strip draw over them.
     let pane = (graph.group_depth() > 0).then(|| pane_bounds(bounds));
     if let Some(pane) = pane {
         pane::draw_pane(&mut frame, bounds, graph, pane);
@@ -209,27 +214,9 @@ pub(super) fn draw_editor(
         }
     }
 
-    // The pill stays fixed on screen. It is drawn after the nodes, so it covers them. Its buttons
-    // light when the cursor is over them, and while their list is open.
-    let hovered_item = if graph.cursor_in {
-        pill_button_at(bounds, graph.last_screen)
-    } else {
-        None
-    };
-    let item_place = |item: PillItem| PILL_ITEMS.iter().position(|candidate| *candidate == item);
-    let open_item = match (graph.category_menu, &graph.preset_list, &graph.group_list) {
-        (Some(category), _, _) => item_place(PillItem::Category(category)),
-        (None, Some(_), _) => item_place(PillItem::Presets),
-        (None, None, Some(_)) => item_place(PillItem::Groups),
-        (None, None, None) => None,
-    };
-    draw_pill(
-        &mut frame,
-        bounds,
-        graph.preset_name.as_deref(),
-        hovered_item.and_then(item_place),
-        open_item,
-    );
+    // The burger button stays fixed on screen. It is drawn after the nodes, so it covers them.
+    let burger_hovered = graph.cursor_in && burger_bounds().contains(graph.last_screen);
+    draw_burger(&mut frame, burger_hovered, graph.burger_menu);
     if let Some(rect) = logo {
         logo::draw_logo(&mut frame, rect);
     }
@@ -249,7 +236,7 @@ pub(super) fn draw_editor(
             octave: graph.piano.octave(),
             sounding: active_notes,
             pressed: graph.mouse_note,
-            computer_keys: graph.computer_keys,
+            computer_keys: graph.mode == EditorMode::Keyboard,
             hover: if graph.cursor_in {
                 piano::octave_button_at(strip, graph.last_screen)
             } else {
@@ -258,8 +245,9 @@ pub(super) fn draw_editor(
             labels,
         },
     );
+    draw_mode_badge(&mut frame, bounds, graph.mode);
 
-    // The open lists and the menu are drawn over the pill, in editor coordinates like the nodes.
+    // The open lists and the menu are drawn over the burger button, in screen coordinates.
     let draw_top = |frame: &mut Frame| {
         frame.with_save(|frame| {
             frame.translate(offset);
@@ -306,6 +294,9 @@ pub(super) fn draw_editor(
             }
         }
 
+        if graph.burger_menu {
+            draw_burger_menu(frame, graph);
+        }
         if let Some(category) = graph.category_menu {
             draw_category_list(frame, bounds, category, graph);
         }
@@ -405,6 +396,7 @@ pub(super) fn over_limit_label(graph: &Graph, index: usize) -> Option<&'static s
     let running = match graph.nodes[index].kind {
         NodeKind::Lfo => graph.lfo_index(index).is_some(),
         NodeKind::Envelope => graph.envelope_index(index).is_some(),
+        NodeKind::Input | NodeKind::Arpeggiator => graph.note_source_index(index).is_some(),
         _ => true,
     };
     (!running).then_some("Over limit")
@@ -1644,102 +1636,99 @@ fn draw_selection_box(frame: &mut Frame, a: Point, b: Point) {
 /// opacity.
 const SELECTION_GLOW: [(f32, f32); 3] = [(9.0, 0.04), (5.5, 0.07), (2.5, 0.12)];
 
-/// The pill of add buttons at the top of the editor.
-///
-/// `hovered` is the button under the cursor and `open` is the one whose list is open, each by its
-/// place in `PILL_ITEMS`. Both are lit, and their chevron goes from dim to white.
-pub(super) fn draw_pill(
-    frame: &mut Frame,
-    bounds: Rectangle,
-    preset_name: Option<&str>,
-    hovered: Option<usize>,
-    open: Option<usize>,
-) {
-    let pill = pill_bounds(bounds);
-    draw_shadow(frame, pill, PILL_HEIGHT / 2.0, FLOAT_SHADOW);
-    frame.fill(&rounded_rect(pill, PILL_HEIGHT / 2.0), PILL_COLOR);
+/// The burger button at the top left of the editor, beside the logo: a small square with three
+/// short lines, in the same stroke style the logo draws its wires with. It lights while the
+/// cursor is over it or its menu is open.
+pub(super) fn draw_burger(frame: &mut Frame, hovered: bool, open: bool) {
+    let burger = burger_bounds();
+    draw_shadow(frame, burger, DROPDOWN_CORNER_RADIUS, FLOAT_SHADOW);
+    let fill = if open {
+        DROPDOWN_HOVER_COLOR
+    } else if hovered {
+        LIST_ROW_HOVER_COLOR
+    } else {
+        PILL_COLOR
+    };
+    frame.fill(&rounded_rect(burger, DROPDOWN_CORNER_RADIUS), fill);
 
-    let segment = pill.width / PILL_ITEMS.len() as f32;
-    for (index, color) in [
-        (open, DROPDOWN_HOVER_COLOR),
-        (hovered, LIST_ROW_HOVER_COLOR),
-    ]
-    .into_iter()
-    .filter_map(|(item, color)| item.map(|item| (item, color)))
-    {
-        let lit = Rectangle {
-            x: pill.x + index as f32 * segment + PILL_LIGHT_INSET,
-            y: pill.y + PILL_LIGHT_INSET,
-            width: segment - 2.0 * PILL_LIGHT_INSET,
-            height: pill.height - 2.0 * PILL_LIGHT_INSET,
-        };
-        frame.fill(&rounded_rect(lit, lit.height / 2.0), color);
-    }
-    for divider in 1..PILL_ITEMS.len() {
-        let x = pill.x + divider as f32 * segment;
+    let inset = 9.0;
+    let left = burger.x + inset;
+    let right = burger.x + burger.width - inset;
+    let gap = (burger.height - 2.0 * inset) / 2.0;
+    for line in 0..3 {
+        let y = burger.y + inset + line as f32 * gap;
         frame.stroke(
-            &Path::line(
-                Point::new(x, pill.y + 8.0),
-                Point::new(x, pill.y + pill.height - 8.0),
-            ),
+            &Path::line(Point::new(left, y), Point::new(right, y)),
             Stroke::default()
-                .with_color(PILL_DIVIDER_COLOR)
-                .with_width(1.0),
+                .with_color(TEXT_COLOR)
+                .with_width(2.0)
+                .with_line_cap(LineCap::Round),
         );
-    }
-
-    for (index, item) in PILL_ITEMS.iter().enumerate() {
-        let center_x = pill.x + (index as f32 + 0.5) * segment;
-        let center_y = pill.y + pill.height / 2.0;
-        let label = match item {
-            PillItem::Kind(kind) => kind.title().to_string(),
-            PillItem::Category(category) => category.label().to_string(),
-            // The button names the current preset, cut short to fit.
-            PillItem::Presets => preset_name.map_or("Presets".to_string(), shorten),
-            PillItem::Groups => "Groups".to_string(),
-        };
-        frame.fill_text(Text {
-            content: label,
-            position: Point::new(center_x, center_y),
-            color: TEXT_COLOR,
-            size: 14.0,
-            horizontal_alignment: alignment::Horizontal::Center,
-            vertical_alignment: alignment::Vertical::Center,
-            ..Text::default()
-        });
-        // A category and the presets open a list, so their buttons have a chevron.
-        if let PillItem::Category(_) | PillItem::Presets | PillItem::Groups = item {
-            // The Presets button can hold a name, so its chevron sits further out.
-            let chevron_x = center_x
-                + if *item == PillItem::Presets {
-                    42.0
-                } else {
-                    32.0
-                };
-            let chevron = Path::new(|builder| {
-                builder.move_to(Point::new(chevron_x - 3.0, center_y - 2.0));
-                builder.line_to(Point::new(chevron_x, center_y + 2.0));
-                builder.line_to(Point::new(chevron_x + 3.0, center_y - 2.0));
-            });
-            let lit = hovered == Some(index) || open == Some(index);
-            frame.stroke(
-                &chevron,
-                Stroke::default()
-                    .with_color(if lit { TEXT_COLOR } else { DIM_TEXT_COLOR })
-                    .with_width(1.5)
-                    .with_line_cap(LineCap::Round),
-            );
-        }
     }
 }
 
-/// Lights row `row` of a list that starts at `list`, the way a hovered row of a dropdown is lit.
-fn light_row(frame: &mut Frame, list: Rectangle, row: usize) {
+/// The burger menu's top-level list: Add Oscillator, then a row for each category, a divider,
+/// then Presets and Groups. A row that opens something gets a submenu arrow, Add Oscillator does
+/// not, since it places a node directly.
+pub(super) fn draw_burger_menu(frame: &mut Frame, graph: &Graph) {
+    let list = burger_list_bounds();
+    draw_shadow(frame, list, MENU_CORNER_RADIUS, FLOAT_SHADOW);
+    frame.fill(&rounded_rect(list, MENU_CORNER_RADIUS), MENU_COLOR);
+
+    let hovered = graph
+        .cursor_in
+        .then(|| burger_row_at(graph.last_screen))
+        .flatten();
+    // A category, the preset list, or the group list being open lights its own row, the same way
+    // a category's own submenu lights the preset list's row while it is open.
+    let open_row = match (graph.category_menu, &graph.preset_list, &graph.group_list) {
+        (Some(category), _, _) => Some(BurgerRow::Category(category)),
+        (None, Some(_), _) => Some(BurgerRow::Presets),
+        (None, None, Some(_)) => Some(BurgerRow::Groups),
+        (None, None, None) => None,
+    };
+
+    for (index, row) in BURGER_ROWS.iter().enumerate() {
+        let rect = burger_row_bounds(index);
+        if hovered == Some(*row) || open_row == Some(*row) {
+            light_rect(frame, rect);
+        }
+        let label = match row {
+            BurgerRow::AddOscillator => format!("Add {}", NodeKind::Oscillator.title()),
+            BurgerRow::Category(category) => category.label().to_string(),
+            // The row names the current preset, cut short to fit.
+            BurgerRow::Presets => graph
+                .preset_name
+                .as_deref()
+                .map_or("Presets".to_string(), shorten),
+            BurgerRow::Groups => "Groups".to_string(),
+        };
+        rect_text(frame, rect, label, TEXT_COLOR);
+        if !matches!(row, BurgerRow::AddOscillator) {
+            draw_submenu_arrow_rect(frame, rect);
+        }
+    }
+
+    // The divider between Utility and Presets.
+    let y = burger_row_bounds(BURGER_PRESETS_ROW).y - BURGER_DIVIDER_HEIGHT / 2.0;
+    frame.stroke(
+        &Path::line(
+            Point::new(list.x + 10.0, y),
+            Point::new(list.x + list.width - 10.0, y),
+        ),
+        Stroke::default()
+            .with_color(PILL_DIVIDER_COLOR)
+            .with_width(1.0),
+    );
+}
+
+/// Lights a row's rectangle, the way a hovered row of a dropdown is lit.
+fn light_rect(frame: &mut Frame, rect: Rectangle) {
     let lit = Rectangle {
-        x: list.x + 4.0,
-        y: list.y + row as f32 * MENU_ITEM_HEIGHT,
-        width: list.width - 8.0,
-        height: MENU_ITEM_HEIGHT,
+        x: rect.x + 4.0,
+        y: rect.y,
+        width: rect.width - 8.0,
+        height: rect.height,
     };
     frame.fill(
         &rounded_rect(lit, DROPDOWN_CORNER_RADIUS),
@@ -1747,14 +1736,24 @@ fn light_row(frame: &mut Frame, list: Rectangle, row: usize) {
     );
 }
 
-/// The text of one row of a list that starts at `list`.
-fn list_row_text(frame: &mut Frame, list: Rectangle, row: usize, content: String, color: Color) {
+/// Lights row `row` of a list that starts at `list`, each row `MENU_ITEM_HEIGHT` tall.
+fn light_row(frame: &mut Frame, list: Rectangle, row: usize) {
+    light_rect(
+        frame,
+        Rectangle {
+            x: list.x,
+            y: list.y + row as f32 * MENU_ITEM_HEIGHT,
+            width: list.width,
+            height: MENU_ITEM_HEIGHT,
+        },
+    );
+}
+
+/// The text of a row's rectangle.
+fn rect_text(frame: &mut Frame, rect: Rectangle, content: String, color: Color) {
     frame.fill_text(Text {
         content,
-        position: Point::new(
-            list.x + 12.0,
-            list.y + row as f32 * MENU_ITEM_HEIGHT + MENU_ITEM_HEIGHT / 2.0,
-        ),
+        position: Point::new(rect.x + 12.0, rect.y + rect.height / 2.0),
         color,
         size: 13.0,
         vertical_alignment: alignment::Vertical::Center,
@@ -1762,10 +1761,26 @@ fn list_row_text(frame: &mut Frame, list: Rectangle, row: usize, content: String
     });
 }
 
-/// A small arrow pointing right, at the right end of a row that opens a submenu.
-fn draw_submenu_arrow(frame: &mut Frame, list: Rectangle, row: usize) {
-    let x = list.x + list.width - 16.0;
-    let y = list.y + (row as f32 + 0.5) * MENU_ITEM_HEIGHT;
+/// The text of one row of a list that starts at `list`, each row `MENU_ITEM_HEIGHT` tall.
+fn list_row_text(frame: &mut Frame, list: Rectangle, row: usize, content: String, color: Color) {
+    rect_text(
+        frame,
+        Rectangle {
+            x: list.x,
+            y: list.y + row as f32 * MENU_ITEM_HEIGHT,
+            width: list.width,
+            height: MENU_ITEM_HEIGHT,
+        },
+        content,
+        color,
+    );
+}
+
+/// A small arrow pointing right, at the right end of a row's rectangle. Marks a row that opens a
+/// submenu.
+fn draw_submenu_arrow_rect(frame: &mut Frame, rect: Rectangle) {
+    let x = rect.x + rect.width - 16.0;
+    let y = rect.y + rect.height / 2.0;
     let arrow = Path::new(|builder| {
         builder.move_to(Point::new(x - 2.0, y - 4.0));
         builder.line_to(Point::new(x + 2.0, y));
@@ -1780,7 +1795,20 @@ fn draw_submenu_arrow(frame: &mut Frame, list: Rectangle, row: usize) {
     );
 }
 
-/// The list under the Presets button: "Save as...", the categories, then the presets with none.
+/// A small arrow pointing right, at the right end of row `row` of a list that starts at `list`.
+fn draw_submenu_arrow(frame: &mut Frame, list: Rectangle, row: usize) {
+    draw_submenu_arrow_rect(
+        frame,
+        Rectangle {
+            x: list.x,
+            y: list.y + row as f32 * MENU_ITEM_HEIGHT,
+            width: list.width,
+            height: MENU_ITEM_HEIGHT,
+        },
+    );
+}
+
+/// The list under the Presets row: "Save as...", the categories, then the presets with none.
 /// A category with its submenu open is highlighted, and the submenu is drawn beside it. The
 /// current preset is marked. An empty library says so.
 pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
@@ -1866,7 +1894,7 @@ pub(super) fn draw_preset_list(frame: &mut Frame, bounds: Rectangle, graph: &Gra
     }
 }
 
-/// The list under the Groups button, one row per saved group, with a note under it if the rows
+/// The list under the Groups row, one row per saved group, with a note under it if the rows
 /// that fit above the keys are not all of them. An empty folder says so.
 pub(super) fn draw_group_list(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
     let Some(entries) = &graph.group_list else {
@@ -1945,19 +1973,57 @@ fn draw_submenu(frame: &mut Frame, bounds: Rectangle, graph: &Graph, open: usize
     }
 }
 
-/// The line under the pill that says what a save or load did, for a few seconds.
-pub(super) fn draw_status(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+/// The line under the burger button that says what a save or load did, for a few seconds.
+pub(super) fn draw_status(frame: &mut Frame, _bounds: Rectangle, graph: &Graph) {
     let Some((text, since)) = &graph.status else {
         return;
     };
     if since.elapsed() > STATUS_SECONDS {
         return;
     }
-    let pill = pill_bounds(bounds);
+    let burger = burger_bounds();
     frame.fill_text(Text {
         content: text.clone(),
-        position: Point::new(pill.x + pill.width / 2.0, pill.y + pill.height + 16.0),
+        position: Point::new(burger.x, burger.y + burger.height + 16.0),
         color: DIM_TEXT_COLOR,
+        size: 12.0,
+        horizontal_alignment: alignment::Horizontal::Left,
+        vertical_alignment: alignment::Vertical::Center,
+        ..Text::default()
+    });
+}
+
+/// How big the mode badge is, and the gap it keeps from the strip above it and the editor's edge.
+const MODE_BADGE_SIZE: (f32, f32) = (78.0, 22.0);
+const MODE_BADGE_MARGIN: f32 = 10.0;
+
+/// The mode badge's rectangle, anchored to the bottom right of the editor, just above the key
+/// strip. `bounds` is the editor's.
+pub(super) fn mode_badge_bounds(bounds: Rectangle) -> Rectangle {
+    let (width, height) = MODE_BADGE_SIZE;
+    let strip = piano::strip_bounds(bounds);
+    Rectangle {
+        x: bounds.width - MODE_BADGE_MARGIN - width,
+        y: strip.y - MODE_BADGE_MARGIN - height,
+        width,
+        height,
+    }
+}
+
+/// Draws the small pill that says which mode the keyboard is in. It is a legend, not a button:
+/// Tab is the only way to switch, so the badge does not need a hit test of its own.
+fn draw_mode_badge(frame: &mut Frame, bounds: Rectangle, mode: EditorMode) {
+    let badge = mode_badge_bounds(bounds);
+    draw_shadow(frame, badge, badge.height / 2.0, FLOAT_SHADOW);
+    let (fill, text) = match mode {
+        EditorMode::Keyboard => (PILL_COLOR, DIM_TEXT_COLOR),
+        EditorMode::Edit => (SELECTION_COLOR, BACKGROUND_COLOR),
+    };
+    frame.fill(&rounded_rect(badge, badge.height / 2.0), fill);
+    frame.fill_text(Text {
+        content: mode.label().to_string(),
+        position: Point::new(badge.x + badge.width / 2.0, badge.y + badge.height / 2.0),
+        color: text,
         size: 12.0,
         horizontal_alignment: alignment::Horizontal::Center,
         vertical_alignment: alignment::Vertical::Center,

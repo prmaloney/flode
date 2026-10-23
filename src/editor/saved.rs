@@ -36,7 +36,7 @@ pub struct SavedGraph {
     /// Which save format this is. Missing in the oldest saves, which read as 0.
     #[serde(default)]
     pub(super) version: u32,
-    /// The preset this graph was last saved as or loaded from, if any. Shown on the pill.
+    /// The preset this graph was last saved as or loaded from, if any. Shown on the Presets row.
     #[serde(default)]
     pub(super) preset_name: Option<String>,
     /// The category of that preset. Empty if it has none.

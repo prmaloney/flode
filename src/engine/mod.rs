@@ -2,6 +2,10 @@
 //! test can play notes into it and read samples out. The plugin feeds it events, and it runs the
 //! stages of the current patch for every sounding voice.
 
+mod arpeggiator;
+mod chord;
+#[cfg(test)]
+mod chord_tests;
 mod effects;
 pub use effects::POOL;
 mod lane;
@@ -9,6 +13,8 @@ mod lfo;
 #[cfg(test)]
 mod no_alloc;
 mod notes;
+#[cfg(test)]
+mod regression_tests;
 pub mod stage;
 #[cfg(test)]
 mod tests;
@@ -22,14 +28,16 @@ use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::output::MAX_SLOTS;
-use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES};
+use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES, MAX_NOTE_SOURCES};
 use crate::patch::stage::MAX_STAGES;
-use crate::patch::Patch;
+use crate::patch::{NoteSourceSpec, Patch};
+use arpeggiator::Arpeggiators;
+use chord::Chords;
 use effects::Effects;
 use lane::Lane;
 use lfo::Lfos;
 use nih_plug::util;
-use notes::HeldNotes;
+use notes::{HeldNotes, NoteBuffer};
 use stage::{start_arena, StartContext, MAX_DELAY_LINES};
 use std::sync::Arc;
 use voice::{RenderEnv, Voice};
@@ -88,6 +96,13 @@ pub struct Engine {
     /// The pitch of the last note played, which the next mono note glides from.
     mono_step: f32,
     held: HeldNotes,
+    /// Each note-source slot's own copy of the notes held at it. A slot fed straight from a MIDI
+    /// input keeps every host note; an arpeggiator reads its input slot's copy here to build its
+    /// chord. Separate from `held` above, which is the one legacy, engine-wide chord that mono
+    /// recall and a hand-built patch with no note-routing table still use.
+    note_held: [HeldNotes; MAX_NOTE_SOURCES],
+    arpeggiators: Arpeggiators,
+    chords: Chords,
     rng: Rng,
     /// Band-limited waveforms for every pitch range. Built once, read on the audio thread.
     tables: Arc<WaveTables>,
@@ -120,6 +135,9 @@ impl Engine {
             has_played: false,
             mono_step: 0.0,
             held: HeldNotes::new(),
+            note_held: std::array::from_fn(|_| HeldNotes::new()),
+            arpeggiators: Arpeggiators::new(),
+            chords: Chords::new(),
             rng: Rng::default(),
             tables,
         };
@@ -139,6 +157,9 @@ impl Engine {
     /// Stops every note.
     pub fn reset(&mut self) {
         self.held.clear();
+        self.note_held.iter_mut().for_each(HeldNotes::clear);
+        self.arpeggiators = Arpeggiators::new();
+        self.chords = Chords::new();
         self.lanes.iter_mut().for_each(Lane::clear);
         self.effects.reset();
     }
@@ -217,18 +238,50 @@ impl Engine {
         self.midi_levels[MidiSource::Aftertouch.index()] = value;
     }
 
+    /// A host note on (or the key strip's, in standalone). It reaches every MIDI input slot, since
+    /// there is one physical note source behind all of them, and every lane that plays straight
+    /// from one of those slots, or has no note-routing slot of its own at all because it was built
+    /// by hand rather than compiled by `Wiring`.
     pub fn note_on(&mut self, note: u8, velocity: f32) {
         self.held.push(note, velocity);
+        for slot in 0..MAX_NOTE_SOURCES {
+            if matches!(self.patch.note_sources[slot], Some(NoteSourceSpec::Input)) {
+                self.note_held[slot].push(note, velocity);
+            }
+        }
         self.midi_levels[MidiSource::Note.index()] = f32::from(note) / 127.0;
         self.midi_levels[MidiSource::Velocity.index()] = velocity;
         let levels = self.levels();
         self.lfos
             .retrigger(&self.patch.lfos, &levels, &self.transport, &mut self.rng);
+        self.dispatch_note_on(None, note, velocity);
+    }
 
+    /// True if lane `lane` should sound for a note dispatched to `want`. `None` is a host event,
+    /// which every lane with no note-routing slot of its own, or a slot fed straight from a MIDI
+    /// input, takes directly. `Some(slot)` is an arpeggiator's own generated note, which only the
+    /// lanes reading that exact slot take.
+    fn wants_slot(&self, lane: usize, want: Option<usize>) -> bool {
+        match want {
+            None => match self.patch.lanes[lane].notes_slot {
+                None => true,
+                Some(slot) => matches!(self.patch.note_sources[slot], Some(NoteSourceSpec::Input)),
+            },
+            Some(target) => self.patch.lanes[lane].notes_slot == Some(target),
+        }
+    }
+
+    /// Starts `note` in every active lane that wants a note dispatched to `want`. Shared by the
+    /// host's `note_on` and by an arpeggiator's own generated note ons, which differ only in which
+    /// lanes they reach; mono, glide and portamento are engine-wide either way, the same
+    /// simplification `Wiring::globals()` already makes for mono and glide themselves.
+    fn dispatch_note_on(&mut self, want: Option<usize>, note: u8, velocity: f32) {
         // Portamento in mono mode starts the new note at the last pitch, while any voice still
         // sounds. Otherwise the voice starts at its own pitch.
         let target_step = util::midi_note_to_freq(note) / self.sample_rate;
-        let sounding = self.lanes.iter().any(Lane::is_sounding);
+        let sounding = (0..MAX_SLOTS)
+            .filter(|&lane| self.wants_slot(lane, want))
+            .any(|lane| self.lanes[lane].is_sounding());
         let gliding = self.mono
             && self.glide_seconds > 0.0
             && self.has_played
@@ -238,7 +291,7 @@ impl Engine {
         self.mono_step = target_step;
 
         for lane in 0..MAX_SLOTS {
-            if self.patch.lanes[lane].is_active() {
+            if self.patch.lanes[lane].is_active() && self.wants_slot(lane, want) {
                 self.lane_note_on(lane, note, velocity, step, target_step);
             }
         }
@@ -280,6 +333,8 @@ impl Engine {
         ));
     }
 
+    /// A host note off. Like `note_on`, it reaches every MIDI input slot and every lane that plays
+    /// straight from one, or has no note-routing slot at all.
     pub fn note_off(&mut self, note: u8) {
         // Only the note that is sounding matters for recall. A note that was already fading
         // doesn't bring anything back.
@@ -289,7 +344,27 @@ impl Engine {
             .flat_map(Lane::voices)
             .any(|voice| voice.note == note && !voice.releasing());
         self.held.remove(note);
+        for slot in 0..MAX_NOTE_SOURCES {
+            if matches!(self.patch.note_sources[slot], Some(NoteSourceSpec::Input)) {
+                self.note_held[slot].remove(note);
+            }
+        }
+        self.dispatch_note_off(None, note);
 
+        // Mono recall: if the sounding note was let go and another key is still down, play that
+        // key again, starting from its most recent press. This reads the engine-wide `held`, the
+        // same one `Wiring::globals()` already collapses mono and glide to the first MIDI input
+        // for, so it is unaffected by notes arriving at more than one input slot.
+        if self.mono && sounding {
+            if let Some((next, velocity)) = self.held.newest() {
+                self.note_on(next, velocity);
+            }
+        }
+    }
+
+    /// Releases `note` in every active lane that wants a note dispatched to `want`. See
+    /// `dispatch_note_on` for what `want` means.
+    fn dispatch_note_off(&mut self, want: Option<usize>, note: u8) {
         // Each envelope copy releases over its own release time. Without any envelope driving the
         // sound, the bypass copy takes the short fade. With one, it lasts as long as the longest
         // release, so the voice ends when the envelopes do.
@@ -301,8 +376,11 @@ impl Engine {
         } else {
             FADE_SECONDS
         };
-        for lane in self.lanes.iter_mut() {
-            for voice in lane.voices_mut() {
+        for lane in 0..MAX_SLOTS {
+            if !self.wants_slot(lane, want) {
+                continue;
+            }
+            for voice in self.lanes[lane].voices_mut() {
                 if voice.note == note && !voice.releasing() {
                     for (index, env) in voice.envs.iter_mut().enumerate() {
                         let seconds = if index == MAX_ENVELOPES {
@@ -315,13 +393,58 @@ impl Engine {
                 }
             }
         }
+    }
 
-        // Mono recall: if the sounding note was let go and another key is still down, play that
-        // key again, starting from its most recent press.
-        if self.mono && sounding {
-            if let Some((next, velocity)) = self.held.newest() {
-                self.note_on(next, velocity);
+    /// Moves every arpeggiator on by this sample, and dispatches whatever notes it turned on or off
+    /// to the lanes that read its output slot. Called once per sample, before the voices render, so
+    /// a note an arpeggiator starts this sample is already sounding in time for it.
+    fn advance_arpeggiators(&mut self, levels: &ControlLevels) {
+        let mut events: [NoteBuffer; MAX_NOTE_SOURCES] = std::array::from_fn(|_| NoteBuffer::new());
+        self.arpeggiators.advance(
+            &self.patch.note_sources,
+            &self.note_held,
+            levels,
+            &self.transport,
+            self.sample_rate,
+            &mut self.rng,
+            &mut events,
+        );
+        for (slot, buffer) in events.iter().enumerate() {
+            self.dispatch_generated(slot, buffer);
+        }
+    }
+
+    /// Dispatches the note events a note source generated this sample for its own slot to the
+    /// lanes that read it, and records them in `note_held` too. Without this, a second note
+    /// source reading this slot's chord, an arpeggiator stacked on a chord or a chord stacked on
+    /// an arpeggiator, would see nothing there, since `note_held` otherwise only ever fills from
+    /// the host's own note on and off.
+    fn dispatch_generated(&mut self, slot: usize, buffer: &NoteBuffer) {
+        for event in buffer.as_slice() {
+            if event.on {
+                self.note_held[slot].push(event.note, event.velocity);
+                self.dispatch_note_on(Some(slot), event.note, event.velocity);
+            } else {
+                self.note_held[slot].remove(event.note);
+                self.dispatch_note_off(Some(slot), event.note);
             }
+        }
+    }
+
+    /// Moves every chord on by this sample, and dispatches whatever notes it turned on or off to
+    /// the lanes that read its output slot. A chord has no clock: it reacts to a note arriving or
+    /// letting go at its input, so this only ever has work to do on the sample a host note or an
+    /// upstream note source's own event changes what is held there.
+    fn advance_chords(&mut self, levels: &ControlLevels) {
+        let mut events: [NoteBuffer; MAX_NOTE_SOURCES] = std::array::from_fn(|_| NoteBuffer::new());
+        self.chords.advance(
+            &self.patch.note_sources,
+            &self.note_held,
+            levels,
+            &mut events,
+        );
+        for (slot, buffer) in events.iter().enumerate() {
+            self.dispatch_generated(slot, buffer);
         }
     }
 
@@ -329,6 +452,8 @@ impl Engine {
     /// a synced LFO needs to find the playhead.
     pub fn process_sample(&mut self, sample_id: usize) -> Frame {
         let levels = self.levels();
+        self.advance_arpeggiators(&levels);
+        self.advance_chords(&levels);
 
         // A gain is exactly silent at its minimum. The master gain eases toward its knob.
         let master_target = db_to_linear(self.patch.globals.gain.plain(&levels));

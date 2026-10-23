@@ -61,6 +61,13 @@ impl<'a> NodeEditor<'a> {
             return (event::Status::Captured, Some(Message::GraphChanged));
         }
 
+        // A left click while grabbing commits the grab at the current position, the same way a
+        // press sets down a placed node, and nothing else happens on that press.
+        if matches!(self.graph.interaction, Interaction::Grabbing { .. }) {
+            self.graph.commit_grab();
+            return (event::Status::Captured, Some(Message::GraphChanged));
+        }
+
         // The rename box takes every press. One outside it keeps the name and closes the box.
         if self.graph.rename.is_some() {
             return self.press_rename(screen, bounds);
@@ -131,6 +138,13 @@ impl<'a> NodeEditor<'a> {
                             self.graph.delete_node(menu.node);
                         }
                     }
+                    MenuItem::DeleteInPlace => {
+                        if self.graph.is_selected(menu.node) {
+                            self.graph.delete_selected_in_place();
+                        } else {
+                            self.graph.delete_in_place(menu.node);
+                        }
+                    }
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
@@ -149,18 +163,20 @@ impl<'a> NodeEditor<'a> {
         self.graph.knob_entry = None;
 
         // An open preset list takes the press. Its row saves, loads, or opens a category's
-        // submenu. Any other press closes it.
+        // submenu. Any other press closes it, and closes the burger menu with it.
         let had_presets = self.graph.preset_list.is_some();
         if let Some(mut menu) = self.graph.preset_list.take() {
             let library = &menu.library;
             match preset_row_at(bounds, &menu, screen) {
                 Some(PresetRow::SaveAs) => {
                     self.graph.start_save_dialog();
+                    self.graph.burger_menu = false;
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 // Init drops what is on the canvas for the starting graph, saved or not.
                 Some(PresetRow::Init) => {
                     self.graph.init_default();
+                    self.graph.burger_menu = false;
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 // A press on a category opens its submenu, or closes it if it is open.
@@ -171,12 +187,14 @@ impl<'a> NodeEditor<'a> {
                 }
                 Some(PresetRow::Loose(index)) => {
                     self.graph.load_preset("", &library.loose[index]);
+                    self.graph.burger_menu = false;
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 Some(PresetRow::Sub(category, index)) => {
                     let category = &library.categories[category];
                     self.graph
                         .load_preset(&category.name, &category.presets[index]);
+                    self.graph.burger_menu = false;
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
                 None => {}
@@ -184,50 +202,71 @@ impl<'a> NodeEditor<'a> {
         }
 
         // An open list of saved groups takes the press. Its row adds a copy of the group, which
-        // then follows the cursor. Any other press closes it.
+        // then follows the cursor. Any other press closes it, and closes the burger menu with it.
         let had_groups = self.graph.group_list.is_some();
         if let Some(entries) = self.graph.group_list.take() {
             if let Some(row) = group_row_at(bounds, entries.len(), screen) {
                 self.place_group(&entries[row], point, None, None);
+                self.graph.burger_menu = false;
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
 
-        // An open category list takes the press. Its row adds the node. Any other press closes it.
+        // An open category list takes the press. Its row adds the node, and closes the burger
+        // menu with it. Any other press closes just the category list.
         let open_category = self.graph.category_menu.take();
         if let Some(category) = open_category {
             if let Some(kind) = category_row_at(bounds, category, screen) {
                 self.place(kind, point);
+                self.graph.burger_menu = false;
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
         }
 
-        match pill_button_at(bounds, screen) {
-            Some(PillItem::Kind(kind)) => {
-                self.place(kind, point);
-                return (event::Status::Captured, Some(Message::GraphChanged));
-            }
-            Some(PillItem::Category(category)) => {
-                // Pressing the same category again closes its list.
-                if open_category != Some(category) {
-                    self.graph.category_menu = Some(category);
+        // The burger menu's own top-level list takes the press next. Add Oscillator places a node
+        // directly and closes the whole menu. A category, Presets, or Groups row opens its list
+        // underneath, nested beside the burger menu the same way a preset's own category submenu
+        // nests beside the preset list, and the burger menu stays open so its row still shows
+        // which list is open. Any other press, including one on the burger button itself while the
+        // menu is open, closes it.
+        let was_burger_open = self.graph.burger_menu;
+        self.graph.burger_menu = false;
+        if was_burger_open {
+            match burger_row_at(screen) {
+                Some(BurgerRow::AddOscillator) => {
+                    self.place(NodeKind::Oscillator, point);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
                 }
-                return (event::Status::Captured, Some(Message::GraphChanged));
-            }
-            // Pressing the button again closes the list, which the press already did.
-            Some(PillItem::Presets) => {
-                if !had_presets {
-                    self.graph.open_preset_list();
+                Some(BurgerRow::Category(category)) => {
+                    self.graph.burger_menu = true;
+                    if open_category != Some(category) {
+                        self.graph.category_menu = Some(category);
+                    }
+                    return (event::Status::Captured, Some(Message::GraphChanged));
                 }
-                return (event::Status::Captured, Some(Message::GraphChanged));
-            }
-            Some(PillItem::Groups) => {
-                if !had_groups {
-                    self.graph.open_group_list();
+                Some(BurgerRow::Presets) => {
+                    self.graph.burger_menu = true;
+                    if !had_presets {
+                        self.graph.open_preset_list();
+                    }
+                    return (event::Status::Captured, Some(Message::GraphChanged));
                 }
-                return (event::Status::Captured, Some(Message::GraphChanged));
+                Some(BurgerRow::Groups) => {
+                    self.graph.burger_menu = true;
+                    if !had_groups {
+                        self.graph.open_group_list();
+                    }
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
+                None => {}
             }
-            None => {}
+        }
+        if burger_bounds().contains(screen) {
+            // Pressing the button again closes the menu, which the press already did above.
+            if !was_burger_open {
+                self.graph.burger_menu = true;
+            }
+            return (event::Status::Captured, Some(Message::GraphChanged));
         }
 
         // While a group is open the pane has its own parts, and a press beside it is on the
@@ -537,11 +576,7 @@ impl<'a> NodeEditor<'a> {
             return false;
         };
         match shortcut {
-            Shortcut::QuickAdd
-            | Shortcut::Group
-            | Shortcut::Ungroup
-            | Shortcut::ToggleGroup
-            | Shortcut::Escape => false,
+            Shortcut::QuickAdd | Shortcut::Group | Shortcut::Ungroup | Shortcut::Escape => false,
             Shortcut::ToggleBypass => self.graph.toggle_bypass(index),
             // The copy appears under the cursor. While a node is already being placed, the
             // shortcut waits, so one press sets down one node.
@@ -552,10 +587,89 @@ impl<'a> NodeEditor<'a> {
                 let cursor = self.graph.view.to_world(self.graph.last_screen);
                 self.duplicate_and_place(index, cursor)
             }
+            // Edit mode's letter shortcuts never reach here: `shortcut_event` looks a key up
+            // with `lookup`, which does not know about them. `edit_shortcut_event` runs them.
+            Shortcut::Grab
+            | Shortcut::DeleteSelection
+            | Shortcut::DeleteInPlace
+            | Shortcut::SelectAll
+            | Shortcut::DeselectAll => false,
         }
     }
 
-    /// True if an open dropdown list, node menu, or category list covers the cursor. These are
+    /// Handles a key event for Edit mode's own shortcuts: G, X, Delete, A, and Alt+A. None if no
+    /// Edit-mode shortcut uses the key, so it is simply swallowed (Edit mode runs no piano).
+    pub(super) fn edit_shortcut_event(
+        &mut self,
+        event: &keyboard::Event,
+    ) -> Option<(event::Status, Option<Message>)> {
+        match event {
+            keyboard::Event::KeyPressed {
+                key_code,
+                modifiers,
+            } => {
+                let shortcut = shortcuts::lookup_edit(*key_code, *modifiers)?;
+                if self.graph.shortcut_held == Some(*key_code) {
+                    return Some((event::Status::Captured, None));
+                }
+                self.graph.shortcut_held = Some(*key_code);
+                let changed = self.run_edit_shortcut(shortcut);
+                Some((
+                    event::Status::Captured,
+                    changed.then_some(Message::GraphChanged),
+                ))
+            }
+            keyboard::Event::KeyReleased { key_code, .. }
+                if self.graph.shortcut_held == Some(*key_code) =>
+            {
+                self.graph.shortcut_held = None;
+                Some((event::Status::Captured, None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Runs an Edit-mode shortcut. Returns true if the graph changed. Grab only starts a modal
+    /// interaction, so it never reports a change here: only committing or canceling it does, and
+    /// those go through `commit_grab` and `cancel_grab` instead.
+    fn run_edit_shortcut(&mut self, shortcut: Shortcut) -> bool {
+        match shortcut {
+            Shortcut::Grab => {
+                // A plain G with nothing selected does nothing.
+                if !self.graph.selection().is_empty() {
+                    self.graph.start_grab();
+                }
+                false
+            }
+            Shortcut::DeleteSelection => {
+                if self.graph.selection().is_empty() {
+                    false
+                } else {
+                    self.graph.delete_selected();
+                    true
+                }
+            }
+            Shortcut::DeleteInPlace => {
+                if self.graph.selection().is_empty() {
+                    false
+                } else {
+                    self.graph.delete_selected_in_place();
+                    true
+                }
+            }
+            Shortcut::SelectAll => {
+                self.graph.select_all();
+                true
+            }
+            Shortcut::DeselectAll => {
+                self.graph.deselect_all();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True if an open dropdown list, node menu, or burger menu list covers the cursor. These are
     /// drawn over everything else, so a press on one belongs to it. `point` is in editor
     /// coordinates, and `screen` is the cursor's screen position.
     pub(super) fn overlay_at(&self, point: Point, screen: Point, bounds: Rectangle) -> bool {
@@ -575,6 +689,9 @@ impl<'a> NodeEditor<'a> {
             if menu_bounds(menu).contains(screen) {
                 return true;
             }
+        }
+        if self.graph.burger_menu && burger_row_at(screen).is_some() {
+            return true;
         }
         if let Some(category) = self.graph.category_menu {
             if category_row_at(bounds, category, screen).is_some() {
@@ -659,7 +776,7 @@ impl<'a> NodeEditor<'a> {
                     self.graph.shortcut_held = None;
                 }
                 let note = self.graph.piano.handle(event.clone());
-                let note = note.filter(|_| self.graph.computer_keys);
+                let note = note.filter(|_| self.graph.mode == EditorMode::Keyboard);
                 (event::Status::Captured, note.map(Message::Note))
             }
             _ => (event::Status::Ignored, None),
@@ -736,7 +853,7 @@ impl<'a> NodeEditor<'a> {
             },
             keyboard::Event::KeyReleased { .. } => {
                 let note = self.graph.piano.handle(event.clone());
-                let note = note.filter(|_| self.graph.computer_keys);
+                let note = note.filter(|_| self.graph.mode == EditorMode::Keyboard);
                 (event::Status::Captured, note.map(Message::Note))
             }
             _ => (event::Status::Ignored, None),
@@ -789,7 +906,8 @@ impl<'a> NodeEditor<'a> {
     }
 
     /// Adds a copy of a saved group and makes it follow the cursor, like a node just added from
-    /// the pill. With a feed and an output pin, the first pin that fits is wired to the input. A
+    /// the burger menu. With a feed and an output pin, the first pin that fits is wired to the
+    /// input. A
     /// file that can't be loaded adds nothing and says why.
     pub(super) fn place_group(
         &mut self,
@@ -807,8 +925,8 @@ impl<'a> NodeEditor<'a> {
         }
     }
 
-    /// Copies a node and makes the copy follow the cursor, like a node just added from the pill,
-    /// until the next press sets it down. Returns false for a node that can't be copied.
+    /// Copies a node and makes the copy follow the cursor, like a node just added from the burger
+    /// menu, until the next press sets it down. Returns false for a node that can't be copied.
     pub(super) fn duplicate_and_place(&mut self, index: usize, point: Point) -> bool {
         match self.graph.duplicate_node(index) {
             Some(copy) => {
@@ -826,6 +944,11 @@ impl<'a> NodeEditor<'a> {
         point: Point,
         screen: Point,
     ) -> (event::Status, Option<Message>) {
+        // A right click while grabbing cancels it, putting the selection back where it started,
+        // instead of opening a menu.
+        if self.graph.cancel_grab() {
+            return (event::Status::Captured, Some(Message::Hovered));
+        }
         self.graph.menu = None;
         self.graph.quick_add = None;
         self.graph.dropdown_menu = None;
@@ -986,13 +1109,19 @@ impl<'a> NodeEditor<'a> {
             // The left button ending an auto connect drag cancels it.
             Interaction::AutoLinking { .. } => (event::Status::Captured, Some(Message::Hovered)),
             Interaction::Placing { .. } => (event::Status::Captured, None),
+            // A grab commits on the press that starts a click, like Placing does, so its own
+            // release here does nothing. Reaching this arm at all would mean a button was
+            // already down when the grab started, which the editor does not let happen.
+            Interaction::Grabbing { .. } => (event::Status::Ignored, None),
             Interaction::Idle => (event::Status::Ignored, None),
         }
     }
 
     pub(super) fn drag(&mut self, point: Point, screen: Point) -> (event::Status, Option<Message>) {
         match self.graph.interaction {
-            Interaction::MovingNode { node, grab } | Interaction::Placing { node, grab } => {
+            Interaction::MovingNode { node, grab }
+            | Interaction::Placing { node, grab }
+            | Interaction::Grabbing { node, grab } => {
                 let target = Point::new(point.x - grab.x, point.y - grab.y);
                 let at = self.graph.nodes[node].position;
                 // The rest of a selection moves by as much as the dragged node does.
@@ -1144,19 +1273,72 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                 if self.graph.quick_add.is_some() {
                     return self.quick_add_event(&key_event);
                 }
+                // A grab in progress takes every key: Enter commits it, Escape cancels it, and
+                // anything else is swallowed so no shortcut or note fires in the middle of one.
+                if matches!(self.graph.interaction, Interaction::Grabbing { .. }) {
+                    return match &key_event {
+                        keyboard::Event::KeyPressed {
+                            key_code: keyboard::KeyCode::Enter | keyboard::KeyCode::NumpadEnter,
+                            ..
+                        } => {
+                            self.graph.commit_grab();
+                            (event::Status::Captured, Some(Message::GraphChanged))
+                        }
+                        keyboard::Event::KeyPressed {
+                            key_code: keyboard::KeyCode::Escape,
+                            ..
+                        } => {
+                            self.graph.cancel_grab();
+                            (event::Status::Captured, Some(Message::Hovered))
+                        }
+                        _ => (event::Status::Captured, None),
+                    };
+                }
+                // Tab switches between Keyboard and Edit mode everywhere, so it is checked before
+                // any shortcut and before the piano sees the key. The boxes above still take it
+                // first: the knob entry and quick add boxes already swallow Tab without using it
+                // for anything, and the rename box's own doc comment already says a Tab typed in
+                // it is not a shortcut, so toggling the mode mid-edit would be a surprise with
+                // nothing to show for it besides the box staying open anyway.
+                if let keyboard::Event::KeyPressed {
+                    key_code: keyboard::KeyCode::Tab,
+                    ..
+                } = key_event
+                {
+                    if self.graph.shortcut_held == Some(keyboard::KeyCode::Tab) {
+                        return (event::Status::Captured, None);
+                    }
+                    self.graph.shortcut_held = Some(keyboard::KeyCode::Tab);
+                    self.graph.mode = self.graph.mode.toggled();
+                    return (event::Status::Captured, Some(Message::Hovered));
+                }
+                if let keyboard::Event::KeyReleased {
+                    key_code: keyboard::KeyCode::Tab,
+                    ..
+                } = key_event
+                {
+                    if self.graph.shortcut_held == Some(keyboard::KeyCode::Tab) {
+                        self.graph.shortcut_held = None;
+                    }
+                    return (event::Status::Captured, None);
+                }
                 // Shortcuts come first, so one on a piano key (Shift+D) is not also a note.
                 if let Some(result) = self.shortcut_event(&key_event) {
                     return result;
+                }
+                // Edit mode hands the keyboard to the editor instead of the piano.
+                if self.graph.mode == EditorMode::Edit {
+                    if let Some(result) = self.edit_shortcut_event(&key_event) {
+                        return result;
+                    }
+                    return (event::Status::Ignored, None);
                 }
                 let status = if Piano::uses(&key_event) {
                     event::Status::Captured
                 } else {
                     event::Status::Ignored
                 };
-                // The octave keys still shift the strip in a plugin, but its notes belong to the
-                // host there, so a key plays none.
                 let note = self.graph.piano.handle(key_event);
-                let note = note.filter(|_| self.graph.computer_keys);
                 return (status, note.map(Message::Note));
             }
         };

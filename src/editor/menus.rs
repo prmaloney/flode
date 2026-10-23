@@ -1,5 +1,5 @@
-//! The pill of add buttons, the category lists, dropdown lists, and the right-click menu: the
-//! chrome that floats above the nodes.
+//! The burger menu, the category lists, dropdown lists, and the right-click menu: the chrome that
+//! floats above the nodes.
 
 use crate::groups::GroupEntry;
 use crate::nodes::{Bypass, Category, FlodeNode, NodeKind, Port};
@@ -8,13 +8,16 @@ use nih_plug_iced::{Point, Rectangle};
 
 use super::graph::PresetMenu;
 use super::group::PinSide;
+use super::logo::{LOGO_GAP, LOGO_MARGIN, LOGO_SIZE};
 use super::style::*;
 
-/// The add buttons on the pill, from left to right.
-/// What a pill button does: add a node kind, or open a category's list below the pill.
+/// A row of the burger menu's top-level list, top to bottom. A divider is drawn between Utility
+/// and Presets, but it is not a row of its own.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum PillItem {
-    Kind(NodeKind),
+pub(super) enum BurgerRow {
+    /// Adds an oscillator directly, since it is added far more often than anything else.
+    AddOscillator,
+    /// Opens a category's list of node kinds.
     Category(Category),
     /// Opens the list of presets, with the entry that saves one.
     Presets,
@@ -22,15 +25,21 @@ pub(super) enum PillItem {
     Groups,
 }
 
-/// The pill's buttons, from left to right.
-pub(super) const PILL_ITEMS: [PillItem; 6] = [
-    PillItem::Kind(NodeKind::Oscillator),
-    PillItem::Category(Category::Driver),
-    PillItem::Category(Category::Util),
-    PillItem::Category(Category::Effects),
-    PillItem::Presets,
-    PillItem::Groups,
+/// The burger menu's top-level rows, in the order they are drawn.
+pub(super) const BURGER_ROWS: [BurgerRow; 7] = [
+    BurgerRow::AddOscillator,
+    BurgerRow::Category(Category::Midi),
+    BurgerRow::Category(Category::Modulation),
+    BurgerRow::Category(Category::Effects),
+    BurgerRow::Category(Category::Utility),
+    BurgerRow::Presets,
+    BurgerRow::Groups,
 ];
+
+/// The row Presets sits on, and the one after it where Groups sits. The divider is drawn just
+/// above the Presets row.
+pub(super) const BURGER_PRESETS_ROW: usize = 5;
+pub(super) const BURGER_GROUPS_ROW: usize = 6;
 
 /// A row of the preset list or of a category's submenu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +70,10 @@ impl PresetRow {
     }
 }
 
-/// The widest a preset name is drawn on the pill, in characters.
+/// The widest a preset name is drawn on the Presets row, in characters.
 pub(super) const PILL_NAME_CHARS: usize = 10;
 
-/// A preset name cut to fit the pill, with an ellipsis if it was longer.
+/// A preset name cut to fit the Presets row, with an ellipsis if it was longer.
 pub(super) fn shorten(name: &str) -> String {
     if name.chars().count() <= PILL_NAME_CHARS {
         name.to_string()
@@ -77,7 +86,7 @@ pub(super) fn shorten(name: &str) -> String {
 /// How many rows a preset list or submenu can have. It stops short of the key strip, and always
 /// has room for a few.
 fn preset_room(bounds: Rectangle) -> usize {
-    let top = pill_bounds(bounds).y + PILL_HEIGHT + LIST_GAP;
+    let top = burger_row_bounds(BURGER_PRESETS_ROW).y;
     let room = (bounds.height - super::piano::STRIP_HEIGHT - top) / MENU_ITEM_HEIGHT;
     (room.floor() as usize).max(4)
 }
@@ -94,24 +103,13 @@ pub(super) fn preset_rows_shown(bounds: Rectangle, library: &Library) -> (usize,
     (categories, loose)
 }
 
-/// The list under the Presets button: the save and init entries, the categories, then the presets
-/// that have no category. With none saved it has a row that says so.
+/// The list under the Presets row: the save and init entries, the categories, then the presets
+/// that have no category. With none saved it has a row that says so. It opens beside the Presets
+/// row of the burger menu, the same way a category's submenu opens beside its own row.
 pub(super) fn preset_list_bounds(bounds: Rectangle, library: &Library) -> Rectangle {
-    let index = PILL_ITEMS
-        .iter()
-        .position(|item| *item == PillItem::Presets)
-        .unwrap_or(0);
-    let segment = pill_segment(bounds, index);
     let (categories, loose) = preset_rows_shown(bounds, library);
     let rows = PRESET_ACTION_ROWS + (categories + loose).max(1);
-    let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
-    Rectangle {
-        // The list lines up with the pill's right end, so it stays inside the window.
-        x: segment.x + segment.width - width,
-        y: segment.y + segment.height + LIST_GAP,
-        width,
-        height: rows as f32 * MENU_ITEM_HEIGHT,
-    }
+    beside_burger_row(bounds, BURGER_PRESETS_ROW, rows, PRESET_LIST_MIN_WIDTH)
 }
 
 /// How many presets a category's submenu shows.
@@ -186,22 +184,11 @@ pub(super) fn group_rows_shown(bounds: Rectangle, total: usize) -> usize {
     total.min(preset_room(bounds))
 }
 
-/// The list under the Groups button, one row per saved group. With none saved it has one row that
-/// says so.
+/// The list under the Groups row, one row per saved group. With none saved it has one row that
+/// says so. It opens beside the Groups row of the burger menu.
 pub(super) fn group_list_bounds(bounds: Rectangle, total: usize) -> Rectangle {
-    let index = PILL_ITEMS
-        .iter()
-        .position(|item| *item == PillItem::Groups)
-        .unwrap_or(0);
-    let segment = pill_segment(bounds, index);
-    let width = segment.width.max(PRESET_LIST_MIN_WIDTH);
-    Rectangle {
-        // The list lines up with the pill's right end, so it stays inside the window.
-        x: segment.x + segment.width - width,
-        y: segment.y + segment.height + LIST_GAP,
-        width,
-        height: group_rows_shown(bounds, total).max(1) as f32 * MENU_ITEM_HEIGHT,
-    }
+    let rows = group_rows_shown(bounds, total).max(1);
+    beside_burger_row(bounds, BURGER_GROUPS_ROW, rows, PRESET_LIST_MIN_WIDTH)
 }
 
 /// The saved group whose row of the list is under `point`. The note row for an empty list is not
@@ -244,6 +231,10 @@ pub(super) enum MenuItem {
     /// Arranges the selected nodes by how they are wired. Offered only for several nodes.
     AutoPack,
     Delete,
+    /// Removes the node and reconnects whatever fed it straight to whatever it fed, so the chain
+    /// it sat in keeps running. A node with no single through-path is just removed, same as
+    /// Delete. The same trick is on Command+X in Edit mode.
+    DeleteInPlace,
     /// Shows the graph inside a group node.
     Open,
     /// Names a group node, a pin, or a macro knob, whichever the menu is for.
@@ -265,6 +256,7 @@ impl MenuItem {
             (MenuItem::Duplicate, _, _) => "Duplicate",
             (MenuItem::AutoPack, _, _) => "Auto pack",
             (MenuItem::Delete, _, _) => "Delete",
+            (MenuItem::DeleteInPlace, _, _) => "Delete and reconnect",
             (MenuItem::Open, _, _) => "Open",
             (MenuItem::Rename, _, _) => "Rename",
             (MenuItem::Ungroup, _, _) => "Ungroup",
@@ -294,15 +286,26 @@ pub(super) fn menu_items(node: &FlodeNode) -> &'static [MenuItem] {
         ];
     }
     match (node.can_duplicate(), node.bypass() != Bypass::None) {
-        (true, true) => &[MenuItem::Duplicate, MenuItem::Bypass, MenuItem::Delete],
-        (true, false) => &[MenuItem::Duplicate, MenuItem::Delete],
-        (false, true) => &[MenuItem::Bypass, MenuItem::Delete],
-        (false, false) => &[MenuItem::Delete],
+        (true, true) => &[
+            MenuItem::Duplicate,
+            MenuItem::Bypass,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
+        (true, false) => &[
+            MenuItem::Duplicate,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
+        (false, true) => &[MenuItem::Bypass, MenuItem::DeleteInPlace, MenuItem::Delete],
+        (false, false) => &[MenuItem::DeleteInPlace, MenuItem::Delete],
     }
 }
 
-/// The entries for a node in a group of several selected nodes, which add Auto pack above Delete.
-/// They add Group above that when `groupable` says some selected node can go in a group.
+/// The entries for a node in a group of several selected nodes, which add Auto pack and Delete
+/// and reconnect above Delete. They add Group above that when `groupable` says some selected node
+/// can go in a group. Delete and reconnect acts on the whole selection, reconnecting around each
+/// node that has a through-path and removing the rest plainly.
 pub(super) fn group_menu_items(node: &FlodeNode, groupable: bool) -> &'static [MenuItem] {
     match (
         node.can_duplicate(),
@@ -313,6 +316,7 @@ pub(super) fn group_menu_items(node: &FlodeNode, groupable: bool) -> &'static [M
             MenuItem::Duplicate,
             MenuItem::Bypass,
             MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
             MenuItem::Delete,
         ],
         (true, true, true) => &[
@@ -320,24 +324,46 @@ pub(super) fn group_menu_items(node: &FlodeNode, groupable: bool) -> &'static [M
             MenuItem::Bypass,
             MenuItem::Group,
             MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
             MenuItem::Delete,
         ],
-        (true, false, false) => &[MenuItem::Duplicate, MenuItem::AutoPack, MenuItem::Delete],
+        (true, false, false) => &[
+            MenuItem::Duplicate,
+            MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
         (true, false, true) => &[
             MenuItem::Duplicate,
             MenuItem::Group,
             MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
             MenuItem::Delete,
         ],
-        (false, true, false) => &[MenuItem::Bypass, MenuItem::AutoPack, MenuItem::Delete],
+        (false, true, false) => &[
+            MenuItem::Bypass,
+            MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
         (false, true, true) => &[
             MenuItem::Bypass,
             MenuItem::Group,
             MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
             MenuItem::Delete,
         ],
-        (false, false, false) => &[MenuItem::AutoPack, MenuItem::Delete],
-        (false, false, true) => &[MenuItem::Group, MenuItem::AutoPack, MenuItem::Delete],
+        (false, false, false) => &[
+            MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
+        (false, false, true) => &[
+            MenuItem::Group,
+            MenuItem::AutoPack,
+            MenuItem::DeleteInPlace,
+            MenuItem::Delete,
+        ],
     }
 }
 
@@ -368,52 +394,98 @@ pub(super) struct ContextMenu {
     pub(super) target: MenuTarget,
 }
 
-/// The pill at the top center of the editor.
-pub(super) fn pill_bounds(bounds: Rectangle) -> Rectangle {
+/// The small square button that opens the burger menu, just right of the logo at the top left.
+pub(super) fn burger_bounds() -> Rectangle {
     Rectangle {
-        x: (bounds.width - PILL_WIDTH) / 2.0,
+        x: LOGO_MARGIN + LOGO_SIZE + LOGO_GAP,
         y: PILL_TOP,
-        width: PILL_WIDTH,
-        height: PILL_HEIGHT,
+        width: BURGER_SIZE,
+        height: BURGER_SIZE,
     }
 }
 
-/// The part of the pill under `point`.
-pub(super) fn pill_button_at(bounds: Rectangle, point: Point) -> Option<PillItem> {
-    let pill = pill_bounds(bounds);
-    if !pill.contains(point) {
+/// The burger menu's top-level list, anchored under the button and left-aligned with it.
+pub(super) fn burger_list_bounds() -> Rectangle {
+    let burger = burger_bounds();
+    Rectangle {
+        x: burger.x,
+        y: burger.y + burger.height + LIST_GAP,
+        width: BURGER_MENU_WIDTH,
+        height: BURGER_ROWS.len() as f32 * MENU_ITEM_HEIGHT + BURGER_DIVIDER_HEIGHT,
+    }
+}
+
+/// The rectangle of one row of the burger menu's top-level list, with room made for the divider
+/// above the Presets row.
+pub(super) fn burger_row_bounds(row: usize) -> Rectangle {
+    let list = burger_list_bounds();
+    let divider = if row >= BURGER_PRESETS_ROW {
+        BURGER_DIVIDER_HEIGHT
+    } else {
+        0.0
+    };
+    Rectangle {
+        x: list.x,
+        y: list.y + row as f32 * MENU_ITEM_HEIGHT + divider,
+        width: list.width,
+        height: MENU_ITEM_HEIGHT,
+    }
+}
+
+/// The row of the burger menu under `point`, if any. The divider itself is not a row.
+pub(super) fn burger_row_at(point: Point) -> Option<BurgerRow> {
+    let list = burger_list_bounds();
+    if !list.contains(point) {
         return None;
     }
-    let segment = pill.width / PILL_ITEMS.len() as f32;
-    let index = (((point.x - pill.x) / segment) as usize).min(PILL_ITEMS.len() - 1);
-    Some(PILL_ITEMS[index])
+    let before = BURGER_PRESETS_ROW as f32 * MENU_ITEM_HEIGHT;
+    let y = point.y - list.y;
+    let row = if y < before {
+        (y / MENU_ITEM_HEIGHT) as usize
+    } else {
+        let past_divider = y - before;
+        if past_divider < BURGER_DIVIDER_HEIGHT {
+            return None;
+        }
+        BURGER_PRESETS_ROW + ((past_divider - BURGER_DIVIDER_HEIGHT) / MENU_ITEM_HEIGHT) as usize
+    };
+    BURGER_ROWS.get(row).copied()
 }
 
-/// The rectangle of one pill button.
-pub(super) fn pill_segment(bounds: Rectangle, index: usize) -> Rectangle {
-    let pill = pill_bounds(bounds);
-    let segment = pill.width / PILL_ITEMS.len() as f32;
+/// Where a list opens beside a row of the burger menu: to the right if there is room, to the left
+/// otherwise, leveled with the row and nudged up to clear the key strip. The same positioning a
+/// preset's own category submenu already uses beside the preset list.
+fn beside_burger_row(bounds: Rectangle, row: usize, rows: usize, width: f32) -> Rectangle {
+    let list = burger_list_bounds();
+    let height = rows.max(1) as f32 * MENU_ITEM_HEIGHT;
+    let right = list.x + list.width + LIST_GAP;
+    let x = if right + width <= bounds.width {
+        right
+    } else {
+        list.x - width - LIST_GAP
+    };
+    let level = burger_row_bounds(row).y;
+    let lowest = bounds.height - super::piano::STRIP_HEIGHT - height;
     Rectangle {
-        x: pill.x + index as f32 * segment,
-        y: pill.y,
-        width: segment,
-        height: pill.height,
+        x,
+        y: level.min(lowest).max(list.y),
+        width,
+        height,
     }
 }
 
-/// The list that opens below a category's pill button.
+/// The list that opens beside a category's row in the burger menu.
 pub(super) fn category_list_bounds(bounds: Rectangle, category: Category) -> Rectangle {
-    let index = PILL_ITEMS
+    let row = BURGER_ROWS
         .iter()
-        .position(|item| *item == PillItem::Category(category))
+        .position(|item| *item == BurgerRow::Category(category))
         .unwrap_or(0);
-    let segment = pill_segment(bounds, index);
-    Rectangle {
-        x: segment.x,
-        y: segment.y + segment.height + LIST_GAP,
-        width: segment.width.max(CATEGORY_MIN_WIDTH),
-        height: category.kinds().len().max(1) as f32 * MENU_ITEM_HEIGHT,
-    }
+    beside_burger_row(
+        bounds,
+        row,
+        category.kinds().len().max(1),
+        CATEGORY_MIN_WIDTH,
+    )
 }
 
 /// The node kind for the row of a category's list under `point`, if any.

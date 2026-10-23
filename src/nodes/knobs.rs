@@ -117,6 +117,14 @@ pub enum KnobId {
     Macro4,
     /// The Gain node's level in dB. It runs from -60 dB, which is silent, up to +24 dB.
     UtilGain,
+    /// How many octaves an arpeggiator's pattern climbs before it cycles back, from 1 to 4.
+    ArpOctaves,
+    /// How much of each arpeggiator step's duration the note sounds before its note off, from 0 to
+    /// 100 percent. Less than 100 makes the pattern staccato.
+    ArpGate,
+    /// How far a chord's notes climb apart, from 0.0 to 1.0. At 0 every note sits in the chord's
+    /// own octave; at 1 each note past the root sits one further octave above the last.
+    ChordSpread,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -130,7 +138,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 66;
+    pub const COUNT: usize = 69;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -212,6 +220,9 @@ impl KnobId {
         KnobId::Macro3,
         KnobId::Macro4,
         KnobId::UtilGain,
+        KnobId::ArpOctaves,
+        KnobId::ArpGate,
+        KnobId::ChordSpread,
     ];
 
     /// The name shown beside the knob.
@@ -283,6 +294,9 @@ impl KnobId {
             KnobId::Macro3 => "Macro 3",
             KnobId::Macro4 => "Macro 4",
             KnobId::UtilGain => "Gain",
+            KnobId::ArpOctaves => "Octaves",
+            KnobId::ArpGate => "Gate",
+            KnobId::ChordSpread => "Spread",
         }
     }
 
@@ -437,6 +451,9 @@ impl KnobId {
                 max: 200.0,
                 factor: FloatRange::skew_factor(-2.0),
             },
+            KnobId::ArpOctaves => FloatRange::Linear { min: 1.0, max: 4.0 },
+            KnobId::ArpGate => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::ChordSpread => FloatRange::Linear { min: 0.0, max: 1.0 },
         }
     }
 
@@ -493,6 +510,9 @@ impl KnobId {
             KnobId::EqGain1 | KnobId::EqGain2 | KnobId::EqGain3 | KnobId::EqGain4 => 0.0,
             KnobId::EqQ1 | KnobId::EqQ4 => 0.71,
             KnobId::EqQ2 | KnobId::EqQ3 => 1.0,
+            KnobId::ArpOctaves => 1.0,
+            KnobId::ArpGate => 0.75,
+            KnobId::ChordSpread => 0.0,
         }
     }
 
@@ -504,7 +524,11 @@ impl KnobId {
     pub fn to_plain(self, normalized: f32) -> f32 {
         let plain = self.range().unnormalize(normalized);
         match self {
-            KnobId::Unison | KnobId::LfoSync | KnobId::Coarse | KnobId::Octave => plain.round(),
+            KnobId::Unison
+            | KnobId::LfoSync
+            | KnobId::Coarse
+            | KnobId::Octave
+            | KnobId::ArpOctaves => plain.round(),
             _ => plain,
         }
     }
@@ -516,9 +540,11 @@ impl KnobId {
     /// Rounds a normalized value to the knob's step, if it has one. Unison moves in whole voices.
     pub fn snap(self, normalized: f32) -> f32 {
         match self {
-            KnobId::Unison | KnobId::LfoSync | KnobId::Coarse | KnobId::Octave => {
-                self.to_normalized(self.to_plain(normalized))
-            }
+            KnobId::Unison
+            | KnobId::LfoSync
+            | KnobId::Coarse
+            | KnobId::Octave
+            | KnobId::ArpOctaves => self.to_normalized(self.to_plain(normalized)),
             _ => normalized.clamp(0.0, 1.0),
         }
     }
@@ -549,7 +575,9 @@ impl KnobId {
             | KnobId::Macro1
             | KnobId::Macro2
             | KnobId::Macro3
-            | KnobId::Macro4 => 100.0,
+            | KnobId::Macro4
+            | KnobId::ArpGate
+            | KnobId::ChordSpread => 100.0,
             _ => 1.0,
         }
     }
@@ -644,6 +672,9 @@ impl KnobId {
                     .0
                     .to_string(),
             },
+            KnobId::ArpOctaves => format!("{}", plain.round() as i32),
+            KnobId::ArpGate => format!("{:.0}%", plain * 100.0),
+            KnobId::ChordSpread => format!("{:.0}%", plain * 100.0),
         }
     }
 }

@@ -1,14 +1,20 @@
-//! A freeform node graph for the plugin UI. Click a pill button at the top to add a node. It
-//! follows the mouse until the next click places it. Drag a node by its header, and click one to
-//! select it. Right-click a node to delete it. The arrow in a header collapses the node. Pins sit
-//! on the node edges, with labels. Inputs are on the left and outputs are on the right. Audio
-//! wires are grey. Control wires are green. A knob that a control wire drives is greyed out and
-//! shows the live signal. Scrolling pans the canvas, and a pinch zooms it.
+//! A freeform node graph for the plugin UI. Click the burger button at the top left to add a
+//! node. It follows the mouse until the next click places it. Drag a node by its header, and
+//! click one to select it. Right-click a node to delete it. The arrow in a header collapses the
+//! node. Pins sit on the node edges, with labels. Inputs are on the left and outputs are on the
+//! right. Audio wires are grey. Control wires are green. A knob that a control wire drives is
+//! greyed out and shows the live signal. Scrolling pans the canvas, and a pinch zooms it.
 //!
 //! The nodes themselves are in `nodes`. This module holds the graph, the wiring between nodes,
 //! and the editor widget that draws the graph and handles the mouse.
 
+#[cfg(test)]
+mod arpeggiator_tests;
+#[cfg(test)]
+mod burger_menu_tests;
 pub mod canvas;
+#[cfg(test)]
+mod chord_tests;
 mod curve;
 mod demo;
 mod depth;
@@ -30,6 +36,8 @@ pub mod knob;
 mod logo;
 mod menus;
 mod meter;
+#[cfg(test)]
+mod mode_tests;
 mod monitor;
 mod pack;
 mod pane;
@@ -56,18 +64,18 @@ pub(crate) fn default_state() -> Arc<IcedState> {
     IcedState::from_size(1024, 712)
 }
 
-/// `note_tx` carries the notes a click on the key strip plays. It is `None` in a test with no audio
-/// side. `computer_keys` is true in the standalone app, where the computer keyboard plays notes
-/// too. In a plugin the host owns the keyboard, so the strip is the only way to play from the
-/// editor. `link` hands the audio thread the patch and shows the editor what it reports.
+/// `note_tx` carries the notes a click on the key strip, or the computer keyboard in Keyboard
+/// mode, plays. It is `None` in a test with no audio side. The editor starts in Keyboard mode
+/// either way, standalone or hosted: Tab is what takes the keyboard away from the piano now, not
+/// which kind of process this is. `link` hands the audio thread the patch and shows the editor
+/// what it reports.
 pub(crate) fn create(
     params: Arc<FlodeParams>,
     editor_state: Arc<IcedState>,
     note_tx: Option<Arc<Mutex<Producer<PianoEvent>>>>,
-    computer_keys: bool,
     link: Arc<PatchLink>,
 ) -> Option<Box<dyn Editor>> {
-    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, computer_keys, link))
+    create_iced_editor::<FlodeEditor>(editor_state, (params, note_tx, link))
 }
 
 struct FlodeEditor {
@@ -125,7 +133,7 @@ impl FlodeEditor {
 
     /// Saves the preset the user just named. It is saved here because the macro values are the
     /// host's, and the graph does not hold them. The graph is also saved with the project, so
-    /// the preset's name stays on the pill.
+    /// the preset's name stays on the Presets row.
     fn save_pending_preset(&mut self) {
         if self.graph.pending_save.is_none() {
             return;
@@ -158,12 +166,11 @@ impl IcedEditor for FlodeEditor {
     type InitializationFlags = (
         Arc<FlodeParams>,
         Option<Arc<Mutex<Producer<PianoEvent>>>>,
-        bool,
         Arc<PatchLink>,
     );
 
     fn new(
-        (params, note_tx, computer_keys, link): Self::InitializationFlags,
+        (params, note_tx, link): Self::InitializationFlags,
         context: Arc<dyn GuiContext>,
     ) -> (Self, Command<Self::Message>) {
         let mut graph = match params.graph.lock() {
@@ -171,7 +178,6 @@ impl IcedEditor for FlodeEditor {
             Err(_) => graph::Graph::default(),
         };
         demo::apply(&mut graph);
-        graph.computer_keys = computer_keys;
         link.publish(graph.patch());
         // The demo hook can hold a note down from the start, so a picture shows live signals.
         if let (Some(tx), Some(note)) = (&note_tx, demo::note()) {

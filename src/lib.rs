@@ -10,7 +10,6 @@ use nih_plug::prelude::*;
 use nih_plug_iced::IcedState;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod dsp;
@@ -26,10 +25,6 @@ use editor::graph::Graph;
 use editor::piano::PianoEvent;
 use engine::{Engine, Transport};
 use patch::link::{AudioEnd, Meters, PatchLink};
-
-/// Set by the standalone binary before it starts. Only standalone routes the computer keyboard to
-/// the synth.
-pub static STANDALONE: AtomicBool = AtomicBool::new(false);
 
 /// Room for queued computer-keyboard notes. A full queue drops new notes.
 const NOTE_QUEUE_LEN: usize = 256;
@@ -152,13 +147,12 @@ impl Plugin for Flode {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // A click on the key strip plays a note in the plugin too. The computer keyboard plays
-        // only in the standalone app, since a host takes the keys in a plugin window.
+        // A click on the key strip plays a note in the plugin too, and so does the computer
+        // keyboard in Keyboard mode: Tab, not which kind of process this is, decides that now.
         editor::create(
             self.params.clone(),
             self.params.editor_state.clone(),
             Some(self.note_tx.clone()),
-            STANDALONE.load(Ordering::Relaxed),
             self.link.clone(),
         )
     }

@@ -10,9 +10,11 @@ pub mod wiring;
 
 use crate::dsp::curve::Curve;
 use crate::dsp::wavetable::Waveform;
+use crate::nodes::arpeggiator::ArpPattern;
+use crate::nodes::chord::ChordType;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::MAX_SLOTS;
-use control::{Param, SignalTable, MAX_ENVELOPES, MAX_LFOS};
+use control::{Param, SignalTable, MAX_ENVELOPES, MAX_LFOS, MAX_NOTE_SOURCES};
 use stage::LaneGraph;
 
 /// An envelope node's settings. Each voice's copy of the envelope is set up from these once per
@@ -80,6 +82,56 @@ impl Default for LfoSettings {
     }
 }
 
+/// An arpeggiator node's settings. It reads the chord held at its own `input` note-source slot and
+/// re-emits a pattern of its own, which other note sources can read the same way they would a MIDI
+/// input's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArpeggiatorSettings {
+    /// The note-source slot that feeds this arpeggiator's chord, if its Notes pin is wired to one.
+    /// `None` means nothing feeds it, so it plays no chord and emits nothing.
+    pub input: Option<usize>,
+    pub pattern: ArpPattern,
+    /// Free running in Hz, or synced to the host tempo through `sync`, the same pair as an LFO's
+    /// Rate and Sync.
+    pub rate: Param,
+    pub sync: Param,
+    /// How many octaves the pattern climbs before it cycles back, from 1 to 4.
+    pub octaves: Param,
+    /// How much of each step's duration the note sounds before its note off, from 0.0 to 1.0.
+    pub gate: Param,
+}
+
+/// A chord node's settings. It reads the notes held at its own `input` note-source slot and turns
+/// each one into a stack of notes, the root plus the chosen chord's intervals, which other note
+/// sources can read the same way they would a MIDI input's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChordSettings {
+    /// The note-source slot that feeds this chord, if its Notes pin is wired to one. `None` means
+    /// nothing feeds it, so it plays no notes.
+    pub input: Option<usize>,
+    pub chord: ChordType,
+    /// How far the chord's notes climb apart, from 0.0 to 1.0. See `ChordType` and the Chord node
+    /// for what it does to each interval.
+    pub spread: Param,
+}
+
+/// One slot in the note-routing table: a node in the graph that emits notes, in the order the
+/// compiler found them. A downstream oscillator's `notes` field names a slot here instead of the
+/// boolean "is a MIDI input wired in" the compiler used to carry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoteSourceSpec {
+    /// A MIDI input node, which passes the host's notes straight through. Every `Input` node in the
+    /// patch compiles to one of these, and they all carry the same host events today, since there
+    /// is only one physical note source: the host, or the key strip in standalone. That is
+    /// intentional. Giving each Input its own slot is what lets a transform sitting on one Input's
+    /// output leave another Input's own state alone; it is not an attempt to filter by channel.
+    Input,
+    /// An arpeggiator, reading the chord held at its own slot and emitting a pattern of its own.
+    Arpeggiator(ArpeggiatorSettings),
+    /// A chord, reading the notes held at its own slot and emitting a stack of notes for each one.
+    Chord(ChordSettings),
+}
+
 /// The output node's settings that apply to every slot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Globals {
@@ -111,6 +163,10 @@ pub struct Patch {
     pub envelopes: [Option<EnvelopeSettings>; MAX_ENVELOPES],
     /// The LFO nodes in graph order, or None past the last one.
     pub lfos: [Option<LfoSettings>; MAX_LFOS],
+    /// The note-emitting nodes in graph order, or None past the last one. Built the compile-order
+    /// way `envelopes` and `lfos` are, with the same limitation: deleting an earlier node can
+    /// reassign a later one's slot, since nodes have no stable id that survives an edit.
+    pub note_sources: [Option<NoteSourceSpec>; MAX_NOTE_SOURCES],
     pub globals: Globals,
     /// The map and math nodes, in the order to run them. A route can read any of them as a source.
     pub signals: SignalTable,
@@ -122,6 +178,7 @@ impl Clone for Patch {
             lanes: self.lanes.clone(),
             envelopes: self.envelopes,
             lfos: self.lfos,
+            note_sources: self.note_sources,
             globals: self.globals,
             signals: self.signals,
         }
@@ -136,6 +193,7 @@ impl Clone for Patch {
         }
         self.envelopes = source.envelopes;
         self.lfos = source.lfos;
+        self.note_sources = source.note_sources;
         self.globals = source.globals;
         self.signals = source.signals;
     }
@@ -150,6 +208,7 @@ impl Patch {
             }),
             envelopes: [None; MAX_ENVELOPES],
             lfos: [None; MAX_LFOS],
+            note_sources: [None; MAX_NOTE_SOURCES],
             globals: Globals::default(),
             signals: SignalTable::EMPTY,
         }

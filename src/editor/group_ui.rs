@@ -3,10 +3,10 @@
 //! themselves are in `group`. Drawing is in `pane`.
 
 use super::canvas::{Message, NodeEditor};
-use super::graph::{Graph, Interaction, Terminal};
+use super::graph::{EditorMode, Graph, Interaction, Terminal};
 use super::group::PinSide;
 use super::menus::{
-    pill_bounds, ContextMenu, MenuItem, MenuTarget, MACRO_MENU_ITEMS, PIN_MENU_ITEMS,
+    burger_bounds, ContextMenu, MenuItem, MenuTarget, MACRO_MENU_ITEMS, PIN_MENU_ITEMS,
 };
 use super::piano;
 use super::shortcuts::Shortcut;
@@ -23,7 +23,7 @@ pub(super) const DEFAULT_CANVAS: (f32, f32) = (1024.0, 712.0);
 /// fraction. The margin never goes under `MIN_MARGIN` pixels.
 const PANE_MARGIN: f32 = 0.045;
 const MIN_MARGIN: f32 = 16.0;
-/// The room kept above the pane for the pill and the status line under it.
+/// The room kept above the pane for the burger button and the status line under it.
 const TOP_ROOM: f32 = 28.0;
 
 /// The height of the pane's title strip, and the side of its close button.
@@ -46,7 +46,7 @@ pub(super) const MACRO_NAME_MAX_LEN: usize = 12;
 pub(super) const RENAME_SIZE: (f32, f32) = (210.0, 30.0);
 
 /// The floating pane that shows an open group's graph: almost all of the editor, with a margin
-/// round it. The pill stays above it and the key strip below, so both keep working.
+/// round it. The burger button stays above it and the key strip below, so both keep working.
 pub(super) fn pane_bounds(bounds: Rectangle) -> Rectangle {
     let margin = (bounds.width * PANE_MARGIN).max(MIN_MARGIN);
     let top = PILL_TOP + PILL_HEIGHT + TOP_ROOM;
@@ -213,11 +213,11 @@ pub(super) fn rename_bounds(bounds: Rectangle, at: Point) -> Rectangle {
     }
 }
 
-/// The part of the editor a press on the margin of an open pane may land in: not the pill, the
-/// logo, the meter, or the key strip, which all stay in use.
+/// The part of the editor a press on the margin of an open pane may land in: not the burger
+/// button, the logo, the meter, or the key strip, which all stay in use.
 fn on_margin(bounds: Rectangle, screen: Point) -> bool {
     let pane = pane_bounds(bounds);
-    if pane.contains(screen) || pill_bounds(bounds).contains(screen) {
+    if pane.contains(screen) || burger_bounds().contains(screen) {
         return false;
     }
     if piano::strip_bounds(bounds).contains(screen) {
@@ -356,20 +356,6 @@ impl<'a> NodeEditor<'a> {
                     .selected
                     .is_some_and(|index| self.graph.ungroup(index))
             }
-            Shortcut::ToggleGroup => {
-                idle && {
-                    let group = self.graph.selected.filter(|&index| {
-                        self.graph
-                            .nodes
-                            .get(index)
-                            .is_some_and(|n| n.kind == NodeKind::Group)
-                    });
-                    match group {
-                        Some(index) => self.graph.open_group(index),
-                        None => self.graph.close_group(),
-                    }
-                }
-            }
             Shortcut::Escape => {
                 let menus = self.graph.menu.is_some()
                     || self.graph.dropdown_menu.is_some()
@@ -445,7 +431,7 @@ impl<'a> NodeEditor<'a> {
             },
             keyboard::Event::KeyReleased { .. } => {
                 let note = self.graph.piano.handle(event.clone());
-                let note = note.filter(|_| self.graph.computer_keys);
+                let note = note.filter(|_| self.graph.mode == EditorMode::Keyboard);
                 (event::Status::Captured, note.map(Message::Note))
             }
             _ => (event::Status::Ignored, None),

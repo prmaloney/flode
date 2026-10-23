@@ -27,7 +27,7 @@ pub(super) const LIFTED_SHADOW: Shadow = Shadow {
     drop: 6.0,
     strength: 0.34,
 };
-/// Menus, lists, and the pill, which float over the nodes.
+/// Menus, lists, and the burger button, which float over the nodes.
 pub(super) const FLOAT_SHADOW: Shadow = Shadow {
     reach: 11.0,
     drop: 4.0,

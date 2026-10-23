@@ -7,6 +7,8 @@
 //! beside it, and an output pin on the right edge. Under the rows a node can have one extra
 //! control, which is a dropdown or a switch.
 
+pub mod arpeggiator;
+pub mod chord;
 pub mod chorus;
 pub mod compressor;
 pub mod connection;
@@ -132,6 +134,8 @@ pub enum NodeKind {
     Filter,
     Lfo,
     Input,
+    Arpeggiator,
+    Chord,
     Map,
     Mix,
     Output,
@@ -155,38 +159,41 @@ pub enum NodeKind {
     GroupOutput,
 }
 
-/// The groups the add menu sorts the node kinds into.
+/// The groups the add menu sorts the node kinds into. The burger menu lists them in this order:
+/// notes, then control, then audio insert effects, then the leftover routing and sink bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
-    /// Nodes that make control signals.
-    Driver,
-    /// Nodes that route or shape signals without a sound of their own.
-    Util,
+    /// The note-stream nodes: an input, and the two things that reshape a note stream.
+    Midi,
+    /// Nodes that make or shape control signals.
+    Modulation,
     /// Nodes that change the sound of a signal.
     Effects,
+    /// What is left after MIDI and Modulation move out: routing, trimming, inspecting, and
+    /// terminating audio.
+    Utility,
 }
 
 impl Category {
     pub fn label(self) -> &'static str {
         match self {
-            Category::Driver => "Driver",
-            Category::Util => "Util",
+            Category::Midi => "MIDI",
+            Category::Modulation => "Modulation",
             Category::Effects => "Effects",
+            Category::Utility => "Utility",
         }
     }
 
     /// The kinds in this category, in the order the menu lists them.
     pub fn kinds(self) -> &'static [NodeKind] {
         match self {
-            Category::Driver => &[NodeKind::Envelope, NodeKind::Lfo, NodeKind::Macro],
-            Category::Util => &[
-                NodeKind::Output,
+            Category::Midi => &[NodeKind::Input, NodeKind::Arpeggiator, NodeKind::Chord],
+            Category::Modulation => &[
+                NodeKind::Envelope,
+                NodeKind::Lfo,
+                NodeKind::Macro,
                 NodeKind::Map,
                 NodeKind::Math,
-                NodeKind::Monitor,
-                NodeKind::Input,
-                NodeKind::Mix,
-                NodeKind::Gain,
             ],
             Category::Effects => &[
                 NodeKind::Filter,
@@ -199,18 +206,26 @@ impl Category {
                 NodeKind::Phaser,
                 NodeKind::Flanger,
             ],
+            Category::Utility => &[
+                NodeKind::Mix,
+                NodeKind::Gain,
+                NodeKind::Monitor,
+                NodeKind::Output,
+            ],
         }
     }
 }
 
 impl NodeKind {
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 23] = [
+    pub const ALL: [NodeKind; 25] = [
         NodeKind::Oscillator,
         NodeKind::Envelope,
         NodeKind::Filter,
         NodeKind::Lfo,
         NodeKind::Input,
+        NodeKind::Arpeggiator,
+        NodeKind::Chord,
         NodeKind::Map,
         NodeKind::Mix,
         NodeKind::Output,
@@ -258,6 +273,8 @@ impl NodeKind {
             NodeKind::Filter => &filter::Filter,
             NodeKind::Lfo => &lfo::Lfo,
             NodeKind::Input => &input::Input,
+            NodeKind::Arpeggiator => &arpeggiator::Arpeggiator,
+            NodeKind::Chord => &chord::Chord,
             NodeKind::Map => &map::Map,
             NodeKind::Mix => &mix::Mix,
             NodeKind::Output => &output::Output,

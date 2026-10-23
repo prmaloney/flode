@@ -8,7 +8,7 @@ use super::group_ui::{
     canvas_rect, close_bounds, inner_bounds, open_glyph_bounds, pane_bounds, title_bounds,
     title_layout, RenameTarget, CLICK_SLOP,
 };
-use super::menus::{pill_bounds, pill_segment, MenuItem, MenuTarget};
+use super::menus::{burger_bounds, burger_row_bounds, MenuItem, MenuTarget};
 use super::piano;
 use super::shortcuts::COMMAND;
 use crate::nodes::connection::Connection;
@@ -336,55 +336,27 @@ fn the_menus_offer_group_and_ungroup() {
     assert!(!menu_has(editor.graph, MenuItem::Group));
 }
 
-// Opening and closing.
+// Opening and closing. Tab used to open and close a group here. It is now the global mode
+// toggle instead (see `mode_tests`), so opening is a double click on the header or the open
+// glyph (already covered by `a_double_click_on_a_group_header_opens_it` and
+// `the_open_glyph_in_the_header_opens_the_group` below), and closing is Escape, the close
+// button, or a click on the margin.
 
 #[test]
-fn tab_opens_the_selected_group_and_closes_the_open_one() {
-    let mut graph = grouped();
-    let mut editor = canvas(&mut graph);
-    assert!(changed(plain(&mut editor, KeyCode::Tab)));
-    assert_eq!(editor.graph.group_depth(), 1);
-    // Nothing is selected inside, so Tab closes it.
-    assert!(changed(plain(&mut editor, KeyCode::Tab)));
-    assert_eq!(editor.graph.group_depth(), 0);
-}
-
-#[test]
-fn tab_with_no_group_selected_and_none_open_does_nothing() {
-    let mut graph = chain();
-    graph.select(FILTER);
-    let mut editor = canvas(&mut graph);
-    let message = plain(&mut editor, KeyCode::Tab);
-    assert!(message.is_none());
-    assert_eq!(graph.group_depth(), 0);
-    assert_eq!(graph.selection(), vec![FILTER]);
-}
-
-#[test]
-fn tab_does_not_play_a_note() {
-    let mut graph = grouped();
-    let mut editor = canvas(&mut graph);
-    assert!(!matches!(
-        plain(&mut editor, KeyCode::Tab),
-        Some(Message::Note(_))
-    ));
-}
-
-#[test]
-fn tab_inside_a_group_opens_a_nested_group_and_leaves_one_level_at_a_time() {
+fn escape_closes_the_open_group_and_leaves_one_level_at_a_time() {
     let mut graph = opened();
     // The filter goes into a group of its own, inside the open one.
     assert_eq!(graph.create_group(&[2]), Some(2));
     assert_eq!(graph.selection(), vec![2]);
+    assert!(graph.open_group(2));
     let mut editor = canvas(&mut graph);
-    plain(&mut editor, KeyCode::Tab);
     assert_eq!(editor.graph.group_depth(), 2);
-    // Nothing is selected in the nested group, so Tab closes it. The group is selected again in
-    // the graph outside, which is where it was opened from.
-    plain(&mut editor, KeyCode::Tab);
+    // Escape closes one level at a time. The group is selected again in the graph outside,
+    // which is where it was opened from.
+    assert!(changed(plain(&mut editor, KeyCode::Escape)));
     assert_eq!(editor.graph.group_depth(), 1);
     assert_eq!(editor.graph.selection(), vec![2]);
-    plain(&mut editor, KeyCode::Escape);
+    assert!(changed(plain(&mut editor, KeyCode::Escape)));
     assert_eq!(editor.graph.group_depth(), 0);
 }
 
@@ -469,13 +441,14 @@ fn the_open_glyph_in_the_header_opens_the_group() {
 // The pane.
 
 #[test]
-fn the_pane_fills_the_editor_between_the_pill_and_the_strip() {
+fn the_pane_fills_the_editor_between_the_burger_button_and_the_strip() {
     let pane = pane_bounds(bounds());
     let area = bounds();
     // About four to five percent of the width on each side.
     assert!(pane.x >= 16.0 && pane.x <= area.width * 0.06);
     assert!((pane.x + pane.width - (area.width - pane.x)).abs() < 0.01);
-    assert!(pane.y >= pill_bounds(area).y + pill_bounds(area).height);
+    let burger = burger_bounds();
+    assert!(pane.y >= burger.y + burger.height);
     assert!(pane.y + pane.height <= piano::strip_bounds(area).y);
     assert!(pane.width > area.width * 0.85 && pane.height > area.height * 0.7);
     // It follows a smaller editor, and never goes negative.
@@ -555,7 +528,7 @@ fn a_drag_that_starts_on_the_margin_does_not_close_the_group() {
 }
 
 #[test]
-fn a_click_on_the_pane_or_the_pill_leaves_the_group_open() {
+fn a_click_on_the_pane_or_the_burger_menu_leaves_the_group_open() {
     let mut graph = opened();
     let pane = pane_bounds(bounds());
     let mut editor = canvas(&mut graph);
@@ -571,15 +544,21 @@ fn a_click_on_the_pane_or_the_pill_leaves_the_group_open() {
         Point::new(pane.x + pane.width / 2.0, pane.y + 5.0),
     );
     assert_eq!(editor.graph.group_depth(), 1);
-    // The pill adds a node inside the group, and the group stays open.
+    // The burger menu's Add Oscillator row adds a node inside the group, and the group stays
+    // open.
     let before = editor.graph.nodes.len();
-    let segment = pill_segment(bounds(), 0);
+    let burger = burger_bounds();
     click(
         &mut editor,
         Point::new(
-            segment.x + segment.width / 2.0,
-            segment.y + segment.height / 2.0,
+            burger.x + burger.width / 2.0,
+            burger.y + burger.height / 2.0,
         ),
+    );
+    let row = burger_row_bounds(0);
+    click(
+        &mut editor,
+        Point::new(row.x + row.width / 2.0, row.y + row.height / 2.0),
     );
     assert_eq!(editor.graph.group_depth(), 1);
     assert_eq!(editor.graph.nodes.len(), before + 1);

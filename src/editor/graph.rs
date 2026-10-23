@@ -97,6 +97,45 @@ pub(super) enum Interaction {
         node: usize,
         point: usize,
     },
+    /// A modal grab, started by G in Edit mode: the selection follows the cursor with no button
+    /// held. `node` and `grab` track the driving node the same way `MovingNode` does. `Graph`'s
+    /// `grab_positions` holds where every selected node started, the same way `box_base` holds a
+    /// box drag's starting selection, so Esc or a right click can put them back exactly.
+    Grabbing {
+        node: usize,
+        grab: Vector,
+    },
+}
+
+/// Which keys the computer keyboard sends to. Tab switches between them. Runtime-only, like
+/// `shift` and `alt`: a preset does not remember which mode the editor was in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum EditorMode {
+    /// The keyboard plays notes through the piano, on A to P, semicolon, Z, and X, as it always
+    /// has.
+    #[default]
+    Keyboard,
+    /// The keyboard is handed to the editor instead: G grabs the selection, X and Delete remove
+    /// it, A selects everything, and Alt+A clears the selection. The piano does not run at all.
+    Edit,
+}
+
+impl EditorMode {
+    /// What Tab switches to.
+    pub(super) fn toggled(self) -> Self {
+        match self {
+            EditorMode::Keyboard => EditorMode::Edit,
+            EditorMode::Edit => EditorMode::Keyboard,
+        }
+    }
+
+    /// The word the badge over the strip shows.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            EditorMode::Keyboard => "Keyboard",
+            EditorMode::Edit => "Edit",
+        }
+    }
 }
 
 /// A node easing from where it was to where it now belongs.
@@ -233,6 +272,9 @@ pub struct Graph {
     pub(super) slides: Vec<Slide>,
     /// The selection a box drag started from. A box with Shift held adds to it.
     pub(super) box_base: Vec<usize>,
+    /// Where every selected node sat when a grab (G, in Edit mode) started, so Esc or a right
+    /// click can put them back exactly. Empty outside a grab.
+    pub(super) grab_positions: Vec<(usize, Point)>,
     /// True while Shift is held, as the last keyboard event reported it.
     pub(super) shift: bool,
     /// True while Alt (Option) is held, as the last keyboard event reported it. A click on a knob
@@ -249,9 +291,9 @@ pub struct Graph {
     pub(super) link_target: Option<usize>,
     /// The key on the strip the mouse holds down, and so the note it is playing.
     pub(super) mouse_note: Option<u8>,
-    /// True when the computer keyboard plays notes, which is in the standalone app. The strip
-    /// marks the keys it plays. In a plugin it is false, and only clicks on the strip play.
-    pub(super) computer_keys: bool,
+    /// Whether the keyboard plays notes or sends editor shortcuts, toggled by Tab. The strip
+    /// marks the keys it plays while this is Keyboard, in a plugin as well as standalone.
+    pub(super) mode: EditorMode,
     /// How lit the MIDI indicator is, from 0.0 to 1.0. It jumps up when a note arrives and fades.
     pub(super) midi_light: f32,
     /// What each EQ instance of the audio thread last measured, by pool number. The view copies
@@ -267,7 +309,9 @@ pub struct Graph {
     pub(super) cursor_in: bool,
     /// What the cursor is over, if it is over a dropdown or one of its open rows.
     pub(super) hover: Option<Hover>,
-    /// The category whose list is open under the pill.
+    /// True while the burger menu's top-level list is open.
+    pub(super) burger_menu: bool,
+    /// The category whose list is open, nested under the burger menu.
     pub(super) category_menu: Option<Category>,
     pub(super) view: View,
     /// The last screen position the cursor was seen at. A release uses it, since the cursor can be
@@ -307,7 +351,7 @@ pub struct Graph {
     /// The other end of `save_dialog` in tests, which send the answer through it.
     #[cfg(test)]
     pub(super) save_dialog_sender: Option<mpsc::Sender<Option<PathBuf>>>,
-    /// A line shown under the pill for a few seconds, such as "Saved Lead".
+    /// A line shown under the burger menu for a few seconds, such as "Saved Lead".
     pub(super) status: Option<(String, Instant)>,
     /// The last press on an LFO's viewer, to tell a double click that adds or removes a point.
     pub(super) viewer_click: Option<nih_plug_iced::mouse::Click>,
@@ -424,6 +468,7 @@ impl Graph {
             selected: None,
             also_selected: Vec::new(),
             box_base: Vec::new(),
+            grab_positions: Vec::new(),
             slides: Vec::new(),
             shift: false,
             menu: None,
@@ -431,12 +476,13 @@ impl Graph {
             link_target: None,
             hover: None,
             mouse_note: None,
-            computer_keys: true,
+            mode: EditorMode::Keyboard,
             cursor_in: false,
             midi_light: 0.0,
             spectra: [[FLOOR_DB; BINS]; POOL],
             monitors: [MonitorData::default(); POOL],
             monitor_history: Vec::new(),
+            burger_menu: false,
             category_menu: None,
             view: View::default(),
             last_screen: Point::new(0.0, 0.0),
@@ -473,7 +519,7 @@ impl Graph {
         }
     }
 
-    /// Shows a line under the pill for a few seconds.
+    /// Shows a line under the burger menu for a few seconds.
     pub(super) fn say(&mut self, text: impl Into<String>) {
         self.status = Some((text.into(), Instant::now()));
     }
@@ -566,6 +612,7 @@ impl Graph {
 
     fn open_quick_add_with(&mut self, feed: Option<(usize, Port)>, world: Point) {
         self.menu = None;
+        self.burger_menu = false;
         self.category_menu = None;
         self.preset_list = None;
         self.group_list = None;
@@ -896,7 +943,7 @@ impl Graph {
         // keep.
         let view = self.open_groups.first().map_or(self.view, |open| open.view);
         let piano = std::mem::take(&mut self.piano);
-        let computer_keys = self.computer_keys;
+        let mode = self.mode;
         let shift = self.shift;
         let dir = self.preset_dir.clone();
         let group_dir = self.group_dir.clone();
@@ -918,7 +965,7 @@ impl Graph {
         }
         self.view = view;
         self.piano = piano;
-        self.computer_keys = computer_keys;
+        self.mode = mode;
         self.shift = shift;
         self.preset_dir = dir;
         self.canvas_size = canvas_size;
@@ -1164,6 +1211,12 @@ impl Graph {
         self.with_flat(node, |wiring, node| wiring.envelope_index(node))?
     }
 
+    /// The place of a MIDI input or arpeggiator node among the note sources the audio thread runs,
+    /// or None if it is past them.
+    pub(super) fn note_source_index(&self, node: usize) -> Option<usize> {
+        self.with_flat(node, |wiring, node| wiring.note_source_index(node))?
+    }
+
     /// Which engine instance each monitor node on show runs on, as (node, pool number) pairs.
     pub(super) fn monitor_pools(&self) -> Vec<(usize, u8)> {
         if !self.has_groups() {
@@ -1303,11 +1356,14 @@ impl Graph {
         let behavior = dragged.kind.behavior();
         // Audio nodes splice into audio wires. A node with several audio inputs, such as a mix
         // node, takes the wire on its first one. A node with a control input and output, such as a
-        // map or a math node, splices into a wire that drives a knob.
+        // map or a math node, splices into a wire that drives a knob. A node with a notes input
+        // and output, such as an arpeggiator, splices into a notes wire the same way.
         let audio_node = behavior.audio_in() && behavior.audio_out();
         let control_node = Self::control_splice_input(dragged).is_some()
             && dragged.output_ports().contains(&Port::Shape);
-        if !(audio_node || control_node) {
+        let notes_node = dragged.input_ports().contains(&Port::Notes)
+            && dragged.output_ports().contains(&Port::Notes);
+        if !(audio_node || control_node || notes_node) {
             return None;
         }
         if self
@@ -1321,8 +1377,10 @@ impl Graph {
         self.connections.iter().position(|c| {
             let fits = if audio_node {
                 c.out.is_audio_out() && c.input.is_audio()
-            } else {
+            } else if control_node {
                 c.out.is_control_out() && matches!(c.input, Port::Knob(_))
+            } else {
+                c.out.signal() == Signal::Notes && c.input.signal() == Signal::Notes
             };
             fits && self.link_curve(c).is_some_and(|curve| {
                 (0..=WIRE_SAMPLES)
@@ -1346,10 +1404,12 @@ impl Graph {
     /// Splices `node` into the connection `link`: the old source feeds the node, and the node
     /// feeds the old target. Control wires are spliced through the node's shape pins, or into A on
     /// a math node. An audio wire goes into the node's first audio input, which is the top one on a
-    /// node with several, such as signal A on a mix.
+    /// node with several, such as signal A on a mix. A notes wire goes into the node's notes pin.
     pub(super) fn insert_into(&mut self, node: usize, link: usize) {
         let old = self.connections[link];
-        let (input, out) = if old.out.is_control_out() {
+        let (input, out) = if old.out.signal() == Signal::Notes {
+            (Port::Notes, Port::Notes)
+        } else if old.out.is_control_out() {
             (
                 Self::control_splice_input(&self.nodes[node]).unwrap_or(Port::Shape),
                 Port::Shape,
@@ -1692,6 +1752,16 @@ impl Graph {
         self.also_selected.clear();
     }
 
+    /// Selects every node on show. The last one is primary, same as a box drawn over all of them.
+    pub(super) fn select_all(&mut self) {
+        self.set_selection((0..self.nodes.len()).collect());
+    }
+
+    /// Clears the selection. A plain name for `clear_selection`, for the Edit-mode shortcut.
+    pub(super) fn deselect_all(&mut self) {
+        self.clear_selection();
+    }
+
     /// Selects exactly `nodes`. The last one becomes the primary node.
     pub(super) fn set_selection(&mut self, mut nodes: Vec<usize>) {
         self.selected = nodes.pop();
@@ -1778,6 +1848,79 @@ impl Graph {
         }
     }
 
+    /// Removes every selected node, reconnecting around each one the way `delete_in_place` does.
+    /// Deleting a run of several nodes in a row bypasses the whole run in one go, since each node
+    /// is removed from the highest index down, onto wires the step before it already relinked.
+    pub(super) fn delete_selected_in_place(&mut self) {
+        let mut nodes = self.selection();
+        nodes.sort_unstable();
+        for index in nodes.into_iter().rev() {
+            self.delete_in_place(index);
+        }
+    }
+
+    /// Removes `node`, first reconnecting whatever fed it straight to whatever it fed, the
+    /// Blender node editor trick of Delete and Reconnect. Only a node shaped like one
+    /// `link_under` could splice into, a single clear audio, control, or notes path through it,
+    /// has anything to reconnect; any other node is simply removed, same as `delete_node`.
+    pub(super) fn delete_in_place(&mut self, index: usize) {
+        self.bypass_wiring(index);
+        self.delete_node(index);
+    }
+
+    /// Wires whatever feeds `node`'s one through-path straight to whatever `node` feeds on it,
+    /// before `node` is removed. Does nothing for a node with no such path, or with nothing wired
+    /// into it, the same as deleting the node outright would then leave.
+    fn bypass_wiring(&mut self, node: usize) {
+        let Some((in_port, out_port)) = self.through_ports(node) else {
+            return;
+        };
+        let Some((from, out)) = self
+            .connections
+            .iter()
+            .find(|c| c.to == node && c.input == in_port)
+            .map(|c| (c.from, c.out))
+        else {
+            return;
+        };
+        let targets: Vec<(usize, Port)> = self
+            .connections
+            .iter()
+            .filter(|c| c.from == node && c.out == out_port)
+            .map(|c| (c.to, c.input))
+            .collect();
+        for (to, input) in targets {
+            self.connect(from, out, to, input);
+        }
+    }
+
+    /// The input and output pin of `node`'s one through-path, if it has one: an audio in and out,
+    /// a control in and out (a map's shape pin, or a math node's A), or a notes in and out. This
+    /// is the same shape `link_under` recognises as splice-able, since reconnecting around a node
+    /// is splicing in reverse.
+    fn through_ports(&self, node: usize) -> Option<(Port, Port)> {
+        let dragged = &self.nodes[node];
+        let behavior = dragged.kind.behavior();
+        if behavior.audio_in() && behavior.audio_out() {
+            let first_audio = dragged
+                .input_ports()
+                .into_iter()
+                .find(|port| port.is_audio())?;
+            return Some((first_audio, Port::Audio));
+        }
+        if let Some(input) = Self::control_splice_input(dragged) {
+            if dragged.output_ports().contains(&Port::Shape) {
+                return Some((input, Port::Shape));
+            }
+        }
+        if dragged.input_ports().contains(&Port::Notes)
+            && dragged.output_ports().contains(&Port::Notes)
+        {
+            return Some((Port::Notes, Port::Notes));
+        }
+        None
+    }
+
     /// Makes `node` follow the cursor, centred on `point`, until the next press sets it down. A
     /// press that lands while a wire is under the node splices the node into that wire.
     pub(super) fn start_placing(&mut self, node: usize, point: Point) {
@@ -1785,6 +1928,54 @@ impl Graph {
         self.nodes[node].position = Point::new(point.x - grab.x, point.y - grab.y);
         self.select(node);
         self.interaction = Interaction::Placing { node, grab };
+    }
+
+    /// Starts a modal grab of the selection: G in Edit mode. The primary selected node drives it,
+    /// tracked the same way a drag tracks the node under the cursor, and the rest of the
+    /// selection follows through `move_selection`. Does nothing with an empty selection.
+    pub(super) fn start_grab(&mut self) {
+        let Some(node) = self.selected else { return };
+        let cursor = self.view.to_world(self.last_screen);
+        let at = self.nodes[node].position;
+        self.grab_positions = self
+            .selection()
+            .into_iter()
+            .map(|n| (n, self.nodes[n].position))
+            .collect();
+        self.interaction = Interaction::Grabbing {
+            node,
+            grab: Vector::new(cursor.x - at.x, cursor.y - at.y),
+        };
+    }
+
+    /// Ends a grab at its current position, the same as releasing an ordinary drag: a lone moved
+    /// node splices into the wire under it. Returns false, doing nothing, outside a grab.
+    pub(super) fn commit_grab(&mut self) -> bool {
+        let Interaction::Grabbing { node, .. } = self.interaction else {
+            return false;
+        };
+        self.interaction = Interaction::Idle;
+        self.grab_positions.clear();
+        if let Some(link) = self.link_target.take() {
+            self.insert_into(node, link);
+        }
+        true
+    }
+
+    /// Cancels a grab in progress, putting every moved node back exactly where it started, with
+    /// no splice and no selection change. Returns false, doing nothing, outside a grab.
+    pub(super) fn cancel_grab(&mut self) -> bool {
+        if !matches!(self.interaction, Interaction::Grabbing { .. }) {
+            return false;
+        }
+        self.interaction = Interaction::Idle;
+        self.link_target = None;
+        for (node, position) in self.grab_positions.drain(..) {
+            if let Some(found) = self.nodes.get_mut(node) {
+                found.position = position;
+            }
+        }
+        true
     }
 
     /// How far a copy of a node sits from the original, so it does not hide it.

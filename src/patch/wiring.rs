@@ -5,20 +5,23 @@
 
 use super::control::{
     ControlLevels, KnobValue, MapNode, MapValue, MathNode, Param, Route, SignalNode, SignalTable,
-    Source, MAX_ENVELOPES, MAX_LFOS,
+    Source, MAX_ENVELOPES, MAX_LFOS, MAX_NOTE_SOURCES,
 };
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
     PhaserParams, ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
-use super::{EnvelopeSettings, Globals, LfoSettings, Patch};
+use super::{
+    ArpeggiatorSettings, ChordSettings, EnvelopeSettings, Globals, LfoSettings, NoteSourceSpec,
+    Patch,
+};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::{
-    compressor, delay, distortion, eq, filter, gain, input, lfo, map, math, mix, monitor,
-    oscillator, phaser, Bypass, FlodeNode, NodeKind, Port,
+    arpeggiator, chord, compressor, delay, distortion, eq, filter, gain, input, lfo, map, math,
+    mix, monitor, oscillator, phaser, Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 use std::cell::OnceCell;
@@ -387,11 +390,63 @@ impl<'a> Wiring<'a> {
         globals
     }
 
-    /// True if a MIDI input node's notes pin is wired to this oscillator.
-    pub fn has_notes(&self, oscillator: usize) -> bool {
-        self.input_link(oscillator, Port::Notes)
-            .and_then(|link| self.nodes.get(link.from))
-            .is_some_and(|node| node.kind == NodeKind::Input)
+    /// The index of a note-emitting node among the MIDI inputs, arpeggiators, and chords in graph
+    /// order, or None past the slots the audio thread runs. The three kinds share one counter, the
+    /// same way an envelope and an LFO never share one, since each is its own kind of slot.
+    pub fn note_source_index(&self, node: usize) -> Option<usize> {
+        let index = self.nodes[..node]
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Input | NodeKind::Arpeggiator | NodeKind::Chord
+                )
+            })
+            .count();
+        (index < MAX_NOTE_SOURCES).then_some(index)
+    }
+
+    /// The note-source slot wired to a node's Notes input pin, if one feeds it: a MIDI input node
+    /// passed straight through, or an arpeggiator or a chord reading one. None if nothing is wired,
+    /// or what is wired makes no notes of its own.
+    pub fn notes_source(&self, node: usize) -> Option<usize> {
+        let link = self.input_link(node, Port::Notes)?;
+        match self.nodes.get(link.from)?.kind {
+            NodeKind::Input | NodeKind::Arpeggiator | NodeKind::Chord => {
+                self.note_source_index(link.from)
+            }
+            _ => None,
+        }
+    }
+
+    /// The note-emitting nodes the audio thread runs, in graph order.
+    pub fn note_source_settings(&self) -> [Option<NoteSourceSpec>; MAX_NOTE_SOURCES] {
+        let mut out = [None; MAX_NOTE_SOURCES];
+        let sources = self.nodes.iter().enumerate().filter(|(_, n)| {
+            matches!(
+                n.kind,
+                NodeKind::Input | NodeKind::Arpeggiator | NodeKind::Chord
+            )
+        });
+        for (slot, (index, node)) in sources.take(MAX_NOTE_SOURCES).enumerate() {
+            out[slot] = Some(match node.kind {
+                NodeKind::Input => NoteSourceSpec::Input,
+                NodeKind::Chord => NoteSourceSpec::Chord(ChordSettings {
+                    input: self.notes_source(index),
+                    chord: chord::chord_type(node),
+                    spread: self.param(index, KnobId::ChordSpread),
+                }),
+                _ => NoteSourceSpec::Arpeggiator(ArpeggiatorSettings {
+                    input: self.notes_source(index),
+                    pattern: arpeggiator::pattern(node),
+                    rate: self.param(index, KnobId::LfoRate),
+                    sync: self.param(index, KnobId::LfoSync),
+                    octaves: self.param(index, KnobId::ArpOctaves),
+                    gate: self.param(index, KnobId::ArpGate),
+                }),
+            });
+        }
+        out
     }
 
     /// Compiles the whole graph for the audio thread.
@@ -401,6 +456,7 @@ impl<'a> Wiring<'a> {
             signals: self.signals().table,
             envelopes: self.envelope_settings(),
             lfos: self.lfo_settings(),
+            note_sources: self.note_source_settings(),
             globals: self.globals(),
         }
     }
@@ -489,6 +545,7 @@ impl<'a> Wiring<'a> {
             stages: builder.stages,
             eq_pools: builder.eq_pools,
             monitor_pools: builder.monitor_pools,
+            notes_slot: builder.notes_slot,
         });
         (built, (pools, overflowed))
     }
@@ -514,6 +571,7 @@ impl<'a> Wiring<'a> {
         };
         if let Some(built) = self.build_lane(link.from, pools) {
             lane.stages = built.stages;
+            lane.notes_slot = built.notes_slot;
         }
         lane
     }
@@ -529,6 +587,7 @@ impl<'a> Wiring<'a> {
                 noise: oscillator::noise_type(n),
                 warp: oscillator::warp_mode(n),
                 envelope: self.amp_envelope(node),
+                notes: self.notes_source(node),
                 coarse: knob(KnobId::Coarse),
                 fine: knob(KnobId::Fine),
                 octave: knob(KnobId::Octave),
@@ -625,6 +684,8 @@ impl<'a> Wiring<'a> {
             | NodeKind::Output
             | NodeKind::Lfo
             | NodeKind::Input
+            | NodeKind::Arpeggiator
+            | NodeKind::Chord
             | NodeKind::Macro
             | NodeKind::Envelope
             // Groups are flattened away before a graph compiles, so these never reach a stage.
@@ -665,6 +726,8 @@ struct BuiltLane {
     stages: ArrayVec<StageSpec, MAX_STAGES>,
     eq_pools: Vec<(usize, u8)>,
     monitor_pools: Vec<(usize, u8)>,
+    /// The note-source slot that triggers the slot's voices. See `LaneGraph::notes_slot`.
+    notes_slot: Option<usize>,
 }
 
 /// The arena of one slot while it is built.
@@ -686,6 +749,10 @@ struct LaneBuilder<'p> {
     attached: Vec<usize>,
     /// The monitor nodes placed so far and the instance each one took.
     monitor_pools: Vec<(usize, u8)>,
+    /// The note-source slot of the first oscillator placed that has one. A slot that mixes
+    /// oscillators fed by different note sources only follows this first one; see
+    /// `LaneGraph::notes_slot`.
+    notes_slot: Option<usize>,
 }
 
 impl<'p> LaneBuilder<'p> {
@@ -700,6 +767,7 @@ impl<'p> LaneBuilder<'p> {
             monitors,
             attached: Vec::new(),
             monitor_pools: Vec::new(),
+            notes_slot: None,
         }
     }
 
@@ -780,13 +848,18 @@ impl<'p> LaneBuilder<'p> {
             }
         }
 
-        // An oscillator plays only the notes wired into it. With no MIDI input on its notes pin
-        // it is silent.
-        if wiring.nodes[node].kind == NodeKind::Oscillator && !wiring.has_notes(node) {
+        // An oscillator plays only the notes wired into it: a MIDI input directly, or a transform
+        // such as an arpeggiator that reads one. With nothing feeding its notes pin it is silent.
+        if wiring.nodes[node].kind == NodeKind::Oscillator && wiring.notes_source(node).is_none() {
             return None;
         }
 
         let params = wiring.stage_params(node)?;
+        if self.notes_slot.is_none() {
+            if let StageParams::Oscillator(osc) = &params {
+                self.notes_slot = osc.notes;
+            }
+        }
 
         self.path.push(node);
         let mut inputs = [None; MAX_INPUTS];

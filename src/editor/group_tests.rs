@@ -404,7 +404,12 @@ fn the_add_menus_never_offer_group_parts() {
     let graph = chain();
     for kind in [NodeKind::Group, NodeKind::GroupInput, NodeKind::GroupOutput] {
         assert!(!graph.can_add(kind));
-        for category in [Category::Driver, Category::Util, Category::Effects] {
+        for category in [
+            Category::Midi,
+            Category::Modulation,
+            Category::Effects,
+            Category::Utility,
+        ] {
             assert!(!category.kinds().contains(&kind));
         }
     }

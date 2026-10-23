@@ -29,6 +29,10 @@ pub struct OscillatorParams {
     pub warp: WarpMode,
     /// The envelope node that shapes this oscillator's amplitude, if one is wired in.
     pub envelope: Option<usize>,
+    /// The note-source slot that feeds this oscillator, if its Notes pin is wired. It can be a
+    /// MIDI input passed straight through or an arpeggiator reading one. None means nothing is
+    /// wired to the Notes pin, and the oscillator compiles out entirely rather than playing silent.
+    pub notes: Option<usize>,
     pub coarse: Param,
     pub fine: Param,
     pub octave: Param,
@@ -50,6 +54,7 @@ impl Default for OscillatorParams {
             noise: NoiseType::default(),
             warp: WarpMode::default(),
             envelope: None,
+            notes: None,
             coarse: Param::default_of(KnobId::Coarse),
             fine: Param::default_of(KnobId::Fine),
             octave: Param::default_of(KnobId::Octave),
@@ -317,6 +322,13 @@ impl StageSpec {
 pub struct LaneGraph {
     pub stages: ArrayVec<StageSpec, MAX_STAGES>,
     pub gain: Param,
+    /// The note-source slot that triggers this slot's voices, if the compiler could tell. It comes
+    /// from the first oscillator in the slot whose Notes pin is wired; a slot that mixes oscillators
+    /// from different note sources only follows the first one found, which is a known limitation.
+    /// `None` means the compiler made no such call, which happens for a slot built by hand rather
+    /// than by `Wiring`, such as in a test or the no-alloc check: then the engine falls back to its
+    /// old behavior of triggering the slot from every host note, same as before this field existed.
+    pub notes_slot: Option<usize>,
 }
 
 impl Clone for LaneGraph {
@@ -324,6 +336,7 @@ impl Clone for LaneGraph {
         Self {
             stages: self.stages.clone(),
             gain: self.gain,
+            notes_slot: self.notes_slot,
         }
     }
 
@@ -332,6 +345,7 @@ impl Clone for LaneGraph {
         self.stages.clear();
         self.stages.extend(source.stages.iter().copied());
         self.gain = source.gain;
+        self.notes_slot = source.notes_slot;
     }
 }
 
@@ -341,6 +355,7 @@ impl LaneGraph {
         Self {
             stages: ArrayVec::new(),
             gain,
+            notes_slot: None,
         }
     }
 

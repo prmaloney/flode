@@ -697,20 +697,19 @@ fn a_control_input_lists_only_groups_with_a_control_output() {
 }
 
 #[test]
-fn the_groups_button_lists_saved_groups_and_places_one() {
-    let dir = TempDir::new("pill");
+fn the_groups_row_lists_saved_groups_and_places_one() {
+    let dir = TempDir::new("groups-row");
     let mut graph = with_saved(&dir, &["Lead", "Pad"]);
     let before = graph.nodes.len();
-    let index = super::menus::PILL_ITEMS
-        .iter()
-        .position(|item| *item == super::menus::PillItem::Groups)
-        .expect("the pill has a Groups button");
-    let segment = super::menus::pill_segment(bounds(), index);
+    let burger = super::menus::burger_bounds();
     let button = Point::new(
-        segment.x + segment.width / 2.0,
-        segment.y + segment.height / 2.0,
+        burger.x + burger.width / 2.0,
+        burger.y + burger.height / 2.0,
     );
+    let row = super::menus::burger_row_bounds(super::menus::BURGER_GROUPS_ROW);
+    let groups_row = Point::new(row.x + row.width / 2.0, row.y + row.height / 2.0);
     click(&mut canvas(&mut graph), button);
+    click(&mut canvas(&mut graph), groups_row);
     assert_eq!(graph.group_list, Some(vec![entry("Lead"), entry("Pad")]));
     let list = super::menus::group_list_bounds(bounds(), 2);
     let second = Point::new(
@@ -723,9 +722,11 @@ fn the_groups_button_lists_saved_groups_and_places_one() {
     assert_eq!(graph.nodes[before].label(), "Pad");
     assert!(matches!(graph.interaction, Interaction::Placing { .. }));
 
-    // Pressing the button again closes the list.
+    // Opening the burger menu and picking Groups again reopens the list, and pressing the burger
+    // button again, instead of a row, closes the whole menu.
     graph.interaction = Interaction::Idle;
     click(&mut canvas(&mut graph), button);
+    click(&mut canvas(&mut graph), groups_row);
     assert!(graph.group_list.is_some());
     click(&mut canvas(&mut graph), button);
     assert!(graph.group_list.is_none());

@@ -11,6 +11,11 @@ use crate::nodes::math::MathOp;
 /// The most LFO nodes that drive knobs. Extra LFOs make no signal.
 pub const MAX_LFOS: usize = 8;
 
+/// The most note-emitting nodes a patch can run: MIDI inputs and arpeggiators together, counted in
+/// graph order the same way `MAX_LFOS` and `MAX_ENVELOPES` are. A node past this many feeds nothing
+/// downstream, the same as an LFO or envelope past its own limit.
+pub const MAX_NOTE_SOURCES: usize = 8;
+
 /// Where a control signal comes from. The indices are bytes, since every route carries a source
 /// and a patch holds many routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

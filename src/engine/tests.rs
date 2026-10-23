@@ -13,8 +13,9 @@ use crate::patch::stage::{
 use crate::patch::EnvelopeSettings;
 use std::sync::OnceLock;
 
-/// The wavetables are slow to build, so every test shares one set.
-fn tables() -> Arc<WaveTables> {
+/// The wavetables are slow to build, so every test shares one set. `pub(super)` so other test
+/// modules under `engine` can share it too.
+pub(super) fn tables() -> Arc<WaveTables> {
     static TABLES: OnceLock<Arc<WaveTables>> = OnceLock::new();
     TABLES.get_or_init(|| Arc::new(WaveTables::new())).clone()
 }
@@ -31,7 +32,7 @@ fn patch_with(slot: usize, stages: &[StageSpec]) -> Patch {
 }
 
 /// An engine that has begun a block on `patch`.
-fn engine_on(patch: &Patch) -> Engine {
+pub(super) fn engine_on(patch: &Patch) -> Engine {
     let mut engine = Engine::new(tables());
     engine.begin_block(patch, Transport::default());
     engine
@@ -55,15 +56,18 @@ fn newest(engine: &Engine) -> &Voice {
 }
 
 /// The left channel of `samples` frames. A patch with nothing panned sounds the same on both.
-fn render(engine: &mut Engine, samples: usize) -> Vec<f32> {
+///
+/// `pub(super)` so the regression tests in `engine::regression_tests` can render through it too,
+/// rather than keeping their own copy.
+pub(super) fn render(engine: &mut Engine, samples: usize) -> Vec<f32> {
     render_stereo(engine, samples).iter().map(|f| f.l).collect()
 }
 
-fn render_stereo(engine: &mut Engine, samples: usize) -> Vec<Frame> {
+pub(super) fn render_stereo(engine: &mut Engine, samples: usize) -> Vec<Frame> {
     (0..samples).map(|n| engine.process_sample(n)).collect()
 }
 
-fn peak(samples: &[f32]) -> f32 {
+pub(super) fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0, |peak, s| f32::max(peak, s.abs()))
 }
 
