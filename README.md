@@ -12,7 +12,7 @@ describe a sound by wiring small pieces together instead of filling in one big p
 see how everything connects. See [docs/nodes.md](docs/nodes.md#where-the-idea-comes-from) for more
 on that, and the full node reference.
 
-![Dusk Pad, a patch with macro knobs driving a filter and a reverb](docs/images/dusk-pad.png)
+![Cascade, a chord chained into an arpeggiator so one held note becomes a running line](docs/images/cascade.png)
 
 ## Install
 
@@ -53,7 +53,7 @@ Click the key strip at the bottom of the editor to play notes, in the plugin and
 app, or press play from your DAW. The docs below cover everything else: the full node list, wiring
 and editing gestures, keyboard shortcuts, groups, and presets.
 
-![The Reese preset, a mono bass with an LFO on the filter](docs/images/reese.png)
+![The starting graph: a MIDI Input, an Envelope, an Oscillator, and an Output, already wired](docs/images/default-graph.png)
 
 ## Docs
 

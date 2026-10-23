@@ -40,6 +40,11 @@ pub const MAX_ENVELOPES: usize = 8;
 /// One more than `MAX_ENVELOPES`: the bypass envelope that a slot without one plays through.
 pub const ENV_SLOTS: usize = MAX_ENVELOPES + 1;
 
+/// The most Sampler nodes a patch tracks a live playhead for, counted in graph order the same way
+/// `MAX_ENVELOPES` and `MAX_LFOS` are. A Sampler past this many still plays; only its viewer's
+/// cursor goes missing.
+pub const MAX_SAMPLERS: usize = 8;
+
 /// The most map and math nodes a patch can run, together. One past this many makes no signal.
 pub const MAX_SIGNALS: usize = 24;
 
@@ -303,6 +308,9 @@ pub struct ControlLevels {
     pub envelope_phase: [Option<EnvPhase>; MAX_ENVELOPES],
     /// Where each LFO is in its cycle, from 0.0 to 1.0. The viewer on an LFO node shows it.
     pub lfo_phase: [f32; MAX_LFOS],
+    /// Where the newest voice of each Sampler is in its file, from 0.0 to 1.0, or None while no
+    /// voice plays it. The viewer on a Sampler node shows it. No knob reads it.
+    pub sampler_position: [Option<f32>; MAX_SAMPLERS],
 }
 
 impl ControlLevels {

@@ -1022,7 +1022,7 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
             None
         }
     });
-    // An envelope and an LFO also say where their signal is, for the viewer's cursor.
+    // An envelope, an LFO, and a Sampler also say where their signal is, for the viewer's cursor.
     match node.kind {
         NodeKind::Envelope => {
             if let Some(slot) = graph.envelope_index(index) {
@@ -1034,6 +1034,13 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
         NodeKind::Lfo => {
             if let Some(slot) = graph.lfo_index(index) {
                 live = live.with_lfo(levels.lfo_phase[slot], levels.lfo[slot]);
+            }
+        }
+        NodeKind::Sampler => {
+            if let Some(slot) = graph.sampler_index(index) {
+                if let Some(position) = levels.sampler_position[slot] {
+                    live = live.with_sampler(position);
+                }
             }
         }
         _ => {}
@@ -1193,13 +1200,22 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
         }
     }
 
-    // The live signal, as the dot the map's curve also uses.
+    // The live signal. A waveform shows it as a sweeping playhead line; every other shape as the
+    // dot the map's curve also uses.
     if let Some((x, y)) = trace.cursor {
-        let dot = Point::new(
-            bounds.x + x.clamp(0.0, 1.0) * bounds.width,
-            bounds.y + (1.0 - y.clamp(0.0, 1.0)) * bounds.height,
-        );
-        frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
+        let x = bounds.x + x.clamp(0.0, 1.0) * bounds.width;
+        if trace.cursor_line {
+            frame.stroke(
+                &Path::line(
+                    Point::new(x, bounds.y),
+                    Point::new(x, bounds.y + bounds.height),
+                ),
+                Stroke::default().with_color(PLAYHEAD_COLOR).with_width(1.5),
+            );
+        } else {
+            let dot = Point::new(x, bounds.y + (1.0 - y.clamp(0.0, 1.0)) * bounds.height);
+            frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
+        }
     }
 }
 

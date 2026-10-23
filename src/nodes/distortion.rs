@@ -5,7 +5,7 @@ use crate::dsp::effects::distortion::DistortionKind;
 
 pub struct Distortion;
 
-const TYPE_LABELS: [&str; 5] = ["Soft", "Hard", "Tube", "Fold", "Crush"];
+const TYPE_LABELS: [&str; 6] = ["Soft", "Hard", "Tube", "Fold", "Crush", "Overdrive"];
 
 impl NodeBehavior for Distortion {
     fn title(&self) -> &'static str {

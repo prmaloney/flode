@@ -42,16 +42,21 @@ pub enum DistortionKind {
     Fold,
     /// Bit depth and sample rate reduction. Drive sets how coarse it gets.
     Crush,
+    /// A diode-style soft clip. It has a gentler knee than `Soft`, so it starts to compress
+    /// earlier and stays warmer at high drive. It adds odd harmonics.
+    Overdrive,
 }
 
 impl DistortionKind {
-    /// Every kind, in the order the dropdown lists them.
-    pub const ALL: [DistortionKind; 5] = [
+    /// Every kind, in the order the dropdown lists them. New kinds go at the end, because patches
+    /// store the dropdown row.
+    pub const ALL: [DistortionKind; 6] = [
         DistortionKind::Soft,
         DistortionKind::Hard,
         DistortionKind::Tube,
         DistortionKind::Fold,
         DistortionKind::Crush,
+        DistortionKind::Overdrive,
     ];
 }
 
@@ -116,6 +121,11 @@ fn tube(u: f32) -> f32 {
     (u + TUBE_BIAS).tanh() - TUBE_BIAS.tanh()
 }
 
+/// The Overdrive curve. An exponential soft clip, odd-symmetric so it makes no DC.
+fn overdrive(u: f32) -> f32 {
+    (1.0 - (-u.abs()).exp()).copysign(u)
+}
+
 /// A triangle wavefolder. It is the identity inside [-1, 1] and reflects back at each edge.
 fn fold(u: f32) -> f32 {
     ((u - 1.0).rem_euclid(4.0) - 2.0).abs() - 1.0
@@ -128,6 +138,7 @@ fn shape(kind: DistortionKind, u: f32) -> f32 {
         DistortionKind::Hard => u.clamp(-1.0, 1.0),
         DistortionKind::Tube => tube(u),
         DistortionKind::Fold => fold(u),
+        DistortionKind::Overdrive => overdrive(u),
         DistortionKind::Crush => u,
     }
 }
@@ -137,6 +148,7 @@ fn peak(kind: DistortionKind, gain: f32) -> f32 {
     match kind {
         DistortionKind::Soft => gain.tanh(),
         DistortionKind::Tube => tube(gain).abs().max(tube(-gain).abs()),
+        DistortionKind::Overdrive => overdrive(gain),
         DistortionKind::Hard | DistortionKind::Fold | DistortionKind::Crush => 1.0,
     }
 }
@@ -538,6 +550,18 @@ mod tests {
     }
 
     #[test]
+    fn overdrive_makes_odd_harmonics_and_knees_softer_than_soft() {
+        let out = tone_run(&params(DistortionKind::Overdrive, 0.5), 0.9);
+        let fund = bin_amp(&out, 48);
+        assert!(bin_amp(&out, 144) > 0.05 * fund, "third harmonic");
+        assert!(bin_amp(&out, 96) < 1e-3 * fund, "second harmonic");
+        // Below the knee it compresses earlier than tanh does.
+        assert!(overdrive(0.5) < 0.5f32.tanh());
+        assert_eq!(overdrive(-0.7), -overdrive(0.7));
+        assert_eq!(overdrive(0.0), 0.0);
+    }
+
+    #[test]
     fn the_fold_curve_reflects_at_each_edge() {
         assert_eq!(fold(0.5), 0.5);
         assert_eq!(fold(-0.5), -0.5);
@@ -752,7 +776,7 @@ mod tests {
         let mut fx = Distortion::new(44100.0);
         for (n, &x) in input.iter().enumerate() {
             let p = DistortionParams {
-                kind: DistortionKind::ALL[n % 5],
+                kind: DistortionKind::ALL[n % DistortionKind::ALL.len()],
                 drive: (n % 2) as f32,
                 tone: ((n / 3) % 2) as f32,
                 level_db: -60.0 * ((n / 7) % 2) as f32,
@@ -863,6 +887,7 @@ mod tests {
             DistortionKind::Hard,
             DistortionKind::Tube,
             DistortionKind::Fold,
+            DistortionKind::Overdrive,
         ] {
             let p = params(kind, 1.0);
             let oversampled = run(sample_rate, &p, &input)[period..].to_vec();

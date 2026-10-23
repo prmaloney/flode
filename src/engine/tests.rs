@@ -683,6 +683,42 @@ fn the_engine_reports_the_envelope_stage() {
     assert_eq!(engine.levels().envelope_phase[0], Some(EnvPhase::Release));
 }
 
+/// The engine reports where each Sampler's newest voice sits in its file, as a fraction of its
+/// length, and nothing while no voice plays it or once a non-looping voice has run off the end.
+#[test]
+fn the_engine_reports_the_sampler_position() {
+    use crate::dsp::sample::SampleData;
+    use crate::nodes::sampler::LoopMode;
+    use crate::patch::stage::SamplerParams;
+
+    let data = Arc::new(SampleData {
+        sample_rate: 44100.0,
+        channels: 1,
+        frames: vec![0.0; 1000],
+    });
+    let sampler = StageSpec::new(StageParams::Sampler(SamplerParams {
+        data: Some(data),
+        pitch_tracking: false,
+        loop_mode: LoopMode::Off,
+        sampler_slot: Some(0),
+        ..SamplerParams::default()
+    }));
+    let mut engine = engine_on(&patch_with(0, &[sampler]));
+    render(&mut engine, 16);
+    assert_eq!(engine.levels().sampler_position[0], None);
+
+    // At the file's own speed, one output sample reads one file frame, so 400 samples in the
+    // voice sits at 40% through the 1000-frame file.
+    engine.note_on(60, 1.0);
+    render(&mut engine, 400);
+    let position = engine.levels().sampler_position[0].expect("a voice plays");
+    assert!((position - 0.4).abs() < 0.01, "{position}");
+
+    // Once it runs off the end, with no loop, the position goes missing again.
+    render(&mut engine, 700);
+    assert_eq!(engine.levels().sampler_position[0], None);
+}
+
 /// The engine reports where each LFO is in its cycle.
 #[test]
 fn the_engine_reports_the_lfo_phase() {

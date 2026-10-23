@@ -8,8 +8,13 @@
 //! The other tests check every preset on its own: it loads without losing a wire, it makes sound
 //! at a sane level, it fits the editor window, and it takes its notes from a MIDI input.
 
+mod arp_pluck;
 mod bell_lead;
+mod cascade;
+mod chord_stab;
+mod chord_swell;
 mod dusk_pad;
+mod hollow_sub;
 mod pulse_lead;
 mod reese;
 mod sub_bass;
@@ -37,10 +42,15 @@ pub(super) fn all() -> Vec<Preset> {
         filed("Bass", sub_bass::build()),
         filed("Bass", reese::build()),
         filed("Bass", wobble_riot::build()),
+        filed("Bass", hollow_sub::build()),
         filed("Lead", pulse_lead::build()),
         filed("Lead", bell_lead::build()),
+        filed("Lead", arp_pluck::build()),
+        filed("Lead", chord_stab::build()),
+        filed("Lead", cascade::build()),
         filed("Pad", warm_pad::build()),
         filed("Pad", dusk_pad::build()),
+        filed("Pad", chord_swell::build()),
     ]
 }
 
@@ -287,13 +297,13 @@ mod tests {
     #[test]
     fn the_presets_have_distinct_clean_names() {
         let presets = all();
-        assert_eq!(presets.len(), 7);
+        assert_eq!(presets.len(), 12);
         for (index, preset) in presets.iter().enumerate() {
             assert!(!preset.name.is_empty() && preset.name == preset.name.trim());
             assert!(presets[..index].iter().all(|p| p.name != preset.name));
         }
-        // Three basses, two leads, two pads, each filed in the folder that names it.
-        for (kind, expected) in [("Bass", 3), ("Lead", 2), ("Pad", 2)] {
+        // Four basses, five leads, three pads, each filed in the folder that names it.
+        for (kind, expected) in [("Bass", 4), ("Lead", 5), ("Pad", 3)] {
             let count = presets.iter().filter(|p| p.category == kind).count();
             assert_eq!(count, expected, "{kind}");
         }
@@ -310,19 +320,34 @@ mod tests {
         }
     }
 
-    /// Every oscillator takes its notes from a MIDI input, and the preset plays.
+    /// True if `node`'s Notes pin traces back to a MIDI input, following an arpeggiator or a
+    /// chord node as far back as it needs to. A cycle cannot happen in a preset we built by hand,
+    /// but the guard keeps this from looping forever if one ever did.
+    fn traces_back_to_a_midi_input(graph: &Graph, node: usize, depth: usize) -> bool {
+        if depth > graph.nodes.len() {
+            return false;
+        }
+        graph.connections.iter().any(|c: &Connection| {
+            c.to == node
+                && c.input == Port::Notes
+                && (graph.nodes[c.from].kind == NodeKind::Input
+                    || traces_back_to_a_midi_input(graph, c.from, depth + 1))
+        })
+    }
+
+    /// Every oscillator takes its notes from a MIDI input, whether directly or through a chain of
+    /// note sources such as an arpeggiator or a chord, and the preset plays.
     #[test]
     fn every_preset_is_wired_to_play() {
         for preset in presets() {
             let graph = loaded(&preset);
             for (index, node) in graph.nodes.iter().enumerate() {
                 if node.kind == NodeKind::Oscillator {
-                    let fed = graph.connections.iter().any(|c: &Connection| {
-                        c.to == index
-                            && c.input == Port::Notes
-                            && graph.nodes[c.from].kind == NodeKind::Input
-                    });
-                    assert!(fed, "{}: oscillator {index} has no MIDI input", preset.name);
+                    assert!(
+                        traces_back_to_a_midi_input(&graph, index, 0),
+                        "{}: oscillator {index} has no MIDI input",
+                        preset.name
+                    );
                 }
             }
             assert!(graph.patch().lanes[0].is_active(), "{}", preset.name);

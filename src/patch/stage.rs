@@ -84,6 +84,10 @@ pub struct SamplerParams {
     /// The note-source slot that feeds this sampler, if its notes pin is wired to one. See
     /// `OscillatorParams.notes`.
     pub notes: Option<usize>,
+    /// This Sampler's place among the Sampler nodes in graph order, or None past the Samplers the
+    /// engine tracks a playhead for. Used only to report the newest voice's position back to the
+    /// viewer; it plays either way.
+    pub sampler_slot: Option<usize>,
     /// The root key: the MIDI note the file plays back at its recorded pitch.
     pub root: Param,
     /// True to change playback speed with the note. False always plays at the file's own speed.
@@ -115,6 +119,7 @@ impl PartialEq for SamplerParams {
         same_data
             && self.envelope == other.envelope
             && self.notes == other.notes
+            && self.sampler_slot == other.sampler_slot
             && self.root == other.root
             && self.pitch_tracking == other.pitch_tracking
             && self.start == other.start
@@ -134,6 +139,7 @@ impl Default for SamplerParams {
             data: None,
             envelope: None,
             notes: None,
+            sampler_slot: None,
             root: Param::default_of(KnobId::SamplerRoot),
             pitch_tracking: true,
             start: Param::default_of(KnobId::SamplerStart),

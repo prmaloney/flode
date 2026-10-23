@@ -35,9 +35,9 @@ Flode is not affiliated with Blender or the Blender Foundation.
   with Loop start and Loop end marking the region. Reverse plays the file backward. Gated, the
   default, stops on note off through the same envelope every other source uses; One shot ignores
   note off and plays through to the end or loops forever. The viewer draws the loaded waveform with
-  the Start, Loop start, and Loop end positions marked on it, live as the knobs move. Like an
-  oscillator, a Sampler is silent until a MIDI input or a note-routing node is wired to its Notes
-  pin.
+  the Start, Loop start, and Loop end positions marked on it, live as the knobs move, plus a
+  playhead line that sweeps across it while a voice is sounding. Like an oscillator, a Sampler is
+  silent until a MIDI input or a note-routing node is wired to its Notes pin.
 - **Envelope, LFO and Map.** An envelope shapes an oscillator's amplitude or drives any knob. Its
   curve has three handles you can drag. The first sets Attack, the second sets Decay sideways and
   Sustain up and down, and the third sets Release. They turn the same knobs, so a knob or a control
@@ -80,7 +80,7 @@ Flode is not affiliated with Blender or the Blender Foundation.
   edge while the near channel stays at unity. Both knobs have pins. A move of a knob or a click on
   Invert eases over about 10 ms, so it does not click. Like a filter, it runs once per voice, and
   after an effect it runs once on the summed voices, where you can have four.
-- **Effects.** Distortion (soft, hard, tube, fold, crush), compressor with a multiband mode,
+- **Effects.** Distortion (soft, hard, tube, fold, crush, overdrive), compressor with a multiband mode,
   reverb, delay with tempo sync and ping pong, chorus, phaser, and flanger.
 - **EQ.** Four bands on a graph. Drag a point to set that band's frequency (left and right) and
   gain (up and down). Each band also has a folded section with Freq, Gain and Q knobs, which are
@@ -205,5 +205,5 @@ bottom right. `Tab` switches between them, everywhere, including inside an open 
   `Shift+A`, `Shift+D`, `Shift+G`, and `Shift+Alt+G` are unchanged in both modes, since holding
   Shift already kept them off the piano's keys.
 
-**Presets.** The Presets button saves and loads whole patches, sorted into categories. See
-[Presets](presets.md).
+**Presets.** The Presets row of the burger menu saves and loads whole patches, sorted into
+categories. See [Presets](presets.md).

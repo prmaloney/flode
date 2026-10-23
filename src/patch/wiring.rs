@@ -5,7 +5,7 @@
 
 use super::control::{
     ControlLevels, KnobValue, MapNode, MapValue, MathNode, Param, Route, SignalNode, SignalTable,
-    Source, MAX_ENVELOPES, MAX_LFOS, MAX_NOTE_SOURCES,
+    Source, MAX_ENVELOPES, MAX_LFOS, MAX_NOTE_SOURCES, MAX_SAMPLERS,
 };
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
@@ -345,6 +345,16 @@ impl<'a> Wiring<'a> {
         (index < MAX_LFOS).then_some(index)
     }
 
+    /// The index of a Sampler among the Sampler nodes in graph order, or None past the Samplers
+    /// the engine tracks a playhead for.
+    pub fn sampler_index(&self, node: usize) -> Option<usize> {
+        let index = self.nodes[..node]
+            .iter()
+            .filter(|n| n.kind == NodeKind::Sampler)
+            .count();
+        (index < MAX_SAMPLERS).then_some(index)
+    }
+
     /// The LFOs the audio thread runs, in graph order.
     pub fn lfo_settings(&self) -> [Option<LfoSettings>; MAX_LFOS] {
         let mut out = [None; MAX_LFOS];
@@ -604,6 +614,7 @@ impl<'a> Wiring<'a> {
                 data: n.sample.clone(),
                 envelope: self.amp_envelope(node),
                 notes: self.notes_source(node),
+                sampler_slot: self.sampler_index(node),
                 root: knob(KnobId::SamplerRoot),
                 pitch_tracking: sampler::pitch_tracking(n),
                 start: knob(KnobId::SamplerStart),

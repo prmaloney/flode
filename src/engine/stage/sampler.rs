@@ -27,6 +27,15 @@ pub struct SamplerState {
     finished: bool,
 }
 
+impl SamplerState {
+    /// Where this voice is in the file, from 0.0 to 1.0, or None once it has finished (a one-shot
+    /// run off the end) or the file is empty. The viewer's playhead uses this; nothing in the
+    /// signal path reads it.
+    pub(crate) fn fraction(&self, len: f32) -> Option<f32> {
+        (!self.finished && len > 0.0).then(|| (self.position / len).clamp(0.0, 1.0))
+    }
+}
+
 #[cfg(test)]
 impl SamplerState {
     pub fn position(&self) -> f32 {

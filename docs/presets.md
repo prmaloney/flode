@@ -19,8 +19,9 @@ existing file replaces that preset. Canceling the dialog does nothing.
 
 ![The presets menu with the Pad submenu open](images/presets-menu.png)
 
-Six factory presets are built in code in `src/editor/factory/`: Sub Bass and Reese, Pulse Lead and
-Bell Lead, Warm Pad and Dusk Pad. To write them into your preset folder:
+Twelve factory presets are built in code in `src/editor/factory/`: Sub Bass, Reese, Wobble Riot,
+and Hollow Sub in Bass; Pulse Lead, Bell Lead, Arp Pluck, Chord Stab, and Cascade in Lead; Warm
+Pad, Dusk Pad, and Chord Swell in Pad. To write them into your preset folder:
 
 ```sh
 cargo test --lib write_factory_presets -- --ignored

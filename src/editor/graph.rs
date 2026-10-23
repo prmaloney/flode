@@ -1379,6 +1379,12 @@ impl Graph {
         self.with_flat(node, |wiring, node| wiring.envelope_index(node))?
     }
 
+    /// The place of a Sampler node among the Samplers the engine tracks a playhead for, or None
+    /// if it is past them.
+    pub(super) fn sampler_index(&self, node: usize) -> Option<usize> {
+        self.with_flat(node, |wiring, node| wiring.sampler_index(node))?
+    }
+
     /// The place of a MIDI input or arpeggiator node among the note sources the audio thread runs,
     /// or None if it is past them.
     pub(super) fn note_source_index(&self, node: usize) -> Option<usize> {

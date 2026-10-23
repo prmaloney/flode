@@ -113,10 +113,15 @@ impl NodeBehavior for Sampler {
             ),
             (live.plain(KnobId::SamplerLoopEnd) / 100.0, Mark::LoopEnd),
         ];
+        let cursor = live
+            .sampler()
+            .map(|position| (position.clamp(0.0, 1.0), 0.5));
         let Some(data) = &node.sample else {
             return Some(Trace {
                 points: vec![0.5; samples],
                 marks,
+                cursor,
+                cursor_line: true,
                 ..Trace::default()
             });
         };
@@ -138,6 +143,8 @@ impl NodeBehavior for Sampler {
             points,
             marks,
             fill: true,
+            cursor,
+            cursor_line: true,
             ..Trace::default()
         })
     }
@@ -239,5 +246,48 @@ mod tests {
         });
         let moved = Sampler.trace(&node, &driven, 16).unwrap();
         assert!((moved.marks[2].0 - 0.5).abs() < 1e-3);
+    }
+
+    /// With nothing playing, there is no cursor, loaded or not.
+    #[test]
+    fn there_is_no_cursor_without_a_live_voice() {
+        assert_eq!(
+            Sampler
+                .trace(&sampler(), &Live::of(&sampler()), 16)
+                .unwrap()
+                .cursor,
+            None
+        );
+        let mut node = sampler();
+        node.sample = Some(Arc::new(SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: vec![0.0; 100],
+        }));
+        assert_eq!(
+            Sampler.trace(&node, &Live::of(&node), 16).unwrap().cursor,
+            None
+        );
+    }
+
+    /// A live voice's position sits across the box at its fraction through the file, vertically
+    /// centered since the viewer is a waveform, not an amplitude trace. It draws as a line, not a
+    /// dot, since a dot would sit lost in the middle of the shape.
+    #[test]
+    fn the_cursor_sits_at_the_live_fraction_and_draws_as_a_line() {
+        let node = sampler();
+        let live = Live::of(&node).with_sampler(0.4);
+        let trace = Sampler.trace(&node, &live, 16).unwrap();
+        assert_eq!(trace.cursor, Some((0.4, 0.5)));
+        assert!(trace.cursor_line);
+    }
+
+    /// The cursor clamps into the box even if the engine ever reported a position outside it.
+    #[test]
+    fn the_cursor_clamps_to_the_box() {
+        let node = sampler();
+        let live = Live::of(&node).with_sampler(1.5);
+        let trace = Sampler.trace(&node, &live, 16).unwrap();
+        assert_eq!(trace.cursor, Some((1.0, 0.5)));
     }
 }

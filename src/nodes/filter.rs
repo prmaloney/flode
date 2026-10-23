@@ -90,6 +90,7 @@ impl Filter {
             marks: Vec::new(),
             fill: true,
             cursor: None,
+            cursor_line: false,
         }
     }
 }

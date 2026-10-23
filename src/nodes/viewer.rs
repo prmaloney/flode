@@ -29,6 +29,10 @@ pub struct Trace {
     /// the box and a height, both from 0.0 to 1.0. A kind sets it only while it has a signal to
     /// show, so the dot is absent when nothing plays.
     pub cursor: Option<(f32, f32)>,
+    /// True to draw `cursor` as a full-height vertical line instead of a dot. The Sampler's
+    /// viewer is a waveform, not an amplitude trace, so a line sweeping across it reads as a
+    /// playhead the way a dot would not.
+    pub cursor_line: bool,
 }
 
 /// What a `Trace`'s colored mark points at, for the kinds with more than one to tell apart.
@@ -50,6 +54,7 @@ pub struct Live {
     values: [f32; KnobId::COUNT],
     envelope: Option<(EnvPhase, f32)>,
     lfo: Option<(f32, f32)>,
+    sampler: Option<f32>,
 }
 
 impl Live {
@@ -63,6 +68,7 @@ impl Live {
             values,
             envelope: None,
             lfo: None,
+            sampler: None,
         }
     }
 
@@ -78,6 +84,12 @@ impl Live {
         self
     }
 
+    /// Adds where a Sampler's newest playing voice is in its file, from 0.0 to 1.0.
+    pub fn with_sampler(mut self, position: f32) -> Self {
+        self.sampler = Some(position);
+        self
+    }
+
     /// The envelope's stage and level, while a voice is running it.
     pub fn envelope(&self) -> Option<(EnvPhase, f32)> {
         self.envelope
@@ -86,6 +98,11 @@ impl Live {
     /// The LFO's phase and level.
     pub fn lfo(&self) -> Option<(f32, f32)> {
         self.lfo
+    }
+
+    /// The Sampler's playhead, while a voice is sounding it.
+    pub fn sampler(&self) -> Option<f32> {
+        self.sampler
     }
 
     /// The node's own values, as when nothing drives any knob.

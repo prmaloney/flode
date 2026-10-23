@@ -28,8 +28,10 @@ use crate::dsp::wavetable::WaveTables;
 use crate::nodes::input::{MidiSource, MIDI_SOURCE_COUNT};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::output::MAX_SLOTS;
-use crate::patch::control::{ControlLevels, ENV_SLOTS, MAX_ENVELOPES, MAX_NOTE_SOURCES};
-use crate::patch::stage::MAX_STAGES;
+use crate::patch::control::{
+    ControlLevels, ENV_SLOTS, MAX_ENVELOPES, MAX_NOTE_SOURCES, MAX_SAMPLERS,
+};
+use crate::patch::stage::{StageParams, MAX_STAGES};
 use crate::patch::{NoteSourceSpec, Patch};
 use arpeggiator::Arpeggiators;
 use chord::Chords;
@@ -38,7 +40,7 @@ use lane::Lane;
 use lfo::Lfos;
 use nih_plug::util;
 use notes::{HeldNotes, NoteBuffer};
-use stage::{start_arena, StartContext, MAX_DELAY_LINES};
+use stage::{start_arena, StageState, StartContext, MAX_DELAY_LINES};
 use std::sync::Arc;
 use voice::{RenderEnv, Voice};
 
@@ -75,6 +77,9 @@ pub struct Engine {
     env_levels: [f32; MAX_ENVELOPES],
     /// The stage of each envelope's newest voice, or None with no voice. The editor shows it.
     env_phases: [Option<EnvPhase>; MAX_ENVELOPES],
+    /// Where each Sampler's newest active voice is in its file, or None while none plays it. The
+    /// editor's viewer shows it as the playhead.
+    sampler_positions: [Option<f32>; MAX_SAMPLERS],
     /// True while any envelope node is in the patch. Then the amplitude is the envelopes' job.
     envelopes_active: bool,
     age_counter: u64,
@@ -122,6 +127,7 @@ impl Engine {
             env_configs: [AdsrConfig::BYPASS; ENV_SLOTS],
             env_levels: [0.0; MAX_ENVELOPES],
             env_phases: [None; MAX_ENVELOPES],
+            sampler_positions: [None; MAX_SAMPLERS],
             envelopes_active: false,
             age_counter: 0,
             master_gain: 0.0,
@@ -173,6 +179,7 @@ impl Engine {
             macros: self.macro_levels,
             envelope_phase: self.env_phases,
             lfo_phase: self.lfos.phases(),
+            sampler_position: self.sampler_positions,
             ..ControlLevels::default()
         };
         // The map and math nodes read the sources, so they come last.
@@ -469,6 +476,12 @@ impl Engine {
         let mut newest_age = [0u64; MAX_ENVELOPES];
         let mut newest_level = [0.0f32; MAX_ENVELOPES];
         let mut newest_phase = [None; MAX_ENVELOPES];
+        // Unlike the envelope copies above, which every voice carries one of per patch, a Sampler
+        // stage only exists in the voices of the one lane it was placed in. So the newest-active
+        // voice per slot is tracked across lanes the same way, but only a Sampler's own lane ever
+        // updates its slot.
+        let mut newest_sampler_age = [0u64; MAX_SAMPLERS];
+        let mut newest_sampler_position: [Option<f32>; MAX_SAMPLERS] = [None; MAX_SAMPLERS];
         let mut out = Frame::SILENT;
         for (lane, graph) in self.lanes.iter_mut().zip(&self.patch.lanes) {
             if !graph.is_active() {
@@ -495,6 +508,22 @@ impl Engine {
                         newest_age[index] = voice.age;
                         newest_level[index] = voice.envs[index].level;
                         newest_phase[index] = Some(voice.envs[index].phase);
+                    }
+                }
+                for (stage_index, spec) in graph.stages.iter().enumerate() {
+                    let StageParams::Sampler(p) = &spec.params else {
+                        continue;
+                    };
+                    let Some(slot) = p.sampler_slot else { continue };
+                    let StageState::Sampler(state) = &voice.stages[stage_index] else {
+                        continue;
+                    };
+                    let len = p.data.as_ref().map_or(0.0, |d| d.len() as f32);
+                    if let Some(fraction) = state.fraction(len) {
+                        if voice.age > newest_sampler_age[slot] {
+                            newest_sampler_age[slot] = voice.age;
+                            newest_sampler_position[slot] = Some(fraction);
+                        }
                     }
                 }
                 voice.glide(self.glide_coef);
@@ -524,6 +553,7 @@ impl Engine {
         }
         self.env_levels = newest_level;
         self.env_phases = newest_phase;
+        self.sampler_positions = newest_sampler_position;
 
         self.lfos.advance(
             &self.patch.lfos,

@@ -175,6 +175,7 @@ impl NodeBehavior for Envelope {
             cursor: live
                 .envelope()
                 .map(|(phase, level)| cursor_at(phase, level, ends, sustain)),
+            cursor_line: false,
         })
     }
 }
