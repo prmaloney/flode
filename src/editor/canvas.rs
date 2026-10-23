@@ -237,6 +237,10 @@ impl<'a> NodeEditor<'a> {
                     self.place(NodeKind::Oscillator, point);
                     return (event::Status::Captured, Some(Message::GraphChanged));
                 }
+                Some(BurgerRow::AddSampler) => {
+                    self.place(NodeKind::Sampler, point);
+                    return (event::Status::Captured, Some(Message::GraphChanged));
+                }
                 Some(BurgerRow::Category(category)) => {
                     self.graph.burger_menu = true;
                     if open_category != Some(category) {
@@ -437,6 +441,14 @@ impl<'a> NodeEditor<'a> {
             if let Some(which) = node.dropdown_at(point) {
                 self.graph.select(index);
                 self.graph.dropdown_menu = Some((index, which));
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            if node
+                .sample_button_bounds()
+                .is_some_and(|bounds| bounds.contains(point))
+            {
+                self.graph.select(index);
+                self.graph.start_sampler_dialog(index);
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
             if node.bounds().contains(point) {

@@ -13,6 +13,7 @@ pub mod monitor;
 pub mod noise;
 pub mod pitch;
 pub mod rng;
+pub mod sample;
 pub mod svf;
 pub mod warp;
 pub mod wavetable;

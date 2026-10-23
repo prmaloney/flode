@@ -10,7 +10,7 @@ use super::control::{
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
-    PhaserParams, ReverbParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
+    PhaserParams, ReverbParams, SamplerParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
 use super::{
     ArpeggiatorSettings, ChordSettings, EnvelopeSettings, Globals, LfoSettings, NoteSourceSpec,
@@ -19,6 +19,7 @@ use super::{
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
+use crate::nodes::sampler;
 use crate::nodes::{
     arpeggiator, chord, compressor, delay, distortion, eq, filter, gain, input, lfo, map, math,
     mix, monitor, oscillator, phaser, Bypass, FlodeNode, NodeKind, Port,
@@ -599,6 +600,21 @@ impl<'a> Wiring<'a> {
                 pan: knob(KnobId::Pan),
                 spread: knob(KnobId::Spread),
             })),
+            NodeKind::Sampler => Some(StageParams::Sampler(SamplerParams {
+                data: n.sample.clone(),
+                envelope: self.amp_envelope(node),
+                notes: self.notes_source(node),
+                root: knob(KnobId::SamplerRoot),
+                pitch_tracking: sampler::pitch_tracking(n),
+                start: knob(KnobId::SamplerStart),
+                loop_mode: sampler::loop_mode(n),
+                loop_start: knob(KnobId::SamplerLoopStart),
+                loop_end: knob(KnobId::SamplerLoopEnd),
+                one_shot: sampler::one_shot(n),
+                reverse: sampler::reverse(n),
+                level: knob(KnobId::OscGain),
+                pan: knob(KnobId::Pan),
+            })),
             NodeKind::Filter => Some(StageParams::Filter(FilterParams {
                 kind: filter::filter_type(n),
                 cutoff: knob(KnobId::Cutoff),
@@ -717,7 +733,7 @@ fn pool_kind(params: &StageParams) -> Option<usize> {
         StageParams::Eq(_) => Some(8),
         StageParams::Monitor(_) => Some(MONITOR_KIND),
         StageParams::Gain(_) => Some(10),
-        StageParams::Oscillator(_) | StageParams::Mix(_) => None,
+        StageParams::Oscillator(_) | StageParams::Sampler(_) | StageParams::Mix(_) => None,
     }
 }
 
@@ -848,16 +864,23 @@ impl<'p> LaneBuilder<'p> {
             }
         }
 
-        // An oscillator plays only the notes wired into it: a MIDI input directly, or a transform
-        // such as an arpeggiator that reads one. With nothing feeding its notes pin it is silent.
-        if wiring.nodes[node].kind == NodeKind::Oscillator && wiring.notes_source(node).is_none() {
+        // An oscillator or a sampler plays only the notes wired into it: a MIDI input directly, or
+        // a transform such as an arpeggiator that reads one. With nothing feeding its notes pin it
+        // is silent.
+        if matches!(
+            wiring.nodes[node].kind,
+            NodeKind::Oscillator | NodeKind::Sampler
+        ) && wiring.notes_source(node).is_none()
+        {
             return None;
         }
 
         let params = wiring.stage_params(node)?;
         if self.notes_slot.is_none() {
-            if let StageParams::Oscillator(osc) = &params {
-                self.notes_slot = osc.notes;
+            match &params {
+                StageParams::Oscillator(osc) => self.notes_slot = osc.notes,
+                StageParams::Sampler(sampler) => self.notes_slot = sampler.notes,
+                _ => {}
             }
         }
 
@@ -1340,7 +1363,11 @@ mod effect_tests {
             let nodes = vec![node(kind)];
             let params = Wiring::new(&nodes, &[]).stage_params(0);
             let is_effect = effects.contains(&kind);
-            assert_eq!(params.is_some_and(|p| p.is_effect()), is_effect, "{kind:?}");
+            assert_eq!(
+                params.as_ref().is_some_and(|p| p.is_effect()),
+                is_effect,
+                "{kind:?}"
+            );
             if is_effect {
                 assert_eq!(params.unwrap().input_count(), 1, "{kind:?}");
                 let ports = nodes[0].input_ports();

@@ -109,6 +109,10 @@ pub struct SavedNode {
     /// from before macros could be renamed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) names: Vec<String>,
+    /// A Sampler node's loaded file. The decoded audio itself is never saved: a load kicks off a
+    /// fresh decode in the background, so a project only remembers which file to reopen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sample_path: Option<std::path::PathBuf>,
 }
 
 /// The graph a group node holds, as saved.
@@ -242,6 +246,7 @@ impl SavedNode {
             inputs: node.inputs.clone(),
             outputs: node.outputs.clone(),
             names: node.names.clone(),
+            sample_path: node.sample_path.clone(),
         }
     }
 
@@ -298,6 +303,7 @@ impl SavedNode {
         }
         node.inputs = self.inputs.clone();
         node.outputs = self.outputs.clone();
+        node.sample_path = self.sample_path.clone();
         if self.kind == NodeKind::Macro {
             for (index, name) in self.names.iter().enumerate() {
                 node.set_macro_name(index, name);

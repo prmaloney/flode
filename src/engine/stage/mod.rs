@@ -9,6 +9,7 @@ mod filter;
 mod gain;
 mod mix;
 mod oscillator;
+mod sampler;
 
 use crate::dsp::delay::DelayLine;
 use crate::dsp::envelope::Adsr;
@@ -23,6 +24,7 @@ pub use filter::{Filter, FilterState};
 pub use gain::Gain;
 pub use mix::{Mix, MixState};
 pub use oscillator::{Oscillator, OscillatorState};
+pub use sampler::{Sampler, SamplerState};
 
 /// The delay lines each voice owns. An FM mix stage takes four at the start of a note, a pair for
 /// each of its two signals, so a voice runs FM on a quarter this many mix stages. A mix past that
@@ -114,6 +116,7 @@ pub enum StageState {
     /// A slot of the arena that holds no stage.
     Empty,
     Oscillator(OscillatorState),
+    Sampler(SamplerState),
     Filter(FilterState),
     Mix(MixState),
     Gain(Utility),
@@ -127,6 +130,7 @@ impl StageState {
     pub fn start(params: &StageParams, ctx: &mut StartContext) -> Self {
         match params {
             StageParams::Oscillator(p) => Self::Oscillator(Oscillator::start(p, ctx)),
+            StageParams::Sampler(p) => Self::Sampler(Sampler::start(p, ctx)),
             StageParams::Filter(p) => Self::Filter(Filter::start(p, ctx)),
             StageParams::Mix(p) => Self::Mix(Mix::start(p, ctx)),
             StageParams::Gain(p) => Self::Gain(Gain::start(p, ctx)),
@@ -147,6 +151,7 @@ impl StageState {
             (StageParams::Oscillator(p), Self::Oscillator(s)) => {
                 Oscillator::process(p, s, inputs, tick)
             }
+            (StageParams::Sampler(p), Self::Sampler(s)) => Sampler::process(p, s, inputs, tick),
             (StageParams::Filter(p), Self::Filter(s)) => Filter::process(p, s, inputs, tick),
             (StageParams::Mix(p), Self::Mix(s)) => Mix::process(p, s, inputs, tick),
             (StageParams::Gain(p), Self::Gain(s)) => Gain::process(p, s, inputs, tick),
@@ -295,7 +300,7 @@ mod tests {
 
     fn lane(stages: &[StageSpec]) -> LaneGraph {
         let mut lane = LaneGraph::silent(Param::default_of(KnobId::Slot1));
-        lane.stages.extend(stages.iter().copied());
+        lane.stages.extend(stages.iter().cloned());
         lane
     }
 

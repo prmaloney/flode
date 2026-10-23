@@ -6,7 +6,7 @@ use crate::editor::piano::{self};
 use crate::nodes::eq;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::map;
-use crate::nodes::viewer::Live;
+use crate::nodes::viewer::{Live, Mark};
 use crate::nodes::{
     Category, FlodeNode, NodeKind, Port, RowShape, Signal, ARROW_CENTER_X, HEADER_HEIGHT,
     ROW_KNOB_DIAMETER, SECTION_HEIGHT, TITLE_INSET,
@@ -658,6 +658,17 @@ pub(super) fn draw_node(
         );
     }
 
+    if let Some(bounds) = node.sample_button_bounds() {
+        let label = node
+            .sample_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Load sample...".to_string());
+        let label = super::menus::shorten(&label);
+        draw_dropdown(frame, bounds, "Sample", &label, false, false, zoom, covered);
+    }
+
     if node.has_curve() {
         draw_map_curve(frame, index, graph, levels);
     }
@@ -1082,6 +1093,37 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
                     ..TEXT_COLOR
                 })
                 .with_width(1.0),
+        );
+    }
+
+    for (position, mark) in &trace.marks {
+        let x = bounds.x + position.clamp(0.0, 1.0) * bounds.width;
+        let color = match mark {
+            Mark::Start => Color {
+                r: 0.4,
+                g: 0.85,
+                b: 0.5,
+                a: 0.9,
+            },
+            Mark::LoopStart => Color {
+                r: 0.95,
+                g: 0.75,
+                b: 0.25,
+                a: 0.9,
+            },
+            Mark::LoopEnd => Color {
+                r: 0.95,
+                g: 0.35,
+                b: 0.35,
+                a: 0.9,
+            },
+        };
+        frame.stroke(
+            &Path::line(
+                Point::new(x, bounds.y),
+                Point::new(x, bounds.y + bounds.height),
+            ),
+            Stroke::default().with_color(color).with_width(1.5),
         );
     }
 
@@ -1695,6 +1737,7 @@ pub(super) fn draw_burger_menu(frame: &mut Frame, graph: &Graph) {
         }
         let label = match row {
             BurgerRow::AddOscillator => format!("Add {}", NodeKind::Oscillator.title()),
+            BurgerRow::AddSampler => format!("Add {}", NodeKind::Sampler.title()),
             BurgerRow::Category(category) => category.label().to_string(),
             // The row names the current preset, cut short to fit.
             BurgerRow::Presets => graph
@@ -1704,7 +1747,7 @@ pub(super) fn draw_burger_menu(frame: &mut Frame, graph: &Graph) {
             BurgerRow::Groups => "Groups".to_string(),
         };
         rect_text(frame, rect, label, TEXT_COLOR);
-        if !matches!(row, BurgerRow::AddOscillator) {
+        if !matches!(row, BurgerRow::AddOscillator | BurgerRow::AddSampler) {
             draw_submenu_arrow_rect(frame, rect);
         }
     }

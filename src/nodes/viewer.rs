@@ -19,12 +19,27 @@ pub struct Trace {
     /// Vertical ticks, as positions across the box from 0.0 to 1.0. An envelope marks where its
     /// stages end, and a filter marks its cutoff.
     pub markers: Vec<f32>,
+    /// Vertical ticks that each carry their own meaning, drawn in a different color per kind so
+    /// several can sit on one trace and still be told apart. The Sampler uses these for its Start
+    /// offset and its two loop points.
+    pub marks: Vec<(f32, Mark)>,
     /// True to shade the area under the shape.
     pub fill: bool,
     /// A dot on the shape that marks where the node's live signal is now, as a position across
     /// the box and a height, both from 0.0 to 1.0. A kind sets it only while it has a signal to
     /// show, so the dot is absent when nothing plays.
     pub cursor: Option<(f32, f32)>,
+}
+
+/// What a `Trace`'s colored mark points at, for the kinds with more than one to tell apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// Where playback starts.
+    Start,
+    /// Where a loop begins.
+    LoopStart,
+    /// Where a loop ends.
+    LoopEnd,
 }
 
 /// A node's knob values as they are now. A knob a control wire drives reads the live value of

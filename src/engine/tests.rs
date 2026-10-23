@@ -27,7 +27,7 @@ fn osc(params: OscillatorParams) -> StageSpec {
 /// A patch that plays `stages` in output slot `slot`.
 fn patch_with(slot: usize, stages: &[StageSpec]) -> Patch {
     let mut patch = Patch::silent();
-    patch.lanes[slot].stages.extend(stages.iter().copied());
+    patch.lanes[slot].stages.extend(stages.iter().cloned());
     patch
 }
 
@@ -982,7 +982,7 @@ fn assert_inverted_scaled_and_panned(dry: &[Frame], out: &[Frame]) {
 #[test]
 fn a_per_voice_gain_inverts_scales_and_pans_a_note() {
     let source = osc(OscillatorParams::default());
-    let dry = play_stereo_through(&[source]);
+    let dry = play_stereo_through(&[source.clone()]);
     let out = play_stereo_through(&[source, gain_stage(6.0, 0.5, true, 0)]);
     assert_inverted_scaled_and_panned(&dry, &out);
 }
@@ -1020,7 +1020,7 @@ fn a_gain_at_its_minimum_is_silent() {
 #[test]
 fn a_neutral_gain_passes_the_signal_through() {
     let source = osc(OscillatorParams::default());
-    let dry = play_stereo_through(&[source]);
+    let dry = play_stereo_through(&[source.clone()]);
     let through = play_stereo_through(&[source, gain_stage(0.0, 0.0, false, 0)]);
     assert_eq!(dry, through);
 }
@@ -1030,7 +1030,7 @@ fn a_neutral_gain_passes_the_signal_through() {
 #[test]
 fn a_gain_move_while_playing_does_not_click() {
     let source = osc(OscillatorParams::default());
-    let loud = patch_with(0, &[source, gain_stage(0.0, 0.0, false, 0)]);
+    let loud = patch_with(0, &[source.clone(), gain_stage(0.0, 0.0, false, 0)]);
     let quiet = patch_with(0, &[source, gain_stage(-40.0, 0.0, false, 0)]);
     let mut engine = engine_on(&loud);
     engine.note_on(60, 1.0);

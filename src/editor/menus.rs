@@ -17,6 +17,10 @@ use super::style::*;
 pub(super) enum BurgerRow {
     /// Adds an oscillator directly, since it is added far more often than anything else.
     AddOscillator,
+    /// Adds a sampler directly. It is a primary sound source the same way an oscillator is, and
+    /// none of the four categories describe what it does, so it sits beside Add Oscillator
+    /// instead of inside one of them.
+    AddSampler,
     /// Opens a category's list of node kinds.
     Category(Category),
     /// Opens the list of presets, with the entry that saves one.
@@ -26,8 +30,9 @@ pub(super) enum BurgerRow {
 }
 
 /// The burger menu's top-level rows, in the order they are drawn.
-pub(super) const BURGER_ROWS: [BurgerRow; 7] = [
+pub(super) const BURGER_ROWS: [BurgerRow; 8] = [
     BurgerRow::AddOscillator,
+    BurgerRow::AddSampler,
     BurgerRow::Category(Category::Midi),
     BurgerRow::Category(Category::Modulation),
     BurgerRow::Category(Category::Effects),
@@ -38,8 +43,8 @@ pub(super) const BURGER_ROWS: [BurgerRow; 7] = [
 
 /// The row Presets sits on, and the one after it where Groups sits. The divider is drawn just
 /// above the Presets row.
-pub(super) const BURGER_PRESETS_ROW: usize = 5;
-pub(super) const BURGER_GROUPS_ROW: usize = 6;
+pub(super) const BURGER_PRESETS_ROW: usize = 6;
+pub(super) const BURGER_GROUPS_ROW: usize = 7;
 
 /// A row of the preset list or of a category's submenu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

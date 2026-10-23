@@ -215,6 +215,7 @@ mod slot_tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             names: Vec::new(),
+            sample_path: None,
         };
         let saved = SavedGraph {
             version: 0,
@@ -264,6 +265,7 @@ mod slot_tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             names: Vec::new(),
+            sample_path: None,
         };
         assert_eq!(
             oscillator::waveform(&legacy.into_node()),
@@ -881,6 +883,7 @@ mod envelope_migration_tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             names: Vec::new(),
+            sample_path: None,
         };
         let saved = SavedGraph {
             version: 0,
@@ -1393,7 +1396,7 @@ mod bypass_and_duplicate_tests {
         for kind in NodeKind::ALL {
             let mut node = FlodeNode::new(kind, Point::new(0.0, 0.0));
             let expected = match kind {
-                NodeKind::Oscillator => crate::nodes::Bypass::Mute,
+                NodeKind::Oscillator | NodeKind::Sampler => crate::nodes::Bypass::Mute,
                 NodeKind::Output
                 | NodeKind::Envelope
                 | NodeKind::Lfo
@@ -7123,5 +7126,294 @@ mod gain_node_tests {
         assert!(NodeKind::ALL.contains(&NodeKind::Gain));
         assert!(Category::Utility.kinds().contains(&NodeKind::Gain));
         assert_eq!(quick_add_results("gain", |_| true), vec![NodeKind::Gain]);
+    }
+}
+
+/// The Sampler's file loading: the dialog, the background decode, save and reload by path, and a
+/// missing or broken file's graceful failure.
+mod sampler_ui_tests {
+    use super::*;
+    use crate::dsp::sample::SampleData;
+    use crate::nodes::sampler;
+    use std::sync::Arc;
+
+    /// A folder for one test's sample files, removed when the test ends.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("flode-sampler-ui-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes a short, valid mono WAV file at `path`.
+    fn write_wav(path: &std::path::Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..100 {
+            writer.write_sample((i * 100) as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn sampler_graph() -> (Graph, usize) {
+        let mut graph = minimal_graph();
+        let node = graph.add_node(NodeKind::Sampler, Point::new(0.0, 0.0));
+        (graph, node)
+    }
+
+    /// Spins on `poll_sampler_loads` until the background decode thread has answered, or panics
+    /// if it takes too long. A tiny file decodes almost instantly, so this never waits long in
+    /// practice.
+    fn wait_for_sample_load(graph: &mut Graph) {
+        for _ in 0..500 {
+            graph.poll_sampler_loads();
+            if graph.sampler_loads.is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the sample load did not finish in time");
+    }
+
+    /// Starting a load decodes a valid file on a background thread and stores the result as an
+    /// `Arc`, with the status line reporting success.
+    #[test]
+    fn a_valid_file_loads_in_the_background_and_is_kept_as_an_arc() {
+        let dir = TempDir::new("valid");
+        let path = dir.0.join("hit.wav");
+        write_wav(&path);
+        let (mut graph, node) = sampler_graph();
+        graph.start_sample_load(node, path.clone());
+        assert_eq!(graph.nodes[node].sample_path, Some(path));
+        wait_for_sample_load(&mut graph);
+        let sample = graph.nodes[node]
+            .sample
+            .as_ref()
+            .expect("the sample loaded");
+        assert_eq!(sample.sample_rate, 44100.0);
+        assert_eq!(sample.channels, 1);
+        assert!(graph.status.as_ref().unwrap().0.contains("Loaded"));
+    }
+
+    /// A missing file fails cleanly: the node stays sample-less and the status line says why,
+    /// without panicking.
+    #[test]
+    fn a_missing_file_fails_cleanly() {
+        let (mut graph, node) = sampler_graph();
+        let missing = std::path::PathBuf::from("/no/such/flode/sample.wav");
+        graph.start_sample_load(node, missing);
+        wait_for_sample_load(&mut graph);
+        assert!(graph.nodes[node].sample.is_none());
+        assert!(graph.status.as_ref().unwrap().0.contains("Could not load"));
+    }
+
+    /// A file that exists but is not a WAV also fails cleanly.
+    #[test]
+    fn a_corrupt_file_fails_cleanly() {
+        let dir = TempDir::new("corrupt");
+        let path = dir.0.join("not-a-wav.wav");
+        std::fs::write(&path, b"not actually a wav file").unwrap();
+        let (mut graph, node) = sampler_graph();
+        graph.start_sample_load(node, path);
+        wait_for_sample_load(&mut graph);
+        assert!(graph.nodes[node].sample.is_none());
+        assert!(graph.status.as_ref().unwrap().0.contains("Could not load"));
+    }
+
+    /// The full dialog sequence: the file picker answers with a path, which starts the decode, and
+    /// the decode's own answer lands on the node.
+    #[test]
+    fn the_dialog_answer_starts_a_load() {
+        let dir = TempDir::new("dialog");
+        let path = dir.0.join("picked.wav");
+        write_wav(&path);
+        let (mut graph, node) = sampler_graph();
+        graph.start_sampler_dialog(node);
+        let sender = graph
+            .sampler_dialog_sender
+            .clone()
+            .expect("the dialog is open");
+        sender.send(Some(path)).unwrap();
+        graph.poll_sampler_dialog();
+        assert!(graph.sampler_dialog.is_none());
+        wait_for_sample_load(&mut graph);
+        assert!(graph.nodes[node].sample.is_some());
+    }
+
+    /// Canceling the dialog starts no load and leaves the node as it was.
+    #[test]
+    fn canceling_the_dialog_starts_no_load() {
+        let (mut graph, node) = sampler_graph();
+        graph.start_sampler_dialog(node);
+        let sender = graph.sampler_dialog_sender.clone().unwrap();
+        sender.send(None).unwrap();
+        graph.poll_sampler_dialog();
+        assert!(graph.sampler_loads.is_empty());
+        assert!(graph.nodes[node].sample_path.is_none());
+    }
+
+    /// Saving keeps the path, the root note, the knobs, the dropdown, and the switches, and
+    /// loading the save starts the decode again, so a fresh load with the file present reloads the
+    /// audio without the user re-browsing for it.
+    #[test]
+    fn save_and_load_round_trip_reloads_a_present_file() {
+        let dir = TempDir::new("roundtrip");
+        let path = dir.0.join("snare.wav");
+        write_wav(&path);
+        let (mut graph, node) = sampler_graph();
+        graph.start_sample_load(node, path.clone());
+        wait_for_sample_load(&mut graph);
+        assert!(graph.nodes[node].sample.is_some());
+
+        let n = &mut graph.nodes[node];
+        n.set_value(KnobId::SamplerRoot, KnobId::SamplerRoot.to_normalized(72.0));
+        n.set_value(
+            KnobId::SamplerStart,
+            KnobId::SamplerStart.to_normalized(10.0),
+        );
+        n.set_value(
+            KnobId::SamplerLoopStart,
+            KnobId::SamplerLoopStart.to_normalized(20.0),
+        );
+        n.set_value(
+            KnobId::SamplerLoopEnd,
+            KnobId::SamplerLoopEnd.to_normalized(80.0),
+        );
+        n.choose(0, 1); // Loop: Forward
+        n.set_switch(0, false); // pitch tracking off
+        n.set_switch(1, true); // one shot
+        n.set_switch(2, true); // reverse
+
+        let json = serde_json::to_string(&graph.to_saved()).unwrap();
+        let mut loaded = Graph::from_saved(&serde_json::from_str(&json).unwrap());
+        let loaded_index = loaded
+            .nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Sampler)
+            .expect("the sampler loads");
+
+        assert_eq!(loaded.nodes[loaded_index].sample_path, Some(path));
+        assert!(
+            loaded.nodes[loaded_index].sample.is_none(),
+            "not yet decoded"
+        );
+        assert!((loaded.nodes[loaded_index].plain(KnobId::SamplerRoot) - 72.0).abs() < 1e-3);
+        assert!((loaded.nodes[loaded_index].plain(KnobId::SamplerStart) - 10.0).abs() < 1e-3);
+        assert!((loaded.nodes[loaded_index].plain(KnobId::SamplerLoopStart) - 20.0).abs() < 1e-3);
+        assert!((loaded.nodes[loaded_index].plain(KnobId::SamplerLoopEnd) - 80.0).abs() < 1e-3);
+        assert_eq!(
+            sampler::loop_mode(&loaded.nodes[loaded_index]),
+            sampler::LoopMode::Forward
+        );
+        assert!(!sampler::pitch_tracking(&loaded.nodes[loaded_index]));
+        assert!(sampler::one_shot(&loaded.nodes[loaded_index]));
+        assert!(sampler::reverse(&loaded.nodes[loaded_index]));
+
+        // The decode `from_saved` started finishes in the background, exactly as a fresh "Load
+        // sample..." click would.
+        wait_for_sample_load(&mut loaded);
+        assert!(loaded.nodes[loaded_index].sample.is_some());
+    }
+
+    /// Loading a save whose file no longer exists leaves the node sample-less and reports the
+    /// failure, naming the node and the path, without panicking or blocking the rest of the patch.
+    #[test]
+    fn from_saved_reports_a_missing_file_without_panicking() {
+        let (mut graph, node) = sampler_graph();
+        let missing = std::path::PathBuf::from("/no/such/flode/sample.wav");
+        graph.nodes[node].sample_path = Some(missing.clone());
+
+        let json = serde_json::to_string(&graph.to_saved()).unwrap();
+        let mut loaded = Graph::from_saved(&serde_json::from_str(&json).unwrap());
+        wait_for_sample_load(&mut loaded);
+
+        let loaded_index = loaded
+            .nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Sampler)
+            .unwrap();
+        assert!(loaded.nodes[loaded_index].sample.is_none());
+        assert!(loaded.status.as_ref().unwrap().0.contains("Could not load"));
+        // The rest of the patch still compiles and plays; a sample-less Sampler is simply silent.
+        let _ = loaded.patch();
+    }
+
+    /// Duplicating a Sampler keeps the same loaded sample, an `Arc` clone, and the same path.
+    #[test]
+    fn duplicate_keeps_the_sample_and_path() {
+        let (mut graph, node) = sampler_graph();
+        let data = Arc::new(SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: vec![0.0; 10],
+        });
+        graph.nodes[node].sample = Some(data.clone());
+        graph.nodes[node].sample_path = Some(std::path::PathBuf::from("/tmp/x.wav"));
+        let copy = graph.nodes[node].duplicate(Point::new(50.0, 50.0));
+        assert!(Arc::ptr_eq(&copy.sample.unwrap(), &data));
+        assert_eq!(copy.sample_path, graph.nodes[node].sample_path);
+    }
+
+    /// Ping-pong looping reverses direction at each loop boundary and never leaves the loop
+    /// region.
+    #[test]
+    fn ping_pong_bounces_within_the_loop() {
+        use crate::dsp::frame::Frame;
+        use crate::engine::stage::testing::Rig;
+        use crate::engine::stage::{AudioStage, Sampler};
+        use crate::nodes::sampler::LoopMode;
+        use crate::patch::control::Param;
+        use crate::patch::stage::{SamplerParams, MAX_INPUTS};
+
+        let data = Arc::new(SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: (0..1000).map(|i| (i + 1) as f32 / 1000.0).collect(),
+        });
+        let p = SamplerParams {
+            data: Some(data),
+            root: Param::fixed(KnobId::SamplerRoot, 69.0),
+            loop_mode: LoopMode::PingPong,
+            loop_start: Param::fixed(KnobId::SamplerLoopStart, 10.0),
+            loop_end: Param::fixed(KnobId::SamplerLoopEnd, 20.0),
+            ..SamplerParams::default()
+        };
+        let mut rig = Rig::new();
+        let mut state = Sampler::start(&p, &mut rig.start_context());
+        let mut saw_backward = false;
+        let mut last = None;
+        for _ in 0..5000 {
+            Sampler::process(
+                &p,
+                &mut state,
+                &[Frame::SILENT; MAX_INPUTS],
+                &mut rig.tick(),
+            );
+            let position = state.position();
+            assert!((95.0..=205.0).contains(&position), "{position}");
+            if let Some(prev) = last {
+                if position < prev {
+                    saw_backward = true;
+                }
+            }
+            last = Some(position);
+        }
+        assert!(saw_backward, "ping-pong never reversed direction");
     }
 }

@@ -32,12 +32,16 @@ pub mod oscillator;
 pub mod output;
 pub mod phaser;
 pub mod reverb;
+pub mod sampler;
 pub mod viewer;
 
+use crate::dsp::sample::SampleData;
 use crate::editor::knob;
 use group::{GroupData, GroupPin};
 use nih_plug_iced::{Point, Rectangle};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
 use viewer::{Live, Trace, TRACE_SAMPLES};
 
 pub use knobs::KnobId;
@@ -130,6 +134,7 @@ pub struct RowPlace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
     Oscillator,
+    Sampler,
     Envelope,
     Filter,
     Lfo,
@@ -218,8 +223,9 @@ impl Category {
 
 impl NodeKind {
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 25] = [
+    pub const ALL: [NodeKind; 26] = [
         NodeKind::Oscillator,
+        NodeKind::Sampler,
         NodeKind::Envelope,
         NodeKind::Filter,
         NodeKind::Lfo,
@@ -269,6 +275,7 @@ impl NodeKind {
     pub fn behavior(self) -> &'static dyn NodeBehavior {
         match self {
             NodeKind::Oscillator => &oscillator::Oscillator,
+            NodeKind::Sampler => &sampler::Sampler,
             NodeKind::Envelope => &envelope::Envelope,
             NodeKind::Filter => &filter::Filter,
             NodeKind::Lfo => &lfo::Lfo,
@@ -423,6 +430,9 @@ pub enum Control {
     Monitor,
     /// The header of section number `n`. The rows after it, up to the next header, fold with it.
     Section(usize),
+    /// A button that opens a file picker. The Sampler uses it to load a sample file; it shows
+    /// "Load sample..." with nothing loaded, or the loaded file's name.
+    LoadSample,
 }
 
 impl Row {
@@ -529,6 +539,11 @@ pub trait NodeBehavior: Sync {
         &[]
     }
 
+    /// Switches this kind starts on, by index. Every switch not named here starts off.
+    fn default_switches(&self) -> &'static [usize] {
+        &[]
+    }
+
     /// The name of each dropdown, indexed the same way as `dropdowns`.
     fn dropdown_names(&self) -> &'static [&'static str] {
         &[]
@@ -619,6 +634,13 @@ pub struct FlodeNode {
     pub names: Vec<String>,
     /// Drag state for each knob.
     pub knob_states: [knob::State; KnobId::COUNT],
+    /// Sampler nodes only. The loaded audio, shared with the compiled patch through an `Arc`, so
+    /// a clone of the patch never copies the samples themselves. Never saved: a save keeps only
+    /// `sample_path`, and a load decodes the file again in the background.
+    pub sample: Option<Arc<SampleData>>,
+    /// Sampler nodes only. The path of the file `sample` was loaded from, or the file a load is
+    /// still decoding. Saved, so a project remembers which file to reload.
+    pub sample_path: Option<PathBuf>,
 }
 
 impl FlodeNode {
@@ -645,11 +667,16 @@ impl FlodeNode {
             group: (kind == NodeKind::Group).then(|| Box::new(GroupData::new("Group"))),
             names: Vec::new(),
             knob_states: std::array::from_fn(|_| Default::default()),
+            sample: None,
+            sample_path: None,
         };
         // A kind can start a knob somewhere other than the knob's own default, such as a
         // distortion that starts fully wet.
         for &(id, plain) in kind.behavior().defaults() {
             node.values[id as usize] = id.to_normalized(plain);
+        }
+        for &index in kind.behavior().default_switches() {
+            node.set_switch(index, true);
         }
         node
     }
@@ -677,6 +704,9 @@ impl FlodeNode {
         copy.outputs = self.outputs.clone();
         copy.group = self.group.as_ref().map(|group| Box::new(group.duplicate()));
         copy.names = self.names.clone();
+        // A duplicate keeps the same loaded sample, an `Arc` clone, and the same path.
+        copy.sample = self.sample.clone();
+        copy.sample_path = self.sample_path.clone();
         copy
     }
 
@@ -705,6 +735,9 @@ impl FlodeNode {
         if let Some(group) = &self.group {
             group.hash_compile_state(state);
         }
+        // What a Sampler plays depends on which file is loaded, not only on its knobs.
+        self.sample.is_some().hash(state);
+        self.sample_path.hash(state);
     }
 
     /// What switching this node off does. A node can only be bypassed if its kind has a bypass.
@@ -1376,6 +1409,25 @@ impl FlodeNode {
     /// True if switch `index` is on show.
     pub fn switch_shown(&self, index: usize) -> bool {
         self.switch_bounds(index).height > 0.0
+    }
+
+    /// The Sampler's "Load sample..." button, centered on its row. None if this kind has no such
+    /// row, or it is folded away.
+    pub fn sample_button_bounds(&self) -> Option<Rectangle> {
+        let rows = self.rows();
+        let index = rows
+            .iter()
+            .position(|row| row.control == Some(Control::LoadSample))?;
+        let place = self.places_of(&rows).get(index).copied()?;
+        if place.shape != RowShape::Full {
+            return None;
+        }
+        Some(Rectangle {
+            x: self.position.x + DROPDOWN_INSET,
+            y: self.position.y + place.y - DROPDOWN_HEIGHT / 2.0,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
+            height: DROPDOWN_HEIGHT,
+        })
     }
 
     /// The collapse arrow's hit area in the header.

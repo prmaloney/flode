@@ -9,11 +9,14 @@ use crate::dsp::effects::eq::{EqKind, BANDS};
 use crate::dsp::mix::MixMode;
 use crate::dsp::monitor::MonitorMode;
 use crate::dsp::noise::NoiseType;
+use crate::dsp::sample::SampleData;
 use crate::dsp::svf::FilterType;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
+use crate::nodes::sampler::LoopMode;
 use arrayvec::ArrayVec;
+use std::sync::Arc;
 
 /// The most stages one output slot can run. A slot with more goes silent.
 pub const MAX_STAGES: usize = 16;
@@ -65,6 +68,82 @@ impl Default for OscillatorParams {
             level: Param::default_of(KnobId::OscGain),
             pan: Param::default_of(KnobId::Pan),
             spread: Param::default_of(KnobId::Spread),
+        }
+    }
+}
+
+/// A sampler stage: a source with no audio inputs, like an oscillator, but reading from a loaded
+/// file instead of a wavetable.
+#[derive(Debug, Clone)]
+pub struct SamplerParams {
+    /// The loaded audio, shared with the editor's copy through an `Arc`, so a patch clone never
+    /// copies the samples themselves. None plays silence.
+    pub data: Option<Arc<SampleData>>,
+    /// The envelope node that shapes this voice's amplitude, if one is wired in.
+    pub envelope: Option<usize>,
+    /// The note-source slot that feeds this sampler, if its notes pin is wired to one. See
+    /// `OscillatorParams.notes`.
+    pub notes: Option<usize>,
+    /// The root key: the MIDI note the file plays back at its recorded pitch.
+    pub root: Param,
+    /// True to change playback speed with the note. False always plays at the file's own speed.
+    pub pitch_tracking: bool,
+    /// Where playback starts on every new note, from 0.0 to 100.0 percent of the file's length.
+    pub start: Param,
+    pub loop_mode: LoopMode,
+    /// The loop's bounds, each from 0.0 to 100.0 percent of the file's length.
+    pub loop_start: Param,
+    pub loop_end: Param,
+    /// True to ignore note off and play through to the end or loop forever. False stops on the
+    /// envelope's release, like an oscillator.
+    pub one_shot: bool,
+    /// True to play the file backward.
+    pub reverse: bool,
+    pub level: Param,
+    pub pan: Param,
+}
+
+impl PartialEq for SamplerParams {
+    /// `SampleData` is large, so instead of comparing its contents, two params are equal only if
+    /// they share the same loaded data, by `Arc` pointer, or both have none.
+    fn eq(&self, other: &Self) -> bool {
+        let same_data = match (&self.data, &other.data) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        same_data
+            && self.envelope == other.envelope
+            && self.notes == other.notes
+            && self.root == other.root
+            && self.pitch_tracking == other.pitch_tracking
+            && self.start == other.start
+            && self.loop_mode == other.loop_mode
+            && self.loop_start == other.loop_start
+            && self.loop_end == other.loop_end
+            && self.one_shot == other.one_shot
+            && self.reverse == other.reverse
+            && self.level == other.level
+            && self.pan == other.pan
+    }
+}
+
+impl Default for SamplerParams {
+    fn default() -> Self {
+        Self {
+            data: None,
+            envelope: None,
+            notes: None,
+            root: Param::default_of(KnobId::SamplerRoot),
+            pitch_tracking: true,
+            start: Param::default_of(KnobId::SamplerStart),
+            loop_mode: LoopMode::Off,
+            loop_start: Param::default_of(KnobId::SamplerLoopStart),
+            loop_end: Param::default_of(KnobId::SamplerLoopEnd),
+            one_shot: false,
+            reverse: false,
+            level: Param::default_of(KnobId::OscGain),
+            pan: Param::default_of(KnobId::Pan),
         }
     }
 }
@@ -225,9 +304,13 @@ pub struct MonitorParams {
 
 /// What kind of stage this is, with its settings. Adding an audio node means adding a variant
 /// here and its implementation in `engine::stage`, or in `engine::effects` for an effect.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `StageParams` holds a `SamplerParams`, which holds an `Option<Arc<SampleData>>`, so the whole
+/// enum can only be `Clone`, not `Copy`. Cloning it is still cheap: every other variant is plain
+/// numbers, and a Sampler's clone is only an `Arc` pointer copy.
+#[derive(Debug, Clone, PartialEq)]
 pub enum StageParams {
     Oscillator(OscillatorParams),
+    Sampler(SamplerParams),
     Filter(FilterParams),
     Mix(MixParams),
     Gain(GainParams),
@@ -246,8 +329,8 @@ impl StageParams {
     /// How many audio inputs the stage reads. The compiler wires that many.
     pub fn input_count(&self) -> usize {
         match self {
-            // An oscillator is a source.
-            StageParams::Oscillator(_) => 0,
+            // An oscillator and a sampler are sources.
+            StageParams::Oscillator(_) | StageParams::Sampler(_) => 0,
             StageParams::Filter(_) => 1,
             StageParams::Mix(_) => 2,
             _ => 1,
@@ -261,6 +344,7 @@ impl StageParams {
         !matches!(
             self,
             StageParams::Oscillator(_)
+                | StageParams::Sampler(_)
                 | StageParams::Filter(_)
                 | StageParams::Mix(_)
                 | StageParams::Gain(_)
@@ -269,7 +353,7 @@ impl StageParams {
 }
 
 /// One stage in a slot's arena, and the stages that feed it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StageSpec {
     pub params: StageParams,
     /// The arena position of the stage on each audio input, or `None` for an input with no wire.
@@ -294,10 +378,11 @@ impl StageSpec {
     /// A stage with nothing wired to its inputs. An effect starts on the bus, and the other kinds
     /// run per voice until `on_bus` moves them.
     pub fn new(params: StageParams) -> Self {
+        let bus = params.is_effect();
         Self {
             params,
             inputs: [None; MAX_INPUTS],
-            bus: params.is_effect(),
+            bus,
             tap: false,
             pool: 0,
         }
@@ -343,7 +428,7 @@ impl Clone for LaneGraph {
     /// Copies the stages one at a time into `self`, with no whole-lane temporary on the stack.
     fn clone_from(&mut self, source: &Self) {
         self.stages.clear();
-        self.stages.extend(source.stages.iter().copied());
+        self.stages.extend(source.stages.iter().cloned());
         self.gain = source.gain;
         self.notes_slot = source.notes_slot;
     }

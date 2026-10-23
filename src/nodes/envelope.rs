@@ -170,6 +170,7 @@ impl NodeBehavior for Envelope {
         Some(Trace {
             points: sample(samples, |x| level_at(x, ends, sustain)),
             markers: ends[..3].to_vec(),
+            marks: Vec::new(),
             fill: true,
             cursor: live
                 .envelope()

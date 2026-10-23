@@ -233,6 +233,8 @@ impl IcedEditor for FlodeEditor {
             }
         }
         self.graph.poll_save_dialog();
+        self.graph.poll_sampler_dialog();
+        self.graph.poll_sampler_loads();
         self.save_pending_preset();
         self.send_macro_edits();
         Command::none()

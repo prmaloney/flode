@@ -305,7 +305,7 @@ impl Effects {
                 }
             }
             // A source never runs on the bus.
-            StageParams::Oscillator(_) => input,
+            StageParams::Oscillator(_) | StageParams::Sampler(_) => input,
         }
     }
 }

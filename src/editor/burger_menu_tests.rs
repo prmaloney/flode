@@ -90,6 +90,7 @@ fn the_top_level_rows_are_in_order() {
         BURGER_ROWS,
         [
             BurgerRow::AddOscillator,
+            BurgerRow::AddSampler,
             BurgerRow::Category(Category::Midi),
             BurgerRow::Category(Category::Modulation),
             BurgerRow::Category(Category::Effects),
@@ -101,7 +102,7 @@ fn the_top_level_rows_are_in_order() {
     for (index, row) in BURGER_ROWS.iter().enumerate() {
         assert_eq!(burger_row_at(row_point(index)), Some(*row), "{index}");
     }
-    // The divider sits between Utility (row 4) and Presets (row 5), and is not itself a row.
+    // The divider sits between Utility and Presets, and is not itself a row.
     let presets = super::menus::burger_row_bounds(BURGER_PRESETS_ROW);
     let gap_point = Point::new(presets.x + 10.0, presets.y - 2.0);
     assert!(burger_list_bounds().contains(gap_point));
@@ -247,8 +248,9 @@ fn categories_hold_the_new_groupings() {
     );
 }
 
-/// Every kind is in exactly one category, except the oscillator, which is a direct row, and the
-/// three group-internal kinds, which appear in no menu at all. The total matches `NodeKind::ALL`.
+/// Every kind is in exactly one category, except the oscillator and the sampler, which are direct
+/// rows, and the three group-internal kinds, which appear in no menu at all. The total matches
+/// `NodeKind::ALL`.
 #[test]
 fn every_kind_is_categorised_or_direct_or_group_internal() {
     let categories = [
@@ -260,7 +262,7 @@ fn every_kind_is_categorised_or_direct_or_group_internal() {
     let mut accounted = 0;
     for kind in NodeKind::ALL {
         let in_category = categories.iter().any(|c| c.kinds().contains(&kind));
-        let direct = kind == NodeKind::Oscillator;
+        let direct = matches!(kind, NodeKind::Oscillator | NodeKind::Sampler);
         let group_internal = kind.is_group_part();
         assert!(
             in_category ^ direct ^ group_internal,
@@ -270,5 +272,5 @@ fn every_kind_is_categorised_or_direct_or_group_internal() {
     }
     assert_eq!(accounted, NodeKind::ALL.len());
     let total: usize = categories.iter().map(|c| c.kinds().len()).sum();
-    assert_eq!(total + 1 + 3, NodeKind::ALL.len());
+    assert_eq!(total + 2 + 3, NodeKind::ALL.len());
 }

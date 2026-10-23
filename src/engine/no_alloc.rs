@@ -8,6 +8,7 @@ use crate::dsp::effects::distortion::DistortionKind;
 use crate::dsp::effects::eq::EqKind;
 use crate::dsp::mix::MixMode;
 use crate::dsp::monitor::MonitorMode;
+use crate::dsp::sample::SampleData;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::arpeggiator::ArpPattern;
@@ -15,16 +16,18 @@ use crate::nodes::chord::ChordType;
 use crate::nodes::eq;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::math::MathOp;
+use crate::nodes::sampler::LoopMode;
 use crate::patch::control::{MapNode, MapValue, MathNode, Param, Source};
 use crate::patch::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
-    PhaserParams, ReverbParams, StageParams, StageSpec,
+    PhaserParams, ReverbParams, SamplerParams, StageParams, StageSpec,
 };
 use crate::patch::{
     ArpeggiatorSettings, ChordSettings, EnvelopeSettings, LfoSettings, NoteSourceSpec,
 };
 use assert_no_alloc::assert_no_alloc;
+use std::sync::Arc;
 
 /// A patch that uses every stage kind: two oscillators with unison, an envelope, noise, a filter
 /// inside one mix branch, a second filter after the mix, and an LFO. Slot 0's notes come from an
@@ -45,6 +48,29 @@ fn busy_patch() -> Patch {
         notes: Some(1),
         ..OscillatorParams::default()
     };
+    // A small sample, built here like `WaveTables::new()`, before the audio thread ever touches
+    // it. The stage only ever holds an `Arc` to it afterward.
+    let sample = Arc::new(SampleData {
+        sample_rate: 44100.0,
+        channels: 2,
+        frames: (0..200)
+            .flat_map(|i| {
+                let v = (i as f32 / 200.0) * 2.0 - 1.0;
+                [v, -v]
+            })
+            .collect(),
+    });
+    let sampler = SamplerParams {
+        data: Some(sample),
+        envelope: Some(0),
+        root: Param::fixed(KnobId::SamplerRoot, 48.0),
+        loop_mode: LoopMode::PingPong,
+        loop_start: Param::fixed(KnobId::SamplerLoopStart, 10.0),
+        loop_end: Param::fixed(KnobId::SamplerLoopEnd, 90.0),
+        reverse: true,
+        ..SamplerParams::default()
+    };
+
     let mut patch = Patch::silent();
     patch.note_sources[0] = Some(NoteSourceSpec::Input);
     patch.note_sources[1] = Some(NoteSourceSpec::Arpeggiator(ArpeggiatorSettings {
@@ -69,6 +95,13 @@ fn busy_patch() -> Patch {
             .with_input(0, 2)
             .with_input(1, 1),
         StageSpec::new(StageParams::Filter(FilterParams::default())).with_input(0, 3),
+        StageSpec::new(StageParams::Sampler(sampler)),
+        StageSpec::new(StageParams::Mix(MixParams {
+            mode: MixMode::Add,
+            amount: Param::fixed(KnobId::Mix, 1.0),
+        }))
+        .with_input(0, 4)
+        .with_input(1, 5),
     ]);
     // A second slot plays a warped, panned saw into two parallel effect chains. One goes through a
     // filter on the bus, and a mix on the bus adds the two. This covers the bus filter and mix.

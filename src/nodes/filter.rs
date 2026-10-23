@@ -87,6 +87,7 @@ impl Filter {
         Trace {
             points,
             markers: vec![position_of(cutoff)],
+            marks: Vec::new(),
             fill: true,
             cursor: None,
         }

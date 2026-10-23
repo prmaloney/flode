@@ -2,6 +2,7 @@
 
 use crate::dsp::analyzer::{BINS, FLOOR_DB};
 use crate::dsp::monitor::MonitorData;
+use crate::dsp::sample::SampleData;
 use crate::editor::monitor::MonitorHistory;
 use crate::editor::piano::Piano;
 use crate::engine::POOL;
@@ -20,7 +21,7 @@ use crate::presets::{self, Library, Preset};
 use nih_plug_iced::keyboard::KeyCode;
 use nih_plug_iced::{Point, Rectangle, Size, Vector};
 use std::path::PathBuf;
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
 use super::group::{FlatCache, OpenGroup};
@@ -257,6 +258,14 @@ impl SaveKind {
     }
 }
 
+/// A sample file decoding in the background: which node asked for it, and the receiving end of
+/// the channel its decode thread sends the result through. The mutex only makes the editor
+/// `Sync`, which the receiver is not.
+pub(super) struct SamplerLoad {
+    node: usize,
+    receiver: Mutex<mpsc::Receiver<Result<Arc<SampleData>, String>>>,
+}
+
 /// Graph state that persists between frames.
 pub struct Graph {
     pub(super) nodes: Vec<FlodeNode>,
@@ -353,6 +362,15 @@ pub struct Graph {
     pub(super) save_dialog_sender: Option<mpsc::Sender<Option<PathBuf>>>,
     /// A line shown under the burger menu for a few seconds, such as "Saved Lead".
     pub(super) status: Option<(String, Instant)>,
+    /// The open file dialog for a Sampler's "Load sample..." button, and which node asked for it.
+    /// The mutex only makes the editor `Sync`, which the receiver is not.
+    pub(super) sampler_dialog: Option<Mutex<mpsc::Receiver<Option<PathBuf>>>>,
+    pub(super) sampler_dialog_node: Option<usize>,
+    /// The other end of `sampler_dialog` in tests, which send the answer through it.
+    #[cfg(test)]
+    pub(super) sampler_dialog_sender: Option<mpsc::Sender<Option<PathBuf>>>,
+    /// Sample files decoding in the background, one per node still waiting on its load.
+    pub(super) sampler_loads: Vec<SamplerLoad>,
     /// The last press on an LFO's viewer, to tell a double click that adds or removes a point.
     pub(super) viewer_click: Option<nih_plug_iced::mouse::Click>,
     /// The groups that are open, outermost first. While one is open, `nodes` and `connections`
@@ -509,6 +527,11 @@ impl Graph {
             #[cfg(test)]
             save_dialog_sender: None,
             status: None,
+            sampler_dialog: None,
+            sampler_dialog_node: None,
+            #[cfg(test)]
+            sampler_dialog_sender: None,
+            sampler_loads: Vec::new(),
             viewer_click: None,
             open_groups: Vec::new(),
             rename: None,
@@ -850,6 +873,151 @@ impl Graph {
                 self.group_save = None;
                 self.say("Could not open the save dialog");
             }
+        }
+    }
+
+    /// Opens the native file picker for a Sampler's "Load sample..." button, on a worker thread,
+    /// filtered to WAV files. The answer arrives on `sampler_dialog` and `poll_sampler_dialog`
+    /// picks it up. Does nothing while a dialog is already open.
+    pub(super) fn start_sampler_dialog(&mut self, node: usize) {
+        if self.sampler_dialog.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        #[cfg(test)]
+        {
+            self.sampler_dialog_sender = Some(sender);
+        }
+        #[cfg(not(test))]
+        {
+            let spawned = std::thread::Builder::new()
+                .name("flode-sampler-dialog".into())
+                .spawn(move || {
+                    let picked = std::panic::catch_unwind(|| {
+                        rfd::FileDialog::new()
+                            .set_title("Load sample")
+                            .add_filter("WAV audio", &["wav", "wave"])
+                            .pick_file()
+                    });
+                    if let Ok(picked) = picked {
+                        let _ = sender.send(picked);
+                    }
+                });
+            if spawned.is_err() {
+                self.say("Could not open the file dialog");
+                return;
+            }
+        }
+        self.sampler_dialog = Some(Mutex::new(receiver));
+        self.sampler_dialog_node = Some(node);
+    }
+
+    /// Collects the file picker's answer, if it has one, and starts decoding the chosen file. A
+    /// cancel does nothing, and a dialog that died is reported.
+    pub(super) fn poll_sampler_dialog(&mut self) {
+        let Some(receiver) = &self.sampler_dialog else {
+            return;
+        };
+        let answer = match receiver.lock() {
+            Ok(receiver) => receiver.try_recv(),
+            Err(_) => Err(mpsc::TryRecvError::Disconnected),
+        };
+        match answer {
+            Ok(Some(path)) => {
+                self.sampler_dialog = None;
+                if let Some(node) = self.sampler_dialog_node.take() {
+                    self.start_sample_load(node, path);
+                }
+            }
+            Ok(None) => {
+                self.sampler_dialog = None;
+                self.sampler_dialog_node = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.sampler_dialog = None;
+                self.sampler_dialog_node = None;
+                self.say("Could not open the file dialog");
+            }
+        }
+    }
+
+    /// Starts decoding `path` for Sampler node `node` on a background thread, so a large file's
+    /// decode never freezes the editor. Sets the node's path right away, so a save made while the
+    /// decode is still running remembers it, and clears any sample the node had, so the viewer
+    /// shows nothing loaded until the decode finishes.
+    pub(super) fn start_sample_load(&mut self, node: usize, path: PathBuf) {
+        let Some(target) = self.nodes.get_mut(node) else {
+            return;
+        };
+        target.sample_path = Some(path.clone());
+        target.sample = None;
+        let (sender, receiver) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("flode-sample-load".into())
+            .spawn(move || {
+                let result = SampleData::load(&path).map(Arc::new);
+                let _ = sender.send(result);
+            });
+        if spawned.is_err() {
+            self.say("Could not load the sample: no thread available");
+            return;
+        }
+        self.sampler_loads.push(SamplerLoad {
+            node,
+            receiver: Mutex::new(receiver),
+        });
+    }
+
+    /// Collects the answers of any sample decodes that have finished, the same way
+    /// `poll_save_dialog` collects a save dialog's answer. A decode that succeeds sets the node's
+    /// `sample`. One that fails, including a missing file, leaves the node sample-less and reports
+    /// the failure on the status line, naming the file. Either way the rest of the patch keeps
+    /// playing.
+    pub(super) fn poll_sampler_loads(&mut self) {
+        let mut done = Vec::new();
+        for (slot, load) in self.sampler_loads.iter().enumerate() {
+            let answer = match load.receiver.lock() {
+                Ok(receiver) => receiver.try_recv(),
+                Err(_) => Err(mpsc::TryRecvError::Disconnected),
+            };
+            match answer {
+                Ok(result) => done.push((slot, load.node, Some(result))),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => done.push((slot, load.node, None)),
+            }
+        }
+        for &(_, node, ref result) in &done {
+            let path = self
+                .nodes
+                .get(node)
+                .and_then(|n| n.sample_path.clone())
+                .unwrap_or_default();
+            match result {
+                Some(Ok(data)) => {
+                    if let Some(n) = self.nodes.get_mut(node) {
+                        n.sample = Some(data.clone());
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.say(format!("Loaded {name}"));
+                }
+                Some(Err(error)) => {
+                    let title = self.nodes.get(node).map(|n| n.title()).unwrap_or("Sampler");
+                    self.say(format!(
+                        "Could not load sample for {title} ({}): {error}",
+                        path.display()
+                    ));
+                }
+                None => {
+                    self.say("Could not load the sample: the loader thread stopped");
+                }
+            }
+        }
+        for &(slot, ..) in done.iter().rev() {
+            self.sampler_loads.remove(slot);
         }
     }
 
@@ -1301,6 +1469,16 @@ impl Graph {
         graph.preset_name = saved.preset_name.clone();
         graph.preset_category = saved.preset_category.clone();
         graph.refresh_slots();
+        // Every Sampler that remembers a file starts loading it again right away, so the sound is
+        // ready without the user re-browsing for it. A missing or broken file leaves the node
+        // sample-less and reports why, without blocking anything else in the patch.
+        for index in 0..graph.nodes.len() {
+            if graph.nodes[index].kind == NodeKind::Sampler {
+                if let Some(path) = graph.nodes[index].sample_path.clone() {
+                    graph.start_sample_load(index, path);
+                }
+            }
+        }
         graph
     }
 

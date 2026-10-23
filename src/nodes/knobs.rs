@@ -125,6 +125,14 @@ pub enum KnobId {
     /// How far a chord's notes climb apart, from 0.0 to 1.0. At 0 every note sits in the chord's
     /// own octave; at 1 each note past the root sits one further octave above the last.
     ChordSpread,
+    /// The Sampler's root key: the MIDI note its loaded file plays back at its recorded pitch.
+    SamplerRoot,
+    /// Where the Sampler starts reading its file on every new note, as a percent of its length.
+    SamplerStart,
+    /// Where the Sampler's loop begins, as a percent of the file's length.
+    SamplerLoopStart,
+    /// Where the Sampler's loop ends, as a percent of the file's length.
+    SamplerLoopEnd,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -138,7 +146,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 69;
+    pub const COUNT: usize = 73;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -223,6 +231,10 @@ impl KnobId {
         KnobId::ArpOctaves,
         KnobId::ArpGate,
         KnobId::ChordSpread,
+        KnobId::SamplerRoot,
+        KnobId::SamplerStart,
+        KnobId::SamplerLoopStart,
+        KnobId::SamplerLoopEnd,
     ];
 
     /// The name shown beside the knob.
@@ -297,6 +309,10 @@ impl KnobId {
             KnobId::ArpOctaves => "Octaves",
             KnobId::ArpGate => "Gate",
             KnobId::ChordSpread => "Spread",
+            KnobId::SamplerRoot => "Root",
+            KnobId::SamplerStart => "Start",
+            KnobId::SamplerLoopStart => "Loop start",
+            KnobId::SamplerLoopEnd => "Loop end",
         }
     }
 
@@ -454,6 +470,16 @@ impl KnobId {
             KnobId::ArpOctaves => FloatRange::Linear { min: 1.0, max: 4.0 },
             KnobId::ArpGate => FloatRange::Linear { min: 0.0, max: 1.0 },
             KnobId::ChordSpread => FloatRange::Linear { min: 0.0, max: 1.0 },
+            KnobId::SamplerRoot => FloatRange::Linear {
+                min: 0.0,
+                max: 127.0,
+            },
+            KnobId::SamplerStart | KnobId::SamplerLoopStart | KnobId::SamplerLoopEnd => {
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 100.0,
+                }
+            }
         }
     }
 
@@ -513,6 +539,10 @@ impl KnobId {
             KnobId::ArpOctaves => 1.0,
             KnobId::ArpGate => 0.75,
             KnobId::ChordSpread => 0.0,
+            // Middle C.
+            KnobId::SamplerRoot => 60.0,
+            KnobId::SamplerStart | KnobId::SamplerLoopStart => 0.0,
+            KnobId::SamplerLoopEnd => 100.0,
         }
     }
 
@@ -529,6 +559,7 @@ impl KnobId {
             | KnobId::Coarse
             | KnobId::Octave
             | KnobId::ArpOctaves => plain.round(),
+            KnobId::SamplerRoot => plain.round(),
             _ => plain,
         }
     }
@@ -545,6 +576,7 @@ impl KnobId {
             | KnobId::Coarse
             | KnobId::Octave
             | KnobId::ArpOctaves => self.to_normalized(self.to_plain(normalized)),
+            KnobId::SamplerRoot => self.to_normalized(self.to_plain(normalized)),
             _ => normalized.clamp(0.0, 1.0),
         }
     }
@@ -675,8 +707,23 @@ impl KnobId {
             KnobId::ArpOctaves => format!("{}", plain.round() as i32),
             KnobId::ArpGate => format!("{:.0}%", plain * 100.0),
             KnobId::ChordSpread => format!("{:.0}%", plain * 100.0),
+            KnobId::SamplerRoot => note_name(plain.round() as i32),
+            KnobId::SamplerStart | KnobId::SamplerLoopStart | KnobId::SamplerLoopEnd => {
+                format!("{plain:.0}%")
+            }
         }
     }
+}
+
+/// A MIDI note number as a letter name and octave, such as 60 reading "C4". Octave numbers follow
+/// the common convention where middle C is C4.
+fn note_name(note: i32) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    let name = NAMES[note.rem_euclid(12) as usize];
+    let octave = note.div_euclid(12) - 1;
+    format!("{name}{octave}")
 }
 
 /// A number as the entry box shows it, with trailing zeros dropped. Large numbers get fewer
