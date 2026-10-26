@@ -29,7 +29,9 @@ Flode is not affiliated with Blender or the Blender Foundation.
   where a note's copies start, so it takes effect on the next note.
 - **Sampler.** Plays back a loaded audio file, one voice per held note, pitch-shifted from the note
   relative to a Root key. The Load sample row opens a file picker; it shows the loaded file's name
-  once one is chosen. WAV only, mono or stereo. Pitch tracking, on by default, shifts playback
+  once one is chosen. WAV, AIFF, FLAC, MP3, Ogg Vorbis, and AAC/M4A load, mono or stereo. Drag an
+  audio file from Finder, or a clip from a DAW's timeline, onto the editor and a Sampler appears
+  under the cursor with the file already loaded. Pitch tracking, on by default, shifts playback
   speed with the note; off, every note plays at the file's own speed, which suits a one-shot drum
   hit. Start sets where playback begins on every new note. Loop picks Off, Forward, or Ping-pong,
   with Loop start and Loop end marking the region. Reverse plays the file backward. Gated, the

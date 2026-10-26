@@ -34,7 +34,9 @@ not bend the pitch.
 **Groups.** The Output and Macro nodes cannot go inside a group, and neither can a group's own edge
 nodes. A group node cannot be added from the add menu or the search box. Make one with `Shift+G`.
 
-**Sampler.** Only WAV files load today. A preset or a saved group that names a sample file on a
+**Sampler.** Dropping a file on the editor is built for macOS, where it has been checked only
+against files; a drag straight from a DAW timeline depends on what the DAW puts on the drag, and
+Windows has the hook but has not been tried. A preset or a saved group that names a sample file on a
 path that does not exist on another machine loses that sample silently when it loads, reported in
 the status line rather than failing the whole patch, until you load the file again by hand.
 

@@ -15,6 +15,9 @@
 
 #[doc(no_inline)]
 pub use iced_native::*;
+// This crate's own `window` module hides iced's, so its events are re-exported under a name that
+// is free. An app listens for file drops with them.
+pub use iced_native::window::Event as NativeWindowEvent;
 
 mod application;
 pub mod conversion;

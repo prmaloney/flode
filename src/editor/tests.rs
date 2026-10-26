@@ -7191,6 +7191,84 @@ mod sampler_ui_tests {
         panic!("the sample load did not finish in time");
     }
 
+    /// A dropped audio file makes a Sampler centered on the drop point, with the file loading.
+    #[test]
+    fn a_dropped_audio_file_makes_a_loaded_sampler_at_the_drop() {
+        let dir = TempDir::new("drop");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        let mut graph = minimal_graph();
+        let before = graph.nodes.len();
+        assert!(graph.drop_sample(path.clone(), Point::new(400.0, 300.0)));
+        assert_eq!(graph.nodes.len(), before + 1);
+        let node = graph.nodes.len() - 1;
+        assert_eq!(graph.nodes[node].kind, NodeKind::Sampler);
+        assert_eq!(graph.nodes[node].sample_path, Some(path));
+        let at = graph.nodes[node].position;
+        assert_eq!(
+            (at.x, at.y),
+            (400.0 - crate::nodes::NODE_WIDTH / 2.0, 300.0)
+        );
+        assert_eq!(graph.selected, Some(node));
+        wait_for_sample_load(&mut graph);
+        assert!(graph.nodes[node].sample.is_some());
+    }
+
+    /// The drop point follows the view, so a panned or zoomed editor still lands under the cursor.
+    #[test]
+    fn a_drop_lands_under_the_cursor_in_a_zoomed_view() {
+        let dir = TempDir::new("drop-zoom");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        let mut graph = minimal_graph();
+        graph.view.zoom = 2.0;
+        graph.view.offset = nih_plug_iced::Vector::new(100.0, 50.0);
+        let screen = Point::new(500.0, 250.0);
+        assert!(graph.drop_sample(path, screen));
+        let node = &graph.nodes[graph.nodes.len() - 1];
+        let world = graph.view.to_world(screen);
+        assert_eq!(
+            (node.position.x, node.position.y),
+            (world.x - crate::nodes::NODE_WIDTH / 2.0, world.y)
+        );
+    }
+
+    /// A file that is not audio adds nothing and says so.
+    #[test]
+    fn a_dropped_non_audio_file_adds_nothing() {
+        let mut graph = minimal_graph();
+        let before = graph.nodes.len();
+        assert!(!graph.drop_sample(
+            std::path::PathBuf::from("/x/notes.txt"),
+            Point::new(1.0, 1.0)
+        ));
+        assert_eq!(graph.nodes.len(), before);
+        assert!(graph.status.as_ref().unwrap().0.contains("notes.txt"));
+    }
+
+    /// Several files dropped on one spot don't stack on each other.
+    #[test]
+    fn files_dropped_together_are_staggered() {
+        let dir = TempDir::new("drop-many");
+        let mut graph = minimal_graph();
+        for name in ["a.wav", "b.wav", "c.wav"] {
+            let path = dir.0.join(name);
+            write_wav(&path);
+            assert!(graph.drop_sample(path, Point::new(400.0, 300.0)));
+        }
+        let n = graph.nodes.len();
+        let spots: Vec<(f32, f32)> = graph.nodes[n - 3..]
+            .iter()
+            .map(|node| (node.position.x, node.position.y))
+            .collect();
+        assert_ne!(spots[0], spots[1]);
+        assert_ne!(spots[1], spots[2]);
+        assert_ne!(spots[0], spots[2]);
+        while !graph.sampler_loads.is_empty() {
+            wait_for_sample_load(&mut graph);
+        }
+    }
+
     /// Starting a load decodes a valid file on a background thread and stores the result as an
     /// `Arc`, with the status line reporting success.
     #[test]

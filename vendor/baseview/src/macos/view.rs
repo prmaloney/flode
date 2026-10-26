@@ -452,8 +452,13 @@ extern "C" fn magnify(this: &Object, _: Sel, event: id) {
     }));
 }
 
-fn get_drag_position(sender: id) -> Point {
-    let point: NSPoint = unsafe { msg_send![sender, draggingLocation] };
+fn get_drag_position(this: &Object, sender: id) -> Point {
+    // draggingLocation is in window coordinates, which count up from the bottom. The view is
+    // flipped, so it converts the same way a mouse move does.
+    let point: NSPoint = unsafe {
+        let point: NSPoint = msg_send![sender, draggingLocation];
+        msg_send![this, convertPoint:point fromView:nil]
+    };
     Point::new(point.x, point.y)
 }
 
@@ -497,7 +502,7 @@ extern "C" fn dragging_entered(this: &Object, _sel: Sel, sender: id) -> NSUInteg
     let drop_data = get_drop_data(sender);
 
     let event = MouseEvent::DragEntered {
-        position: get_drag_position(sender),
+        position: get_drag_position(this, sender),
         modifiers: make_modifiers(modifiers),
         data: drop_data,
     };
@@ -511,7 +516,7 @@ extern "C" fn dragging_updated(this: &Object, _sel: Sel, sender: id) -> NSUInteg
     let drop_data = get_drop_data(sender);
 
     let event = MouseEvent::DragMoved {
-        position: get_drag_position(sender),
+        position: get_drag_position(this, sender),
         modifiers: make_modifiers(modifiers),
         data: drop_data,
     };
@@ -532,7 +537,7 @@ extern "C" fn perform_drag_operation(this: &Object, _sel: Sel, sender: id) -> BO
     let drop_data = get_drop_data(sender);
 
     let event = MouseEvent::DragDropped {
-        position: get_drag_position(sender),
+        position: get_drag_position(this, sender),
         modifiers: make_modifiers(modifiers),
         data: drop_data,
     };

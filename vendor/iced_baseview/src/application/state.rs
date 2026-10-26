@@ -129,6 +129,29 @@ impl<A: Application + Send> State<A> {
 
                 // TODO: Encode cursor moving outside of the window.
             }
+            // A drag from outside moves the cursor too, which is where a drop lands.
+            baseview::Event::Mouse(
+                baseview::MouseEvent::DragEntered {
+                    position,
+                    modifiers,
+                    ..
+                }
+                | baseview::MouseEvent::DragMoved {
+                    position,
+                    modifiers,
+                    ..
+                }
+                | baseview::MouseEvent::DragDropped {
+                    position,
+                    modifiers,
+                    ..
+                },
+            ) => {
+                self.update_modifiers(*modifiers);
+
+                self.cursor_position.x = position.x as f32;
+                self.cursor_position.y = position.y as f32;
+            }
             baseview::Event::Mouse(
                 baseview::MouseEvent::ButtonPressed { modifiers, .. }
                 | baseview::MouseEvent::ButtonReleased { modifiers, .. }

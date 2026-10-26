@@ -2,7 +2,7 @@
 
 use crate::dsp::analyzer::{BINS, FLOOR_DB};
 use crate::dsp::monitor::MonitorData;
-use crate::dsp::sample::SampleData;
+use crate::dsp::sample::{is_audio_file, SampleData};
 use crate::editor::monitor::MonitorHistory;
 use crate::editor::piano::Piano;
 use crate::engine::POOL;
@@ -150,6 +150,8 @@ pub(super) struct Slide {
 
 /// How long a node takes to slide into place.
 const SLIDE_SECONDS: f32 = 0.18;
+/// How far each file of a multi file drop sits from the one before, in editor units.
+const DROP_STAGGER: f32 = 28.0;
 
 /// Fast at first, then settling: 0.0 to 1.0 in, 0.0 to 1.0 out.
 fn ease_out(t: f32) -> f32 {
@@ -877,7 +879,7 @@ impl Graph {
     }
 
     /// Opens the native file picker for a Sampler's "Load sample..." button, on a worker thread,
-    /// filtered to WAV files. The answer arrives on `sampler_dialog` and `poll_sampler_dialog`
+    /// filtered to audio files. The answer arrives on `sampler_dialog` and `poll_sampler_dialog`
     /// picks it up. Does nothing while a dialog is already open.
     pub(super) fn start_sampler_dialog(&mut self, node: usize) {
         if self.sampler_dialog.is_some() {
@@ -896,7 +898,7 @@ impl Graph {
                     let picked = std::panic::catch_unwind(|| {
                         rfd::FileDialog::new()
                             .set_title("Load sample")
-                            .add_filter("WAV audio", &["wav", "wave"])
+                            .add_filter("Audio", &crate::dsp::sample::EXTENSIONS)
                             .pick_file()
                     });
                     if let Ok(picked) = picked {
@@ -940,6 +942,37 @@ impl Graph {
                 self.say("Could not open the file dialog");
             }
         }
+    }
+
+    /// Adds a Sampler for an audio file dropped on the editor at `screen`, centered there, and
+    /// starts loading the file into it. That makes a drop a one step way to a playable Sampler.
+    /// Several files dropped together land one after the other, each offset from the last so none
+    /// hides another. A file that isn't audio is told so on the status line and adds nothing.
+    /// Returns whether a node was added.
+    pub(super) fn drop_sample(&mut self, path: PathBuf, screen: Point) -> bool {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        if !is_audio_file(&path) {
+            self.say(format!("{name} is not an audio file flode can load"));
+            return false;
+        }
+        if !self.can_add(NodeKind::Sampler) {
+            return false;
+        }
+        let mut point = self.view.to_world(screen);
+        point.x -= NODE_WIDTH / 2.0;
+        // A node already at this spot is from the same drop. Step down and right off it.
+        while self.nodes.iter().any(|node| {
+            (node.position.x - point.x).abs() < 1.0 && (node.position.y - point.y).abs() < 1.0
+        }) {
+            point.x += DROP_STAGGER;
+            point.y += DROP_STAGGER;
+        }
+        let node = self.add_node(NodeKind::Sampler, point);
+        self.start_sample_load(node, path);
+        true
     }
 
     /// Starts decoding `path` for Sampler node `node` on a background thread, so a large file's

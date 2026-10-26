@@ -94,10 +94,13 @@ struct FlodeEditor {
     midi_flash: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Message {
     /// A message from the node graph.
     Graph(canvas::Message),
+    /// A file dropped on the editor, from Finder or a DAW's clip. The drag moved the cursor to
+    /// where it landed first, so the graph's last cursor position is the drop point.
+    FileDropped(std::path::PathBuf),
     /// A timer tick, sent while a control drives a knob so the live indicator redraws.
     Tick,
 }
@@ -223,6 +226,15 @@ impl IcedEditor for FlodeEditor {
             // The cursor moved over or off a dropdown. The next frame draws the change.
             Message::Graph(canvas::Message::Hovered) => {}
             Message::Tick => {}
+            // An audio file becomes a Sampler under the cursor, the same as any other graph edit.
+            Message::FileDropped(path) => {
+                if self.graph.drop_sample(path, self.graph.last_screen) {
+                    self.link.publish(self.graph.patch());
+                    if let Ok(mut saved) = self.params.graph.lock() {
+                        *saved = self.graph.to_saved();
+                    }
+                }
+            }
             // A change to the graph, a node, or a knob. The audio thread gets the new state, and
             // the project saves it.
             Message::Graph(canvas::Message::GraphChanged) => {
@@ -247,7 +259,11 @@ impl IcedEditor for FlodeEditor {
         // Redraw every frame, so the output meter moves and a driven knob's indicator follows its
         // control.
         window_subs.on_frame = Some(Message::Tick);
-        Subscription::none()
+        // Files dropped on the window. The drag's cursor moves have already gone to the graph.
+        subscription::events_with(|event, _status| match event {
+            Event::Window(NativeWindowEvent::FileDropped(path)) => Some(Message::FileDropped(path)),
+            _ => None,
+        })
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {

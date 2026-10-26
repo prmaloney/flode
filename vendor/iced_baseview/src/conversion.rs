@@ -8,6 +8,16 @@ use iced_native::window::Event as IcedWindowEvent;
 use iced_native::Event as IcedEvent;
 use keyboard_types::Modifiers;
 
+/// Moves the cursor to where a drag from outside is.
+fn push_drag_cursor(
+    iced_events: &mut Vec<IcedEvent>,
+    position: baseview::Point,
+) {
+    iced_events.push(IcedEvent::Mouse(IcedMouseEvent::CursorMoved {
+        position: Point::new(position.x as f32, position.y as f32),
+    }));
+}
+
 pub fn baseview_to_iced_events(
     event: BaseEvent,
     iced_events: &mut Vec<IcedEvent>,
@@ -86,6 +96,47 @@ pub fn baseview_to_iced_events(
                                 y,
                             },
                         }));
+                        }
+                    }
+                }
+                // Files dragged in from outside. Iced has no position on a file event, so the
+                // cursor is moved to the drag first and the app reads it from there.
+                baseview::MouseEvent::DragEntered {
+                    position,
+                    modifiers,
+                    data,
+                } => {
+                    maybe_update_modifiers(modifiers);
+                    push_drag_cursor(iced_events, position);
+                    if let baseview::DropData::Files(files) = data {
+                        for file in files {
+                            iced_events.push(IcedEvent::Window(
+                                IcedWindowEvent::FileHovered(file),
+                            ));
+                        }
+                    }
+                }
+                baseview::MouseEvent::DragMoved { position, modifiers, .. } => {
+                    maybe_update_modifiers(modifiers);
+                    push_drag_cursor(iced_events, position);
+                }
+                baseview::MouseEvent::DragLeft => {
+                    iced_events.push(IcedEvent::Window(
+                        IcedWindowEvent::FilesHoveredLeft,
+                    ));
+                }
+                baseview::MouseEvent::DragDropped {
+                    position,
+                    modifiers,
+                    data,
+                } => {
+                    maybe_update_modifiers(modifiers);
+                    push_drag_cursor(iced_events, position);
+                    if let baseview::DropData::Files(files) = data {
+                        for file in files {
+                            iced_events.push(IcedEvent::Window(
+                                IcedWindowEvent::FileDropped(file),
+                            ));
                         }
                     }
                 }

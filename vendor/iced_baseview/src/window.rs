@@ -554,6 +554,24 @@ async fn run_instance<A, E>(
             RuntimeEvent::Baseview((event, do_send_status)) => {
                 state.update(&event, &mut debug);
 
+                // A drag carrying files is welcome anywhere in the window. What a drop does is up
+                // to the app, so the system hears yes and shows the copy cursor.
+                let accepts_drag = matches!(
+                    &event,
+                    baseview::Event::Mouse(
+                        baseview::MouseEvent::DragEntered {
+                            data: baseview::DropData::Files(_),
+                            ..
+                        } | baseview::MouseEvent::DragMoved {
+                            data: baseview::DropData::Files(_),
+                            ..
+                        } | baseview::MouseEvent::DragDropped {
+                            data: baseview::DropData::Files(_),
+                            ..
+                        }
+                    )
+                );
+
                 crate::conversion::baseview_to_iced_events(
                     event,
                     &mut events,
@@ -588,6 +606,11 @@ async fn run_instance<A, E>(
                             final_status = EventStatus::Captured;
                             break;
                         }
+                    }
+
+                    if accepts_drag {
+                        final_status =
+                            EventStatus::AcceptDrop(baseview::DropEffect::Copy);
                     }
 
                     *event_status.borrow_mut() = final_status;

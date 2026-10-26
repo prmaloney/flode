@@ -4,6 +4,28 @@
 
 use std::path::Path;
 
+/// The file extensions a Sampler can load, lower case.
+pub const EXTENSIONS: [&str; 10] = [
+    "wav", "wave", "aif", "aiff", "flac", "mp3", "ogg", "m4a", "mp4", "aac",
+];
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
+fn is_wav(path: &Path) -> bool {
+    matches!(extension_of(path).as_str(), "wav" | "wave")
+}
+
+/// Whether a file's extension is one a Sampler can load. A drop is checked against this so a
+/// stray file never makes an empty Sampler.
+pub fn is_audio_file(path: &Path) -> bool {
+    EXTENSIONS.contains(&extension_of(path).as_str())
+}
+
 /// One loaded audio file, decoded to `f32`. Samples are interleaved: a stereo file's frame `n` is
 /// `frames[2*n]` on the left and `frames[2*n+1]` on the right. A mono file has one value per
 /// frame. Only WAV is supported today.
@@ -43,9 +65,89 @@ impl SampleData {
         }
     }
 
-    /// Loads a WAV file, decoding 16, 24, or 32 bit integer PCM, or 32 bit float, mono or stereo.
-    /// Any other file, or one that cannot be read, reports an error string instead of panicking.
+    /// Loads an audio file, mono or stereo. A WAV file decodes 16, 24, or 32 bit integer PCM, or
+    /// 32 bit float. Other formats (see `EXTENSIONS`) go through a general decoder. A file that
+    /// cannot be read or decoded reports an error string instead of panicking.
     pub fn load(path: &Path) -> Result<Self, String> {
+        if is_wav(path) {
+            Self::load_wav(path)
+        } else {
+            Self::load_other(path)
+        }
+    }
+
+    /// Decodes anything but a WAV file, as `f32`, with whatever channels the file has up to two.
+    fn load_other(path: &Path) -> Result<Self, String> {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::codecs::DecoderOptions;
+        use symphonia::core::errors::Error;
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let mut hint = Hint::new();
+        if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+            let _ = hint.with_extension(extension);
+        }
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                MediaSourceStream::new(Box::new(file), Default::default()),
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut format = probed.format;
+        let track = format
+            .default_track()
+            .ok_or_else(|| "the file has no audio".to_string())?;
+        let track_id = track.id;
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .map_err(|error| error.to_string())?;
+
+        let mut frames = Vec::new();
+        let mut spec = None;
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                // The end of the stream shows up as an unexpected end of file.
+                Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    break
+                }
+                Err(Error::ResetRequired) => break,
+                Err(error) => return Err(error.to_string()),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            let decoded = match decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                // A damaged packet is skipped, like a player would.
+                Err(Error::DecodeError(_)) => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let this = *decoded.spec();
+            let channels = this.channels.count();
+            if channels == 0 || channels > 2 {
+                return Err(format!("{channels}-channel audio is not supported"));
+            }
+            spec = Some(this);
+            let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, this);
+            buffer.copy_interleaved_ref(decoded);
+            frames.extend_from_slice(buffer.samples());
+        }
+        let spec = spec.ok_or_else(|| "the file has no audio".to_string())?;
+        Ok(SampleData {
+            sample_rate: spec.rate as f32,
+            channels: spec.channels.count() as u8,
+            frames,
+        })
+    }
+
+    fn load_wav(path: &Path) -> Result<Self, String> {
         let mut reader = hound::WavReader::open(path).map_err(|error| format!("{}", error))?;
         let spec = reader.spec();
         if spec.channels == 0 || spec.channels > 2 {
@@ -177,6 +279,66 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(b"this is not a wav file, just some bytes")
             .unwrap();
+        assert!(SampleData::load(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An AIFF file, which a DAW exports as often as a WAV, goes through the general decoder.
+    #[test]
+    fn decodes_16_bit_aiff() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&(4u32 + (8 + 18) + (8 + 16)).to_be_bytes());
+        bytes.extend_from_slice(b"AIFF");
+        bytes.extend_from_slice(b"COMM");
+        bytes.extend_from_slice(&18u32.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&16u16.to_be_bytes());
+        // 44100 Hz as an 80 bit extended float.
+        bytes.extend_from_slice(&[0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(b"SSND");
+        bytes.extend_from_slice(&16u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        for sample in [0i16, 16384, -16384, 32767] {
+            bytes.extend_from_slice(&sample.to_be_bytes());
+        }
+        let mut path = temp_path("aiff");
+        path.set_extension("aif");
+        std::fs::write(&path, bytes).unwrap();
+        let data = SampleData::load(&path).unwrap();
+        assert_eq!(
+            (data.channels, data.sample_rate, data.len()),
+            (1, 44100.0, 4)
+        );
+        assert!((data.frame(1).0 - 0.5).abs() < 1e-3);
+        assert!((data.frame(2).0 + 0.5).abs() < 1e-3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn audio_files_are_told_by_their_extension() {
+        for name in [
+            "a.wav",
+            "a.WAV",
+            "clip.aif",
+            "a.flac",
+            "a.Mp3",
+            "/x/y/a.m4a",
+        ] {
+            assert!(is_audio_file(Path::new(name)), "{name}");
+        }
+        for name in ["a.txt", "a", "a.als", "folder.wav.zip"] {
+            assert!(!is_audio_file(Path::new(name)), "{name}");
+        }
+    }
+
+    /// A file that has an audio extension but isn't audio fails cleanly in the general decoder.
+    #[test]
+    fn a_non_audio_mp3_fails_cleanly() {
+        let mut path = temp_path("not-an-mp3");
+        path.set_extension("mp3");
+        std::fs::write(&path, b"this is not an mp3, just some bytes").unwrap();
         assert!(SampleData::load(&path).is_err());
         let _ = std::fs::remove_file(&path);
     }
