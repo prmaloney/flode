@@ -1,3 +1,7 @@
+// The macOS code uses the objc crate's macros, which test for a `cargo-clippy` cfg that rustc
+// does not know. Flode vendors this crate as is, so the warning is silenced rather than patched.
+#![allow(unexpected_cfgs)]
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]

@@ -1,9 +1,10 @@
-//! The filter stage: a state-variable filter on one audio input. Every voice runs its own, so a
-//! cutoff driven by an envelope follows each note's own envelope.
+//! The filter stage: a ladder for the low and high pass, and a state-variable filter for the band
+//! pass, on one audio input. Every voice runs its own, so a cutoff driven by an envelope follows
+//! each note's own envelope.
 
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::frame::Frame;
-use crate::dsp::svf::{Coefficients, Svf};
+use crate::dsp::svf::{Coefficients, FilterType, Ladder, LadderCoefficients, Slope, Svf};
 use crate::patch::control::ControlLevels;
 use crate::patch::stage::{FilterParams, MAX_INPUTS};
 
@@ -13,7 +14,10 @@ pub struct Filter;
 /// eased to. Easing keeps a knob move from clicking.
 #[derive(Clone, Copy)]
 pub struct FilterState {
+    /// The band pass, one per side.
     svf: [Svf; 2],
+    /// The low and high pass, one ladder per side. Its four stages give every slope.
+    ladder: [Ladder; 2],
     /// The cutoff as log2 of Hz, so the easing is even across octaves.
     cutoff_log2: f32,
     resonance: f32,
@@ -24,6 +28,7 @@ impl FilterState {
     pub fn new(p: &FilterParams, levels: &ControlLevels) -> Self {
         Self {
             svf: [Svf::new(); 2],
+            ladder: [Ladder::new(); 2],
             cutoff_log2: p.cutoff.plain(levels).log2(),
             resonance: p.resonance.plain(levels),
         }
@@ -45,11 +50,23 @@ impl FilterState {
         self.cutoff_log2 += (cutoff_target.log2() - self.cutoff_log2) * smooth;
         self.resonance += (resonance_target - self.resonance) * smooth;
         // Both sides run the same response, so they share one set of coefficients.
-        let coefficients = Coefficients::new(self.cutoff_log2.exp2(), self.resonance, sample_rate);
-        let [left, right] = &mut self.svf;
+        let cutoff = self.cutoff_log2.exp2();
+        if p.kind == FilterType::BandPass {
+            // A band pass is a peak with no slope to choose, so it keeps the state-variable filter.
+            let coefficients = Coefficients::new(cutoff, self.resonance, sample_rate);
+            let [left, right] = &mut self.svf;
+            return Frame::new(
+                left.tick(input.l, &coefficients, p.kind),
+                right.tick(input.r, &coefficients, p.kind),
+            );
+        }
+        let slope = Slope::from_step(p.slope.plain(levels));
+        let coefficients = LadderCoefficients::new(cutoff, self.resonance, sample_rate);
+        let high = p.kind == FilterType::HighPass;
+        let [left, right] = &mut self.ladder;
         Frame::new(
-            left.tick(input.l, &coefficients, p.kind),
-            right.tick(input.r, &coefficients, p.kind),
+            left.tick(input.l, &coefficients, slope, high),
+            right.tick(input.r, &coefficients, slope, high),
         )
     }
 }
@@ -115,6 +132,7 @@ mod tests {
             kind: FilterType::LowPass,
             cutoff: Param::fixed(KnobId::Cutoff, cutoff),
             resonance: Param::fixed(KnobId::Resonance, 0.0),
+            slope: Param::default_of(KnobId::Slope),
         }
     }
 

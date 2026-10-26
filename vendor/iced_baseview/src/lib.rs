@@ -3,6 +3,15 @@
 #![deny(unused_results)]
 //#![forbid(unsafe_code)]
 #![forbid(rust_2018_idioms)]
+// Flode vendors this crate as is. These are the cfg names of backends it does not build,
+// deprecated futures calls, and glob re-exports that overlap, none of which affect behavior.
+#![allow(
+    unexpected_cfgs,
+    deprecated,
+    ambiguous_glob_reexports,
+    hidden_glob_reexports,
+    unused_imports
+)]
 
 #[doc(no_inline)]
 pub use iced_native::*;

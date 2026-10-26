@@ -134,6 +134,8 @@ pub enum KnobId {
     SamplerLoopStart,
     /// Where the Sampler's loop ends, as a percent of the file's length.
     SamplerLoopEnd,
+    /// A low or high pass filter's steepness: 6, 12, 18 or 24 dB per octave, as steps 0 to 3.
+    Slope,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -147,7 +149,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 73;
+    pub const COUNT: usize = 74;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -236,6 +238,7 @@ impl KnobId {
         KnobId::SamplerStart,
         KnobId::SamplerLoopStart,
         KnobId::SamplerLoopEnd,
+        KnobId::Slope,
     ];
 
     /// The name shown beside the knob.
@@ -314,6 +317,7 @@ impl KnobId {
             KnobId::SamplerStart => "Start",
             KnobId::SamplerLoopStart => "Loop start",
             KnobId::SamplerLoopEnd => "Loop end",
+            KnobId::Slope => "Slope",
         }
     }
 
@@ -458,6 +462,7 @@ impl KnobId {
                 max: 10.0,
                 factor: FloatRange::skew_factor(-1.0),
             },
+            KnobId::Slope => FloatRange::Linear { min: 0.0, max: 3.0 },
             // Zero is free running. Each step past it is one of the note divisions.
             KnobId::LfoSync => FloatRange::Linear {
                 min: 0.0,
@@ -544,6 +549,8 @@ impl KnobId {
             KnobId::SamplerRoot => 60.0,
             KnobId::SamplerStart | KnobId::SamplerLoopStart => 0.0,
             KnobId::SamplerLoopEnd => 100.0,
+            // 12 dB per octave, what the filter always was.
+            KnobId::Slope => 1.0,
         }
     }
 
@@ -555,7 +562,11 @@ impl KnobId {
     pub fn to_plain(self, normalized: f32) -> f32 {
         let plain = self.range().unnormalize(normalized);
         match self {
-            KnobId::Unison | KnobId::LfoSync | KnobId::Octave | KnobId::ArpOctaves => plain.round(),
+            KnobId::Unison
+            | KnobId::LfoSync
+            | KnobId::Octave
+            | KnobId::ArpOctaves
+            | KnobId::Slope => plain.round(),
             KnobId::SamplerRoot => plain.round(),
             _ => plain,
         }
@@ -568,9 +579,11 @@ impl KnobId {
     /// Rounds a normalized value to the knob's step, if it has one. Unison moves in whole voices.
     pub fn snap(self, normalized: f32) -> f32 {
         match self {
-            KnobId::Unison | KnobId::LfoSync | KnobId::Octave | KnobId::ArpOctaves => {
-                self.to_normalized(self.to_plain(normalized))
-            }
+            KnobId::Unison
+            | KnobId::LfoSync
+            | KnobId::Octave
+            | KnobId::ArpOctaves
+            | KnobId::Slope => self.to_normalized(self.to_plain(normalized)),
             KnobId::SamplerRoot => self.to_normalized(self.to_plain(normalized)),
             _ => normalized.clamp(0.0, 1.0),
         }
@@ -700,6 +713,7 @@ impl KnobId {
                     .to_string(),
             },
             KnobId::ArpOctaves => format!("{}", plain.round() as i32),
+            KnobId::Slope => format!("{} dB/oct", (plain.round() as i32 + 1) * 6),
             KnobId::ArpGate => format!("{:.0}%", plain * 100.0),
             KnobId::ChordSpread => format!("{:.0}%", plain * 100.0),
             KnobId::SamplerRoot => note_name(plain.round() as i32),

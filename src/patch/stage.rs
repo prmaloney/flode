@@ -160,6 +160,7 @@ pub struct FilterParams {
     pub kind: FilterType,
     pub cutoff: Param,
     pub resonance: Param,
+    pub slope: Param,
 }
 
 impl Default for FilterParams {
@@ -168,6 +169,7 @@ impl Default for FilterParams {
             kind: FilterType::default(),
             cutoff: Param::default_of(KnobId::Cutoff),
             resonance: Param::default_of(KnobId::Resonance),
+            slope: Param::default_of(KnobId::Slope),
         }
     }
 }

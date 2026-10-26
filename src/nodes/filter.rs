@@ -4,7 +4,7 @@
 use super::viewer::TRACE_SAMPLES;
 use super::viewer::{sample, Live, Trace};
 use super::{Bypass, Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
-use crate::dsp::svf::{magnitude, FilterType};
+use crate::dsp::svf::{magnitude, FilterType, Slope};
 
 pub struct Filter;
 
@@ -15,14 +15,20 @@ impl NodeBehavior for Filter {
         "Filter"
     }
 
-    fn rows(&self, _node: &FlodeNode) -> Vec<Row> {
-        vec![
+    fn rows(&self, node: &FlodeNode) -> Vec<Row> {
+        let mut rows = vec![
             Row::input(Port::Audio).with_output(Port::Audio),
             Row::driven_knob(KnobId::Cutoff),
             Row::driven_knob(KnobId::Resonance),
-            Row::control(Control::Dropdown(0)),
-            Row::control(Control::Viewer),
-        ]
+        ];
+        // The slope only means something for the low and high pass. It has no pin, so a saved
+        // wire never depends on whether the row is showing.
+        if has_slope(filter_type(node)) {
+            rows.push(Row::plain_knob(KnobId::Slope));
+        }
+        rows.push(Row::control(Control::Dropdown(0)));
+        rows.push(Row::control(Control::Viewer));
+        rows
     }
 
     fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
@@ -55,6 +61,11 @@ pub fn filter_type(node: &FlodeNode) -> FilterType {
     FilterType::ALL[node.choice(0).min(FilterType::ALL.len() - 1)]
 }
 
+/// Whether a response has a slope to choose. A band pass is a peak, not a roll-off.
+pub fn has_slope(kind: FilterType) -> bool {
+    kind != FilterType::BandPass
+}
+
 /// The lowest and highest frequency the viewer shows, in Hz.
 const VIEW_LOW: f32 = 20.0;
 const VIEW_HIGH: f32 = 20000.0;
@@ -79,8 +90,16 @@ impl Filter {
         let cutoff = live.plain(KnobId::Cutoff);
         let resonance = live.value(KnobId::Resonance);
         let kind = filter_type(node);
+        let slope = Slope::from_step(live.plain(KnobId::Slope));
         let points = sample(samples, |x| {
-            let gain = magnitude(kind, frequency_at(x), cutoff, resonance, VIEW_SAMPLE_RATE);
+            let gain = magnitude(
+                kind,
+                slope,
+                frequency_at(x),
+                cutoff,
+                resonance,
+                VIEW_SAMPLE_RATE,
+            );
             let db = 20.0 * gain.max(1e-6).log10();
             (db - VIEW_DB_LOW) / (VIEW_DB_HIGH - VIEW_DB_LOW)
         });
@@ -192,6 +211,48 @@ mod tests {
         let driven = Filter.trace(&node, &live, TRACE_SAMPLES).unwrap();
         assert!(driven.markers[0] > own);
         assert_ne!(driven.points, trace_of(&node).points);
+    }
+
+    /// The slope row shows for the low and high pass and not the band pass, and it has no pin.
+    #[test]
+    fn the_slope_shows_only_for_low_and_high_pass() {
+        let slope_row = |kind| {
+            Filter
+                .rows(&node(kind))
+                .into_iter()
+                .find(|row| row.knob == Some(KnobId::Slope))
+        };
+        assert!(slope_row(FilterType::LowPass).is_some());
+        assert!(slope_row(FilterType::HighPass).is_some());
+        assert!(slope_row(FilterType::BandPass).is_none());
+        assert!(slope_row(FilterType::LowPass).unwrap().input.is_none());
+    }
+
+    /// A steeper slope falls further past the cutoff in the viewer.
+    #[test]
+    fn a_steeper_slope_draws_lower_above_the_cutoff() {
+        let mut node = node(FilterType::LowPass);
+        let last = |node: &FlodeNode| *trace_of(node).points.last().unwrap();
+        node.set_value(KnobId::Slope, KnobId::Slope.to_normalized(0.0));
+        let gentle = last(&node);
+        node.set_value(KnobId::Slope, KnobId::Slope.to_normalized(3.0));
+        assert!(last(&node) < gentle);
+    }
+
+    /// The slope knob steps through four values and starts at 12 dB.
+    #[test]
+    fn the_slope_knob_has_four_steps_and_starts_at_twelve() {
+        assert_eq!(
+            KnobId::Slope.format(KnobId::Slope.to_normalized(0.0)),
+            "6 dB/oct"
+        );
+        assert_eq!(
+            KnobId::Slope.format(KnobId::Slope.to_normalized(3.0)),
+            "24 dB/oct"
+        );
+        let default = KnobId::Slope.default_normalized();
+        assert_eq!(KnobId::Slope.format(default), "12 dB/oct");
+        assert_eq!(KnobId::Slope.to_plain(KnobId::Slope.snap(0.4)).fract(), 0.0);
     }
 
     #[test]

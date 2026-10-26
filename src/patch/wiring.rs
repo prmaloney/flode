@@ -630,6 +630,7 @@ impl<'a> Wiring<'a> {
                 kind: filter::filter_type(n),
                 cutoff: knob(KnobId::Cutoff),
                 resonance: knob(KnobId::Resonance),
+                slope: knob(KnobId::Slope),
             })),
             NodeKind::Mix => Some(StageParams::Mix(MixParams {
                 mode: mix::mix_mode(n),
