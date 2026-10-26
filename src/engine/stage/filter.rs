@@ -51,8 +51,9 @@ impl FilterState {
         self.resonance += (resonance_target - self.resonance) * smooth;
         // Both sides run the same response, so they share one set of coefficients.
         let cutoff = self.cutoff_log2.exp2();
-        if p.kind == FilterType::BandPass {
-            // A band pass is a peak with no slope to choose, so it keeps the state-variable filter.
+        if !p.kind.is_ladder() {
+            // The band pass, notch and peak have no slope to choose, so they run on the
+            // state-variable filter.
             let coefficients = Coefficients::new(cutoff, self.resonance, sample_rate);
             let [left, right] = &mut self.svf;
             return Frame::new(

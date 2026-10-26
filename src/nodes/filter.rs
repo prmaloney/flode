@@ -8,7 +8,7 @@ use crate::dsp::svf::{magnitude, FilterType, Slope};
 
 pub struct Filter;
 
-const FILTER_LABELS: [&str; 3] = ["Low pass", "High pass", "Band pass"];
+const FILTER_LABELS: [&str; 5] = ["Low pass", "High pass", "Band pass", "Notch", "Peak"];
 
 impl NodeBehavior for Filter {
     fn title(&self) -> &'static str {
@@ -61,9 +61,10 @@ pub fn filter_type(node: &FlodeNode) -> FilterType {
     FilterType::ALL[node.choice(0).min(FilterType::ALL.len() - 1)]
 }
 
-/// Whether a response has a slope to choose. A band pass is a peak, not a roll-off.
+/// Whether a response has a slope to choose. Only the ladder has one. The band pass, notch and
+/// peak are a single band, not a roll-off.
 pub fn has_slope(kind: FilterType) -> bool {
-    kind != FilterType::BandPass
+    kind.is_ladder()
 }
 
 /// The lowest and highest frequency the viewer shows, in Hz.
@@ -204,6 +205,25 @@ mod tests {
     }
 
     #[test]
+    fn a_notch_dips_at_the_cutoff_and_a_peak_rises_with_resonance() {
+        let mut notch = node(FilterType::Notch);
+        notch.set_value(KnobId::Resonance, 0.5);
+        let dip = trace_of(&notch);
+        assert!(at_cutoff(&dip) < dip.points[0] && at_cutoff(&dip) < *dip.points.last().unwrap());
+
+        let mut peak = node(FilterType::Peak);
+        peak.set_value(KnobId::Resonance, 0.1);
+        let flat = at_cutoff(&trace_of(&peak));
+        peak.set_value(KnobId::Resonance, 0.9);
+        assert!(at_cutoff(&trace_of(&peak)) > flat);
+    }
+
+    #[test]
+    fn the_dropdown_lists_every_type() {
+        assert_eq!(FILTER_LABELS.len(), FilterType::ALL.len());
+    }
+
+    #[test]
     fn a_driven_cutoff_moves_the_marker() {
         let node = node(FilterType::LowPass);
         let own = trace_of(&node).markers[0];
@@ -224,7 +244,9 @@ mod tests {
         };
         assert!(slope_row(FilterType::LowPass).is_some());
         assert!(slope_row(FilterType::HighPass).is_some());
-        assert!(slope_row(FilterType::BandPass).is_none());
+        for kind in [FilterType::BandPass, FilterType::Notch, FilterType::Peak] {
+            assert!(slope_row(kind).is_none(), "{kind:?}");
+        }
         assert!(slope_row(FilterType::LowPass).unwrap().input.is_none());
     }
 

@@ -12,15 +12,24 @@ pub enum FilterType {
     LowPass = 0,
     HighPass = 1,
     BandPass = 2,
+    Notch = 3,
+    Peak = 4,
 }
 
 impl FilterType {
     /// Every type, in the order the dropdown lists them.
-    pub const ALL: [FilterType; 3] = [
+    pub const ALL: [FilterType; 5] = [
         FilterType::LowPass,
         FilterType::HighPass,
         FilterType::BandPass,
+        FilterType::Notch,
+        FilterType::Peak,
     ];
+
+    /// Whether the ladder runs this type. The rest are the state-variable filter, with no slope.
+    pub fn is_ladder(self) -> bool {
+        matches!(self, FilterType::LowPass | FilterType::HighPass)
+    }
 
     /// The dropdown row for this type.
     pub fn index(self) -> usize {
@@ -195,11 +204,16 @@ pub fn magnitude(
     let freq = freq.clamp(1.0, sample_rate * 0.499);
     // The warped frequency over the warped cutoff.
     let x = (PI * freq / sample_rate).tan() / g;
-    if kind == FilterType::BandPass {
+    if !kind.is_ladder() {
         let k = 2.0 - 1.9 * resonance.clamp(0.0, 1.0);
         let re = 1.0 - x * x;
         let im = k * x;
-        return im / (re * re + im * im).sqrt();
+        let denominator = (re * re + im * im).sqrt();
+        return match kind {
+            FilterType::Notch => re.abs() / denominator,
+            FilterType::Peak => (1.0 + x * x) / denominator,
+            _ => im / denominator,
+        };
     }
     let k = LADDER_FEEDBACK_MAX * resonance.clamp(0.0, 1.0);
     // One stage of the ladder, 1 / (1 + jx), and the feedback loop around four of them.
@@ -266,6 +280,10 @@ impl Svf {
             FilterType::HighPass => input - k * v1 - v2,
             // Scaling by k keeps the peak near 1 at every resonance.
             FilterType::BandPass => k * v1,
+            // The low and high pass added: everything but the band around the cutoff.
+            FilterType::Notch => input - k * v1,
+            // The low pass minus the high pass: flat until the resonance lifts a peak.
+            FilterType::Peak => 2.0 * v2 + k * v1 - input,
         }
     }
 }
@@ -311,10 +329,10 @@ mod tests {
         let mut peak = 0.0f32;
         for n in 0..44100 {
             let input = (TAU * freq * n as f32 / 44100.0).sin();
-            let out = if kind == FilterType::BandPass {
-                svf.process(input, 1000.0, resonance, kind, 44100.0)
-            } else {
+            let out = if kind.is_ladder() {
                 ladder.tick(input, &coefficients, slope, kind == FilterType::HighPass)
+            } else {
+                svf.process(input, 1000.0, resonance, kind, 44100.0)
             };
             if n > 22050 {
                 peak = peak.max(out.abs());
@@ -342,9 +360,11 @@ mod tests {
             for slope in SLOPES {
                 for resonance in [0.0, 0.5, 0.9] {
                     for freq in [250.0, 1000.0, 4000.0] {
-                        let measured = db(peak_with(kind, slope, resonance, freq));
+                        // A notch is a true zero at the cutoff, deeper than a sine can show, so
+                        // both sides are read no lower than -40 dB.
+                        let measured = db(peak_with(kind, slope, resonance, freq)).max(-40.0);
                         let predicted =
-                            db(magnitude(kind, slope, freq, 1000.0, resonance, 44100.0));
+                            db(magnitude(kind, slope, freq, 1000.0, resonance, 44100.0)).max(-40.0);
                         assert!(
                             (measured - predicted).abs() < 1.0,
                             "{kind:?} {slope:?} r={resonance} f={freq}: measured {measured} dB, predicted {predicted} dB"
@@ -422,9 +442,26 @@ mod tests {
     }
 
     #[test]
-    fn a_slope_means_nothing_to_a_band_pass() {
-        let at = |slope| magnitude(FilterType::BandPass, slope, 2000.0, 1000.0, 0.5, 44100.0);
-        assert_eq!(at(Slope::Six), at(Slope::TwentyFour));
+    fn a_slope_means_nothing_to_the_other_types() {
+        for kind in [FilterType::BandPass, FilterType::Notch, FilterType::Peak] {
+            let at = |slope| magnitude(kind, slope, 2000.0, 1000.0, 0.5, 44100.0);
+            assert_eq!(at(Slope::Six), at(Slope::TwentyFour), "{kind:?}");
+        }
+    }
+
+    /// A notch cuts the cutoff and passes both sides. A peak is flat with no resonance and lifts
+    /// the cutoff as the resonance rises.
+    #[test]
+    fn notch_and_peak_have_their_shapes() {
+        let m = |kind, resonance, freq| {
+            magnitude(kind, Slope::Twelve, freq, 1000.0, resonance, 44100.0)
+        };
+        assert!(m(FilterType::Notch, 0.5, 1000.0) < 0.05);
+        assert!(db(m(FilterType::Notch, 0.5, 50.0)).abs() < 0.5);
+        assert!(db(m(FilterType::Notch, 0.5, 15000.0)).abs() < 1.5);
+        assert!(db(m(FilterType::Peak, 0.0, 1000.0)).abs() < 0.1);
+        assert!(m(FilterType::Peak, 0.9, 1000.0) > 5.0);
+        assert!(db(m(FilterType::Peak, 0.9, 50.0)).abs() < 0.5);
     }
 
     /// Two filters keep separate memory, so one voice's signal never leaks into another's.

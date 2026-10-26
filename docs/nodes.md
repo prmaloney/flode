@@ -71,14 +71,16 @@ Flode is not affiliated with Blender or the Blender Foundation.
   constant. Signals run from 0 to 1 and the result stays in that range. Divide and modulo by zero
   give 0. Power raises A to a power that B sets, a quarter with B at 0, 1 at 50 percent, and 4 at
   100 percent. The output can drive any knob, including a map's values or another math node.
-- **Filter.** Low pass, high pass and band pass, run once per voice, so a filter envelope follows
-  each note on its own. The low and high pass have a Slope knob that steps through 6, 12, 18 and
-  24 dB per octave, and the response picture follows it. It shows only for those two types, and it
-  has no pin. 12 dB is the default. Those two types are a Moog-style ladder of four one-pole
+- **Filter.** Low pass, high pass, band pass, notch and peak, run once per voice, so a filter
+  envelope follows each note on its own. A notch cuts the band around the cutoff and passes the
+  rest. A peak is flat with Resonance at zero and lifts the band around the cutoff as Resonance
+  rises, like a single EQ bell. The low and high pass have a Slope knob that steps through 6, 12,
+  18 and 24 dB per octave, and the response picture follows it. It shows only for those two
+  types, and it has no pin. 12 dB is the default. Those two types are a Moog-style ladder of four one-pole
   stages, with the Slope taking the output after the first, second, third or fourth stage. The
   resonance feedback runs around all four, so Resonance works at every slope. Like a ladder, it
-  thins the low end a little as it rises. The band pass is a separate state-variable filter and
-  has no slope.
+  thins the low end a little as it rises. The band pass, notch and peak are a separate
+  state-variable filter and have no slope.
 - **Mix.** Crossfade, AM, ring modulation, FM, or Add between two signals.
 - **Gain.** A utility with a Gain knob from -60 dB (silent) to +24 dB, a Pan knob, and an Invert
   checkbox that flips the polarity of both channels. Pan is a balance, not a mono panner. At
