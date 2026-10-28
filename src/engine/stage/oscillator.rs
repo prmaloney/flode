@@ -8,11 +8,12 @@ use crate::dsp::gain::db_to_linear;
 use crate::dsp::noise::NoiseState;
 use crate::dsp::pitch::{ratio_of_semitones, semitones_of};
 use crate::dsp::rng::Rng;
+use crate::dsp::table::{BlendMode, Ramp, MAX_REGIONS};
 use crate::dsp::warp::{warp_phase_with, warp_value};
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::MAX_UNISON;
-use crate::patch::control::MAX_ENVELOPES;
-use crate::patch::stage::{OscillatorParams, MAX_INPUTS};
+use crate::patch::control::{ControlLevels, MAX_ENVELOPES};
+use crate::patch::stage::{OscillatorParams, TableParams, MAX_INPUTS};
 
 pub struct Oscillator;
 
@@ -54,6 +55,26 @@ pub struct OscillatorState {
     /// quantity. A step on Coarse or Octave still lands on a whole semitone, but reaching it now
     /// takes a few milliseconds instead of jumping, so it does not click or zipper.
     transpose_semitones: f32,
+    /// The ramp of the oscillator's table, and the shares and blend width it was laid out from.
+    /// It is laid out again only when one of them moves. Without a table it is never read.
+    ramp: Ramp,
+    ramp_shares: [f32; MAX_REGIONS],
+    ramp_width: f32,
+}
+
+/// The ramp for the shares and blend width the table's knobs hold now. The state keeps the last
+/// layout, so this lays out again only when a share or the width has moved.
+fn table_ramp(table: &TableParams, state: &mut OscillatorState, levels: &ControlLevels) {
+    let mut shares = [1.0f32; MAX_REGIONS];
+    for (slot, param) in shares.iter_mut().zip(&table.shares) {
+        *slot = param.plain(levels);
+    }
+    let width = table.width.plain(levels);
+    if shares != state.ramp_shares || width != state.ramp_width {
+        state.ramp = Ramp::new(&shares[..table.shares.len()], table.blend, width);
+        state.ramp_shares = shares;
+        state.ramp_width = width;
+    }
 }
 
 /// Where copy `i` of `count` sits across the spread: -1.0 for the first copy, 1.0 for the last,
@@ -161,7 +182,7 @@ impl AudioStage for Oscillator {
         let count = (p.unison.plain(ctx.levels).round() as usize).clamp(1, MAX_UNISON);
         let randomness = p.phase_random.plain(ctx.levels);
 
-        let noise = p.waveform == Waveform::Noise;
+        let noise = p.waveform == Waveform::Noise && p.table.is_none();
         let mut phases = [0.0; MAX_UNISON];
         let mut goals = [0.0; MAX_UNISON];
         let mut fades = [0.0; MAX_UNISON];
@@ -192,6 +213,10 @@ impl AudioStage for Oscillator {
                 p.coarse.plain(ctx.levels),
                 p.fine.plain(ctx.levels),
             ),
+            // A key no knob can match, so the first sample lays the ramp out.
+            ramp: Ramp::new(&[], BlendMode::Linear, 0.0),
+            ramp_shares: [0.0; MAX_REGIONS],
+            ramp_width: -1.0,
         };
         state.update(
             p.pan.plain(ctx.levels),
@@ -213,7 +238,8 @@ impl AudioStage for Oscillator {
         // The signal on the audio input, as one number for the phase to follow. Only the two warp
         // modes that read it look at it, and an unwired input is silence.
         let modulator = (inputs[0].l + inputs[0].r) * 0.5;
-        let noise = p.waveform == Waveform::Noise;
+        // A wired table replaces the waveform, noise included.
+        let noise = p.waveform == Waveform::Noise && p.table.is_none();
         let count = (p.unison.plain(levels).round() as usize).clamp(1, MAX_UNISON);
         if count != state.count {
             let randomness = p.phase_random.plain(levels);
@@ -241,16 +267,24 @@ impl AudioStage for Oscillator {
             let transpose = ratio_of_semitones(state.transpose_semitones);
             let warp_amount = p.warp_amount.plain(levels);
 
+            // A table's position can be driven, so where it lands is found once per sample, and
+            // every unison copy reads from there.
+            let located = p.table.as_ref().map(|table| {
+                table_ramp(table, state, levels);
+                let position = table.position.plain(levels);
+                state.ramp.locate(&table.frame_counts, position)
+            });
+
             let mut sum = Frame::SILENT;
             for i in 0..state.running {
                 // The phase step, in cycles per sample. The waveform band-limits its edges by it.
                 let step = tick.pitch_step * state.detune_ratios[i] * transpose;
                 let phase = warp_phase_with(p.warp, state.phases[i], warp_amount, modulator);
-                let sample = warp_value(
-                    p.warp,
-                    tick.tables.sample(p.waveform, phase, step),
-                    warp_amount,
-                );
+                let raw = match (&p.table, &located) {
+                    (Some(table), Some(at)) => table.data.sample(at, phase, step),
+                    _ => tick.tables.sample(p.waveform, phase, step),
+                };
+                let sample = warp_value(p.warp, raw, warp_amount);
                 sum += state.gains[i] * (sample * state.fades[i]);
                 state.phases[i] += step;
                 if state.phases[i] >= 1.0 {
@@ -691,5 +725,184 @@ mod tests {
         run_on(&mut state, &mut rig, &stack(3.0, 40.0), 50);
         let ratios = state.detune_ratios();
         assert!(ratios[0] < 1.0 && ratios[2] > 1.0);
+    }
+
+    use crate::dsp::table::{self, FRAME_SIZE};
+    use crate::patch::control::{KnobValue, Route, Source};
+    use crate::patch::stage::TableParams;
+    use std::f64::consts::TAU;
+
+    /// One cycle of a sine, `harmonic` times per frame.
+    fn sine_frame(harmonic: usize) -> Vec<f32> {
+        (0..FRAME_SIZE)
+            .map(|n| (TAU * (harmonic * n) as f64 / FRAME_SIZE as f64).sin() as f32)
+            .collect()
+    }
+
+    /// A table of one region per list of frames. The shares are equal and there is no blend, so a
+    /// position sits plainly inside one region.
+    fn table_of(regions: Vec<Vec<Vec<f32>>>, position: Param) -> TableParams {
+        let shares = (0..regions.len())
+            .map(|i| Param::default_of(KnobId::share(i)))
+            .collect();
+        let data = table::build_cached(regions);
+        TableParams {
+            frame_counts: data.regions.iter().map(|r| r.frames.len()).collect(),
+            data,
+            position,
+            width: Param::fixed(KnobId::WtBlendWidth, 0.0),
+            blend: BlendMode::Step,
+            shares,
+        }
+    }
+
+    /// An oscillator that starts every voice from the same phase, so renders can be compared.
+    fn playing(table: Option<TableParams>) -> OscillatorParams {
+        OscillatorParams {
+            table,
+            phase_random: Param::fixed(KnobId::PhaseRandom, 0.0),
+            ..OscillatorParams::default()
+        }
+    }
+
+    fn render(params: &OscillatorParams, rig: &mut Rig, samples: usize) -> Vec<f32> {
+        let mut state = Oscillator::start(params, &mut rig.start_context());
+        (0..samples)
+            .map(|_| {
+                Oscillator::process(
+                    params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+                .l
+            })
+            .collect()
+    }
+
+    fn gap(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// Moving the position between two clearly different regions changes the sound.
+    #[test]
+    fn the_position_picks_the_frame() {
+        let regions = || vec![vec![sine_frame(1)], vec![sine_frame(5)]];
+        let at = |position: f32| {
+            let table = table_of(regions(), Param::fixed(KnobId::WtPosition, position));
+            render(&playing(Some(table)), &mut Rig::new(), 2000)
+        };
+        let (first, last) = (at(0.0), at(1.0));
+        assert!(gap(&first, &last) > 0.5);
+        // Each end really is its frame: the first is the plain sine.
+        let sine = render(&playing(None), &mut Rig::new(), 2000);
+        assert!(gap(&first, &sine) < 0.02);
+    }
+
+    /// A table of one frame plays that frame as a plain loop.
+    #[test]
+    fn a_one_frame_table_is_a_loop_of_the_frame() {
+        let table = table_of(
+            vec![vec![sine_frame(1)]],
+            Param::default_of(KnobId::WtPosition),
+        );
+        let mut rig = Rig::new();
+        let out = render(&playing(Some(table)), &mut rig, 3000);
+        let step = rig.pitch_step;
+        // The frame, read by hand at the same phase with a straight line between samples.
+        let frame = sine_frame(1);
+        let by_hand: Vec<f32> = (0..3000)
+            .map(|n| {
+                let at = (step * n as f32).fract() * FRAME_SIZE as f32;
+                let i = at as usize;
+                let (a, b) = (frame[i], frame[(i + 1) % FRAME_SIZE]);
+                a + (b - a) * (at - i as f32)
+            })
+            .collect();
+        assert!(gap(&out, &by_hand) < 0.01, "{}", gap(&out, &by_hand));
+    }
+
+    /// With no table the oscillator plays its waveform, as it always did, and a wired table
+    /// ignores the waveform, noise included.
+    #[test]
+    fn a_table_replaces_the_waveform() {
+        let table = || {
+            table_of(
+                vec![vec![sine_frame(3)]],
+                Param::default_of(KnobId::WtPosition),
+            )
+        };
+        let mut with_saw = playing(Some(table()));
+        with_saw.waveform = Waveform::Saw;
+        let mut with_noise = playing(Some(table()));
+        with_noise.waveform = Waveform::Noise;
+        let a = render(&with_saw, &mut Rig::new(), 1500);
+        let b = render(&with_noise, &mut Rig::new(), 1500);
+        assert!(gap(&a, &b) < 1e-6);
+        let mut saw = playing(None);
+        saw.waveform = Waveform::Saw;
+        assert!(gap(&a, &render(&saw, &mut Rig::new(), 1500)) > 0.3);
+    }
+
+    /// A control wire on the position moves it every sample: the output follows the frame the
+    /// level picks at that moment.
+    #[test]
+    fn a_driven_position_changes_per_sample() {
+        let regions = || vec![vec![sine_frame(1)], vec![sine_frame(5)]];
+        let driven = Param::new(
+            KnobId::WtPosition,
+            KnobValue {
+                value: 0.0,
+                route: Some(Route {
+                    source: Source::Macro(0),
+                }),
+            },
+        );
+        let params = playing(Some(table_of(regions(), driven)));
+        let mut rig = Rig::new();
+        let mut state = Oscillator::start(&params, &mut rig.start_context());
+        let out: Vec<f32> = (0..2000)
+            .map(|n| {
+                rig.levels.macros[0] = if n < 1000 { 0.0 } else { 1.0 };
+                Oscillator::process(
+                    &params,
+                    &mut state,
+                    &[Frame::SILENT; MAX_INPUTS],
+                    &mut rig.tick(),
+                )
+                .l
+            })
+            .collect();
+        let at = |position: f32| {
+            let table = table_of(regions(), Param::fixed(KnobId::WtPosition, position));
+            render(&playing(Some(table)), &mut Rig::new(), 2000)
+        };
+        let (first, last) = (at(0.0), at(1.0));
+        assert!(gap(&out[..1000], &first[..1000]) < 1e-5);
+        assert!(gap(&out[1000..], &last[1000..]) < 1e-5);
+    }
+
+    /// Unison, warp and the envelope still work on a table: copies detune, and a warp moves
+    /// the sound.
+    #[test]
+    fn warp_and_unison_apply_to_a_table() {
+        let table = || {
+            table_of(
+                vec![vec![sine_frame(1)]],
+                Param::default_of(KnobId::WtPosition),
+            )
+        };
+        let plain = render(&playing(Some(table())), &mut Rig::new(), 1500);
+        let mut warped = playing(Some(table()));
+        warped.warp = crate::dsp::warp::WarpMode::Sync;
+        warped.warp_amount = Param::fixed(KnobId::WarpAmount, 1.0);
+        assert!(gap(&plain, &render(&warped, &mut Rig::new(), 1500)) > 0.3);
+        let mut stacked = playing(Some(table()));
+        stacked.unison = Param::fixed(KnobId::Unison, 3.0);
+        stacked.detune = Param::fixed(KnobId::Detune, 40.0);
+        assert!(gap(&plain, &render(&stacked, &mut Rig::new(), 1500)) > 0.1);
     }
 }

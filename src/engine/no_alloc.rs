@@ -9,6 +9,7 @@ use crate::dsp::effects::eq::EqKind;
 use crate::dsp::mix::MixMode;
 use crate::dsp::monitor::MonitorMode;
 use crate::dsp::sample::SampleData;
+use crate::dsp::table;
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::arpeggiator::ArpPattern;
@@ -21,7 +22,7 @@ use crate::patch::control::{MapNode, MapValue, MathNode, Param, Source};
 use crate::patch::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
-    PhaserParams, ReverbParams, SamplerParams, StageParams, StageSpec,
+    PhaserParams, ReverbParams, SamplerParams, StageParams, StageSpec, TableParams,
 };
 use crate::patch::{
     ArpeggiatorSettings, ChordSettings, EnvelopeSettings, LfoSettings, NoteSourceSpec,
@@ -359,6 +360,75 @@ fn the_audio_path_never_allocates() {
     });
 
     // The patch really played, so the guard covered the voices, the stages, and the LFO.
+    assert!(peak > 0.01, "peak {peak}");
+}
+
+/// A table-playing oscillator, with unison and a position that an LFO drives every sample across
+/// three regions, never allocates in `process`.
+#[test]
+fn a_table_oscillator_never_allocates() {
+    let frames = |harmonic: usize, count: usize| -> Vec<Vec<f32>> {
+        (0..count)
+            .map(|f| {
+                (0..table::FRAME_SIZE)
+                    .map(|n| {
+                        let phase = (n * (harmonic + f)) as f32 / table::FRAME_SIZE as f32;
+                        (phase * std::f32::consts::TAU).sin()
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let data = table::build_cached(vec![frames(1, 3), frames(4, 1), frames(9, 2)]);
+    let table = TableParams {
+        frame_counts: data.regions.iter().map(|r| r.frames.len()).collect(),
+        data,
+        position: Param::new(
+            KnobId::WtPosition,
+            crate::patch::control::KnobValue {
+                value: 0.0,
+                route: Some(crate::patch::control::Route {
+                    source: Source::Lfo(0),
+                }),
+            },
+        ),
+        width: Param::default_of(KnobId::WtBlendWidth),
+        blend: table::BlendMode::Smooth,
+        shares: (0..3)
+            .map(|i| Param::default_of(KnobId::share(i)))
+            .collect(),
+    };
+    let mut patch = Patch::silent();
+    patch.note_sources[0] = Some(NoteSourceSpec::Input);
+    patch.lanes[0].notes_slot = Some(0);
+    patch.lanes[0]
+        .stages
+        .push(StageSpec::new(StageParams::Oscillator(OscillatorParams {
+            table: Some(table),
+            unison: Param::fixed(KnobId::Unison, 4.0),
+            notes: Some(0),
+            ..OscillatorParams::default()
+        })));
+    patch.lfos[0] = Some(LfoSettings {
+        rate: Param::fixed(KnobId::LfoRate, 20.0),
+        ..LfoSettings::new()
+    });
+
+    let mut engine = Engine::new(Arc::new(WaveTables::new()));
+    engine.begin_block(&patch, Transport::default());
+    let mut peak = 0.0f32;
+    assert_no_alloc(|| {
+        for block in 0..4 {
+            engine.begin_block(&patch, Transport::default());
+            if block == 0 {
+                engine.note_on(60, 0.8);
+                engine.note_on(67, 0.8);
+            }
+            for n in 0..512 {
+                peak = peak.max(engine.process_sample(n).peak());
+            }
+        }
+    });
     assert!(peak > 0.01, "peak {peak}");
 }
 

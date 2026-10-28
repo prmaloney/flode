@@ -1099,6 +1099,12 @@ pub(super) fn live_knobs(graph: &Graph, index: usize, levels: &ControlLevels) ->
                 }
             }
         }
+        NodeKind::Oscillator => {
+            let cycle = graph.with_flat(index, |wiring, node| wiring.table_wave(node, levels));
+            if let Some(cycle) = cycle.flatten() {
+                live = live.with_table(cycle);
+            }
+        }
         _ => {}
     }
     live

@@ -59,8 +59,8 @@ fn add_oscillator(graph: &mut Graph, position: Point) -> usize {
 
 /// The oscillator settings of the stage at `index` in a slot.
 fn osc_params(lane: &LaneGraph, index: usize) -> crate::patch::stage::OscillatorParams {
-    match lane.stages[index].params {
-        StageParams::Oscillator(params) => params,
+    match &lane.stages[index].params {
+        StageParams::Oscillator(params) => params.clone(),
         _ => panic!("stage {index} is not an oscillator"),
     }
 }

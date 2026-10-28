@@ -49,12 +49,13 @@ pub enum Mark {
 /// A node's knob values as they are now. A knob a control wire drives reads the live value of
 /// that wire. Every other knob reads the node's own value. An envelope or an LFO also carries
 /// where its signal is now, for the viewer's cursor.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Live {
     values: [f32; KnobId::COUNT],
     envelope: Option<(EnvPhase, f32)>,
     lfo: Option<(f32, f32)>,
     sampler: Option<f32>,
+    table: Option<Vec<f32>>,
 }
 
 impl Live {
@@ -69,7 +70,14 @@ impl Live {
             envelope: None,
             lfo: None,
             sampler: None,
+            table: None,
         }
+    }
+
+    /// Adds the cycle a wired wavetable makes at its current position, from -1.0 to 1.0.
+    pub fn with_table(mut self, cycle: Vec<f32>) -> Self {
+        self.table = Some(cycle);
+        self
     }
 
     /// Adds where an envelope is: its stage and its level from 0.0 to 1.0.
@@ -103,6 +111,12 @@ impl Live {
     /// The Sampler's playhead, while a voice is sounding it.
     pub fn sampler(&self) -> Option<f32> {
         self.sampler
+    }
+
+    /// The cycle of the wavetable wired to an oscillator, at its current position. None for an
+    /// oscillator with no table.
+    pub fn table(&self) -> Option<&[f32]> {
+        self.table.as_deref()
     }
 
     /// The node's own values, as when nothing drives any knob.

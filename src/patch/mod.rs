@@ -6,6 +6,7 @@ pub mod control;
 pub mod flatten;
 pub mod link;
 pub mod stage;
+pub mod tables;
 pub mod wiring;
 
 use crate::dsp::curve::Curve;

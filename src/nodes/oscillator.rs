@@ -119,7 +119,17 @@ impl NodeBehavior for Oscillator {
     /// cycle, so it draws a fixed jagged line that does not change between frames.
     fn trace(&self, node: &FlodeNode, live: &Live, samples: usize) -> Option<Trace> {
         let wave = waveform(node);
-        let points = if wave == Waveform::Noise {
+        // A wired table shows its cycle at the current position, and ignores the waveform.
+        let cycle = live.table().filter(|cycle| !cycle.is_empty());
+        let points = if let Some(cycle) = cycle {
+            let mode = warp_mode(node);
+            let amount = live.value(KnobId::WarpAmount);
+            sample(samples, |x| {
+                let phase = warp_phase(mode, (x * TRACE_CYCLES).fract(), amount);
+                let value = warp_value(mode, cycle_at(cycle, phase), amount);
+                value * 0.5 + 0.5
+            })
+        } else if wave == Waveform::Noise {
             sample(samples, noise_shape)
         } else {
             let mode = warp_mode(node);
@@ -136,6 +146,16 @@ impl NodeBehavior for Oscillator {
             ..Trace::default()
         })
     }
+}
+
+/// A cycle read at `phase` from 0.0 to 1.0, with a straight line between its samples. The cycle
+/// wraps, so the last sample leads back to the first.
+fn cycle_at(cycle: &[f32], phase: f32) -> f32 {
+    let at = phase.rem_euclid(1.0) * cycle.len() as f32;
+    let i = (at as usize).min(cycle.len() - 1);
+    let frac = at - i as f32;
+    let (a, b) = (cycle[i], cycle[(i + 1) % cycle.len()]);
+    a + (b - a) * frac
 }
 
 /// A fixed jagged line for the noise waveform, from 0.0 to 1.0. It hashes the position, so the
@@ -175,6 +195,7 @@ pub const WARP_LABELS: [&str; 10] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nodes::viewer::TRACE_SAMPLES;
     use crate::nodes::NodeKind;
     use nih_plug_iced::Point;
 
@@ -257,6 +278,29 @@ mod tests {
         let own = Live::of(&node);
         let driven = Live::new(&node, |id| (id == KnobId::WarpAmount).then_some(0.9));
         assert_ne!(trace_of(&node, &own), trace_of(&node, &driven));
+    }
+
+    /// A wired table's cycle replaces the waveform in the trace, resampled to the point count,
+    /// and a warp still bends it.
+    #[test]
+    fn a_table_cycle_replaces_the_waveform() {
+        let mut node = oscillator();
+        node.choose(0, 1);
+        // One cycle of a square, as a table at the current position would give.
+        let square: Vec<f32> = (0..2048)
+            .map(|n| if n < 1024 { 1.0 } else { -1.0 })
+            .collect();
+        let live = Live::of(&node).with_table(square);
+        let points = trace_of(&node, &live);
+        assert_eq!(points.len(), TRACE_SAMPLES);
+        assert_eq!(points[10], 1.0);
+        assert_eq!(points[TRACE_SAMPLES - 10], 0.0);
+        assert_ne!(points, trace_of(&node, &Live::of(&node)));
+        node.choose(1, 5);
+        node.set_value(KnobId::WarpAmount, 1.0);
+        let live = Live::of(&node).with_table(live.table().unwrap().to_vec());
+        let flipped = trace_of(&node, &live);
+        assert_eq!(flipped[10], 0.0);
     }
 
     /// The noise trace is the same on every call.
