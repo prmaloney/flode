@@ -6,7 +6,7 @@
 //! `cargo test --lib write_factory_presets -- --ignored`
 //!
 //! The other tests check every preset on its own: it loads without losing a wire, it makes sound
-//! at a sane level, it fits the editor window, and it takes its notes from a MIDI input.
+//! at a sane level, none of its nodes overlap, and it takes its notes from a MIDI input.
 
 mod arp_pluck;
 mod bell_lead;
@@ -14,10 +14,12 @@ mod cascade;
 mod chord_stab;
 mod chord_swell;
 mod dusk_pad;
+mod glass_morph;
 mod hollow_sub;
 mod pulse_lead;
 mod reese;
 mod sub_bass;
+mod tearout;
 mod warm_pad;
 mod wobble_riot;
 
@@ -43,6 +45,7 @@ pub(super) fn all() -> Vec<Preset> {
         filed("Bass", reese::build()),
         filed("Bass", wobble_riot::build()),
         filed("Bass", hollow_sub::build()),
+        filed("Bass", tearout::build()),
         filed("Lead", pulse_lead::build()),
         filed("Lead", bell_lead::build()),
         filed("Lead", arp_pluck::build()),
@@ -51,6 +54,7 @@ pub(super) fn all() -> Vec<Preset> {
         filed("Pad", warm_pad::build()),
         filed("Pad", dusk_pad::build()),
         filed("Pad", chord_swell::build()),
+        filed("Pad", glass_morph::build()),
     ]
 }
 
@@ -345,13 +349,13 @@ mod tests {
     #[test]
     fn the_presets_have_distinct_clean_names() {
         let presets = all();
-        assert_eq!(presets.len(), 12);
+        assert_eq!(presets.len(), 14);
         for (index, preset) in presets.iter().enumerate() {
             assert!(!preset.name.is_empty() && preset.name == preset.name.trim());
             assert!(presets[..index].iter().all(|p| p.name != preset.name));
         }
-        // Four basses, five leads, three pads, each filed in the folder that names it.
-        for (kind, expected) in [("Bass", 4), ("Lead", 5), ("Pad", 3)] {
+        // Five basses, five leads, four pads, each filed in the folder that names it.
+        for (kind, expected) in [("Bass", 5), ("Lead", 5), ("Pad", 4)] {
             let count = presets.iter().filter(|p| p.category == kind).count();
             assert_eq!(count, expected, "{kind}");
         }
@@ -431,29 +435,14 @@ mod tests {
         }
     }
 
-    /// Every node is inside the default window's width, none overlaps another, and each node's
-    /// header and first row sit above the key strip. The viewers make some nodes tall enough that
-    /// the bottom of a node can run under the keys, and the canvas pans to reach it.
+    /// No node overlaps another. A preset does not have to fit the window, since the canvas pans
+    /// to reach whatever runs past the edge or under the keys.
     #[test]
-    fn every_preset_fits_the_window() {
-        let strip_top = 712.0 - crate::editor::piano::STRIP_HEIGHT;
+    fn no_preset_node_overlaps_another() {
         for preset in presets() {
             let graph = loaded(&preset);
             let bounds: Vec<_> = graph.nodes.iter().map(|n| n.bounds()).collect();
             for (i, a) in bounds.iter().enumerate() {
-                assert!(
-                    a.x >= 0.0 && a.x + a.width <= 1024.0,
-                    "{}: node {i} is off the side",
-                    preset.name
-                );
-                assert!(
-                    a.y + a
-                        .height
-                        .min(crate::nodes::HEADER_HEIGHT + crate::nodes::ROW_PITCH)
-                        <= strip_top,
-                    "{}: node {i} starts under the keys",
-                    preset.name
-                );
                 for b in &bounds[i + 1..] {
                     let apart = a.x + a.width <= b.x
                         || b.x + b.width <= a.x

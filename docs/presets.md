@@ -19,9 +19,10 @@ existing file replaces that preset. Canceling the dialog does nothing.
 
 ![The presets menu with the Pad submenu open](images/presets-menu.png)
 
-Twelve factory presets are built in code in `src/editor/factory/`: Sub Bass, Reese, Wobble Riot,
-and Hollow Sub in Bass; Pulse Lead, Bell Lead, Arp Pluck, Chord Stab, and Cascade in Lead; Warm
-Pad, Dusk Pad, and Chord Swell in Pad. To write them into your preset folder:
+Fourteen factory presets are built in code in `src/editor/factory/`: Sub Bass, Reese, Wobble Riot,
+Hollow Sub, and Tearout in Bass; Pulse Lead, Bell Lead, Arp Pluck, Chord Stab, and Cascade in
+Lead; Warm Pad, Dusk Pad, Chord Swell, and Glass Morph in Pad. Glass Morph and Tearout play
+wavetables. To write them into your preset folder:
 
 ```sh
 cargo test --lib write_factory_presets -- --ignored
