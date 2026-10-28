@@ -30,12 +30,6 @@ fn minimal_graph() -> Graph {
         ],
         vec![
             Connection {
-                from: 3,
-                out: Port::Table,
-                to: 0,
-                input: Port::TableIn,
-            },
-            Connection {
                 from: 0,
                 out: Port::Audio,
                 to: 1,
@@ -46,6 +40,12 @@ fn minimal_graph() -> Graph {
                 out: Port::Notes,
                 to: 0,
                 input: Port::Notes,
+            },
+            Connection {
+                from: 3,
+                out: Port::Table,
+                to: 0,
+                input: Port::TableIn,
             },
         ],
     );
@@ -61,11 +61,17 @@ fn midi_input(graph: &mut Graph) -> usize {
     }
 }
 
-/// Adds an oscillator that plays: its notes pin is wired to the graph's MIDI input.
+/// Adds an oscillator that plays: its notes pin is wired to the graph's MIDI input, and a saw
+/// node added after it feeds its table pin.
 fn add_oscillator(graph: &mut Graph, position: Point) -> usize {
     let input = midi_input(graph);
     let oscillator = graph.add_node(NodeKind::Oscillator, position);
     graph.connect(input, Port::Notes, oscillator, Port::Notes);
+    let saw = graph.add_node(
+        NodeKind::SawWave,
+        Point::new(position.x, position.y + 300.0),
+    );
+    graph.connect(saw, Port::Table, oscillator, Port::TableIn);
     oscillator
 }
 
@@ -196,8 +202,8 @@ mod slot_tests {
         let third = add_oscillator(&mut graph, Point::new(0.0, 400.0));
         graph.connect(second, Port::Audio, 1, Port::Slot(1));
         graph.connect(third, Port::Audio, 1, Port::Slot(2));
-        // Three audio wires, and a notes wire for each oscillator.
-        assert_eq!(graph.connections.len(), 6);
+        // Three audio wires, and a notes wire and a table wire for each oscillator.
+        assert_eq!(graph.connections.len(), 9);
 
         let loaded = Graph::from_saved(&graph.to_saved());
         assert_eq!(loaded.connections, graph.connections);
@@ -251,14 +257,27 @@ mod slot_tests {
             version: 0,
             preset_name: None,
             preset_category: String::new(),
-            nodes: vec![node(NodeKind::Oscillator), node(NodeKind::Output)],
+            nodes: vec![
+                node(NodeKind::Oscillator),
+                node(NodeKind::Output),
+                node(NodeKind::SawWave),
+            ],
             connections: vec![(0, 1)],
-            links: Vec::new(),
+            links: vec![Connection {
+                from: 2,
+                out: Port::Table,
+                to: 0,
+                input: Port::TableIn,
+            }],
         };
         let graph = Graph::from_saved(&saved);
-        // The audio wire goes to the first slot, and the upgrade adds a notes wire.
-        assert_eq!(graph.connections.len(), 2);
-        assert_eq!(graph.connections[0].input, Port::Slot(0));
+        // The audio wire goes to the first slot, and the upgrade adds a notes wire. The table
+        // wire stays too.
+        assert_eq!(graph.connections.len(), 3);
+        assert!(graph
+            .connections
+            .iter()
+            .any(|c| c.from == 0 && c.to == 1 && c.input == Port::Slot(0)));
         assert!(graph.patch().lanes[0].is_active());
     }
 
@@ -320,10 +339,10 @@ mod slot_tests {
         graph.insert_into(filter, 0);
         graph.refresh_slots();
 
-        assert_eq!(graph.connections.len(), 3);
+        assert_eq!(graph.connections.len(), 4);
         assert_eq!(graph.connections[0].to, filter);
-        assert_eq!(graph.connections[2].from, filter);
-        assert_eq!(graph.connections[2].input, Port::Slot(0));
+        assert_eq!(graph.connections[3].from, filter);
+        assert_eq!(graph.connections[3].input, Port::Slot(0));
         assert!(graph.patch().lanes[0]
             .stages
             .iter()
@@ -925,9 +944,16 @@ mod envelope_migration_tests {
                 node(NodeKind::Oscillator, 0.0),
                 node(NodeKind::Envelope, 100.0),
                 node(NodeKind::Output, 200.0),
+                node(NodeKind::SawWave, 300.0),
             ],
             connections: Vec::new(),
             links: vec![
+                Connection {
+                    from: 3,
+                    out: Port::Table,
+                    to: 0,
+                    input: Port::TableIn,
+                },
                 Connection {
                     from: 0,
                     out: Port::Audio,
@@ -982,18 +1008,19 @@ mod mix_tests {
         assert_eq!(lane.stages[2].inputs, [Some(0), Some(1)]);
     }
 
-    /// Each oscillator keeps its own waveform and knobs.
+    /// Each oscillator keeps its own warp mode and knobs.
     #[test]
     fn each_oscillator_keeps_its_own_settings() {
+        use crate::dsp::warp::WarpMode;
         let (mut graph, a, b, _) = chain();
-        graph.nodes[a].choices = vec![Waveform::Square.index()];
-        graph.nodes[b].choices = vec![Waveform::Triangle.index()];
+        graph.nodes[a].choose(1, WarpMode::Sync as usize);
+        graph.nodes[b].choose(1, WarpMode::Flip as usize);
         graph.nodes[a].set_value(KnobId::Detune, KnobId::Detune.to_normalized(40.0));
 
         let lane = graph.patch().lanes[0].clone();
         let (first, second) = (osc_params(&lane, 0), osc_params(&lane, 1));
-        assert_eq!(first.waveform, Waveform::Square);
-        assert_eq!(second.waveform, Waveform::Triangle);
+        assert_eq!(first.warp, WarpMode::Sync);
+        assert_eq!(second.warp, WarpMode::Flip);
         assert_eq!(first.detune.plain(&ControlLevels::default()), 40.0);
     }
 
@@ -1040,14 +1067,14 @@ mod mix_tests {
         graph.insert_into(mix, 0);
         graph.refresh_slots();
 
-        // The notes wire stays, and the audio wire becomes two.
-        assert_eq!(graph.connections.len(), 3);
+        // The notes and table wires stay, and the audio wire becomes two.
+        assert_eq!(graph.connections.len(), 4);
         assert_eq!(graph.connections[0].from, 0);
         assert_eq!(graph.connections[0].to, mix);
         assert_eq!(graph.connections[0].input, Port::AudioIn(0));
-        assert_eq!(graph.connections[2].from, mix);
-        assert_eq!(graph.connections[2].out, Port::Audio);
-        assert_eq!(graph.connections[2].input, Port::Slot(0));
+        assert_eq!(graph.connections[3].from, mix);
+        assert_eq!(graph.connections[3].out, Port::Audio);
+        assert_eq!(graph.connections[3].input, Port::Slot(0));
 
         // The oscillator feeds signal A, and signal B waits for a wire.
         let lane = graph.patch().lanes[0].clone();
@@ -1114,13 +1141,13 @@ mod layering_tests {
     #[test]
     fn the_selected_node_draws_last() {
         let mut graph = three_nodes();
-        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3, 4]);
         graph.selected = Some(0);
-        assert_eq!(graph.draw_order(), vec![1, 2, 3, 0]);
+        assert_eq!(graph.draw_order(), vec![1, 2, 3, 4, 0]);
         graph.selected = Some(1);
-        assert_eq!(graph.draw_order(), vec![0, 2, 3, 1]);
+        assert_eq!(graph.draw_order(), vec![0, 2, 3, 4, 1]);
         graph.selected = None;
-        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3, 4]);
     }
 
     /// A node being placed is on top too, and a stale selection never indexes past the nodes.
@@ -1134,7 +1161,7 @@ mod layering_tests {
         assert_eq!(graph.draw_order().last(), Some(&0));
         graph.interaction = Interaction::Idle;
         graph.selected = Some(99);
-        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3]);
+        assert_eq!(graph.draw_order(), vec![0, 1, 2, 3, 4]);
     }
 
     /// Where two nodes overlap, a press goes to the one on top, which is the selected one.
@@ -1187,7 +1214,9 @@ mod layering_tests {
         };
         let strip = piano::strip_bounds(bounds);
         let mut graph = minimal_graph();
-        // Move the oscillator so the last row of its Wave list lands 30 px into the strip.
+        // The warp list sits in a folded section, so open it first.
+        graph.nodes[0].toggle_section(2);
+        // Move the oscillator so the last row of its Warp list lands 30 px into the strip.
         graph.nodes[0].position = Point::new(100.0, 0.0);
         let dropdown = graph.nodes[0].dropdowns().remove(0);
         let rows = dropdown.labels.len();
@@ -1428,7 +1457,9 @@ mod bypass_and_duplicate_tests {
         for kind in NodeKind::ALL {
             let mut node = FlodeNode::new(kind, Point::new(0.0, 0.0));
             let expected = match kind {
-                NodeKind::Oscillator | NodeKind::Sampler => crate::nodes::Bypass::Mute,
+                NodeKind::Oscillator | NodeKind::Sampler | NodeKind::Noise => {
+                    crate::nodes::Bypass::Mute
+                }
                 NodeKind::Output
                 | NodeKind::Envelope
                 | NodeKind::Lfo
@@ -1444,6 +1475,10 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Harmonics
                 | NodeKind::Sweep
                 | NodeKind::WaveFile
+                | NodeKind::SineWave
+                | NodeKind::SawWave
+                | NodeKind::SquareWave
+                | NodeKind::TriangleWave
                 | NodeKind::GroupInput
                 | NodeKind::GroupOutput => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
@@ -1741,16 +1776,16 @@ mod bypass_and_duplicate_tests {
         // Duplicate leaves the copy in the placing state, following the cursor.
         let mut graph = minimal_graph();
         click_entry(&mut graph, 0);
-        assert_eq!(graph.nodes.len(), 4);
-        assert_eq!(graph.selected, Some(3));
+        assert_eq!(graph.nodes.len(), 5);
+        assert_eq!(graph.selected, Some(4));
         assert!(matches!(
             graph.interaction,
-            Interaction::Placing { node: 3, .. }
+            Interaction::Placing { node: 4, .. }
         ));
 
         let mut graph = minimal_graph();
         click_entry(&mut graph, 2);
-        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.nodes[0].kind, NodeKind::Output);
     }
 
@@ -1815,8 +1850,8 @@ mod bypass_and_duplicate_tests {
         let mut editor = editor(&mut graph);
         let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(matches!(message, Some(Message::GraphChanged)));
-        assert_eq!(editor.graph.nodes.len(), 4);
-        assert_eq!(editor.graph.selected, Some(3));
+        assert_eq!(editor.graph.nodes.len(), 5);
+        assert_eq!(editor.graph.selected, Some(4));
     }
 
     /// The copy is placing: it sits centred under the cursor, follows it, and the next press sets
@@ -1834,15 +1869,15 @@ mod bypass_and_duplicate_tests {
         press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(matches!(
             editor.graph.interaction,
-            Interaction::Placing { node: 3, .. }
+            Interaction::Placing { node: 4, .. }
         ));
-        let at = editor.graph.nodes[3].position;
+        let at = editor.graph.nodes[4].position;
         assert_eq!((at.x, at.y), (first.x - grab.x, first.y - grab.y));
 
         // It follows the cursor.
         let second = Point::new(600.0, 250.0);
         move_cursor(&mut editor, second);
-        let at = editor.graph.nodes[3].position;
+        let at = editor.graph.nodes[4].position;
         assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
 
         // The next press sets it down, and it stays when the cursor moves on.
@@ -1853,7 +1888,7 @@ mod bypass_and_duplicate_tests {
         );
         assert!(matches!(editor.graph.interaction, Interaction::Idle));
         move_cursor(&mut editor, Point::new(100.0, 100.0));
-        let at = editor.graph.nodes[3].position;
+        let at = editor.graph.nodes[4].position;
         assert_eq!((at.x, at.y), (second.x - grab.x, second.y - grab.y));
     }
 
@@ -1867,7 +1902,7 @@ mod bypass_and_duplicate_tests {
         release(&mut editor, KeyCode::D);
         let message = press(&mut editor, KeyCode::D, Modifiers::SHIFT);
         assert!(message.is_none());
-        assert_eq!(editor.graph.nodes.len(), 4);
+        assert_eq!(editor.graph.nodes.len(), 5);
     }
 
     /// A plain D still plays a note, and does not copy anything.
@@ -1881,7 +1916,7 @@ mod bypass_and_duplicate_tests {
             message,
             Some(Message::Note(PianoEvent::NoteOn { .. }))
         ));
-        assert_eq!(editor.graph.nodes.len(), 3);
+        assert_eq!(editor.graph.nodes.len(), 4);
     }
 
     /// Shortcuts that include Control or Command are left to the host.
@@ -1912,9 +1947,16 @@ mod default_graph_tests {
                 NodeKind::Oscillator,
                 NodeKind::Output,
                 NodeKind::Envelope,
-                NodeKind::Input
+                NodeKind::Input,
+                NodeKind::SawWave
             ]
         );
+        assert!(graph.connections.contains(&Connection {
+            from: 4,
+            out: Port::Table,
+            to: 0,
+            input: Port::TableIn,
+        }));
         assert!(graph.connections.contains(&Connection {
             from: 3,
             out: Port::Notes,
@@ -1933,7 +1975,7 @@ mod default_graph_tests {
             to: 0,
             input: Port::Shape,
         }));
-        assert_eq!(graph.connections.len(), 3);
+        assert_eq!(graph.connections.len(), 4);
     }
 
     /// Every wire of the default graph is valid, so none is dropped on a save and load.
@@ -1943,7 +1985,7 @@ mod default_graph_tests {
         assert!(graph.connections.iter().all(|c| c.is_valid(&graph.nodes)));
         let loaded = Graph::from_saved(&graph.to_saved());
         assert_eq!(loaded.connections, graph.connections);
-        assert_eq!(loaded.nodes.len(), 4);
+        assert_eq!(loaded.nodes.len(), 5);
     }
 
     /// The envelope reaches the patch, and the oscillator takes its amplitude from it.
@@ -2146,8 +2188,8 @@ mod section_tests {
         assert!(osc.dropdown_at(at).is_none());
         osc.toggle_section(2);
         assert!(warp(&osc));
-        // The wave dropdown above the sections never hides.
-        assert!(osc.dropdowns().iter().any(|d| d.which == 0));
+        // The oscillator has no dropdown above its sections, so the warp list is its only one.
+        assert!(osc.dropdowns().iter().all(|d| d.which == 1));
     }
 
     /// A switch above a folded section stays on show, and folding does not touch other nodes.
@@ -2597,7 +2639,7 @@ mod preset_ui_tests {
 
         let mut other = graph_in(&dir);
         other.delete_node(0);
-        assert_eq!(other.nodes.len(), 2);
+        assert_eq!(other.nodes.len(), 3);
         let mut editor = NodeEditor::new(&mut other, ControlLevels::default(), [0; 2], [0.0; 2]);
         // The list shows the category. Clicking it opens its submenu, and the preset is in that.
         open_presets(&mut editor);
@@ -2612,7 +2654,7 @@ mod preset_ui_tests {
 
         assert!(editor.graph.preset_list.is_none());
         assert_eq!(editor.graph.preset_category, "Pad");
-        assert_eq!(editor.graph.nodes.len(), 4);
+        assert_eq!(editor.graph.nodes.len(), 5);
         assert!(editor
             .graph
             .nodes
@@ -3227,7 +3269,7 @@ mod notes_tests {
         let mut graph = minimal_graph();
         graph.disconnect_input(0, Port::Notes);
         let loaded = Graph::from_saved(&old_save(&graph));
-        assert_eq!(loaded.nodes.len(), 3);
+        assert_eq!(loaded.nodes.len(), 4);
         assert!(has_notes_wire(&loaded, 0));
     }
 
@@ -3237,7 +3279,7 @@ mod notes_tests {
         let mut graph = minimal_graph();
         graph.disconnect_input(0, Port::Notes);
         let loaded = Graph::from_saved(&graph.to_saved());
-        assert_eq!(loaded.nodes.len(), 3);
+        assert_eq!(loaded.nodes.len(), 4);
         assert!(!has_notes_wire(&loaded, 0));
     }
 
@@ -6720,9 +6762,11 @@ mod lfo_curve_tests {
             assert_eq!(lfo::shape(&node), LfoShape::Wave(*wave));
             assert_eq!(lfo::waveform(&node), *wave);
         }
-        // The oscillator's list does not change.
-        let osc = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
-        assert_eq!(osc.dropdowns()[0].labels.len(), 5);
+        // The oscillator's only list is its warp modes, once their section is open.
+        let mut osc = FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 0.0));
+        osc.toggle_section(2);
+        assert_eq!(osc.dropdowns()[0].which, 1);
+        assert_eq!(osc.dropdowns()[0].labels, oscillator::WARP_LABELS);
         assert_eq!(lfo::shape(&lfo_node()), LfoShape::Custom);
     }
 
