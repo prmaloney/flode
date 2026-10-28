@@ -255,7 +255,12 @@ pub enum SliceMode {
 
 /// The file mixed down to one channel, with any bad value made silent.
 fn mono_mix(data: &SampleData) -> Vec<f32> {
-    (0..data.len())
+    mono_mix_head(data, data.len())
+}
+
+/// The first `count` samples of the file mixed down to one channel.
+fn mono_mix_head(data: &SampleData, count: usize) -> Vec<f32> {
+    (0..data.len().min(count))
         .map(|n| {
             let (l, r) = data.frame(n);
             let v = (l + r) * 0.5;
@@ -377,6 +382,88 @@ fn align_phase(frame: &mut [f32]) {
     frame.rotate_left(start);
 }
 
+/// The pitch period to cut by, for `SliceMode::Cycles` on a file with a clear pitch. None for a
+/// fixed mode, or for a file with no clear pitch.
+fn cycle_period(mono: &[f32], sample_rate: f32, mode: SliceMode) -> Option<f64> {
+    match mode {
+        SliceMode::Cycles => detect_period(mono, sample_rate),
+        SliceMode::Fixed(_) => None,
+    }
+}
+
+/// Each slice of a file `len` samples long, as a start and a length in samples. `period` is the
+/// detected pitch period, which only a `Cycles` mode uses: without one it falls back to fixed
+/// slices of `FALLBACK_SLICE`. A fixed slice is made for the last stretch if it is at least half
+/// full.
+fn plan_slices(len: usize, period: Option<f64>, mode: SliceMode) -> Vec<(f64, f64)> {
+    let fixed = |n: usize| {
+        let n = n.clamp(MIN_SLICE, MAX_SLICE);
+        let whole = len / n;
+        let rest = len - whole * n;
+        let count = whole + usize::from(rest * 2 >= n);
+        (0..count)
+            .map(|i| ((i * n) as f64, n as f64))
+            .collect::<Vec<_>>()
+    };
+    match (mode, period) {
+        (SliceMode::Fixed(n), _) => fixed(n),
+        (SliceMode::Cycles, None) => fixed(FALLBACK_SLICE),
+        (SliceMode::Cycles, Some(period)) => {
+            let count = (len as f64 / period).floor() as usize;
+            (0..count).map(|i| (i as f64 * period, period)).collect()
+        }
+    }
+}
+
+/// How much of the start of a file the pitch search and the first frame need: the half second the
+/// search reads, or the longest slice, whichever is more.
+fn head_len(sample_rate: f32) -> usize {
+    let half_second = if sample_rate.is_finite() && sample_rate > 0.0 {
+        (sample_rate * 0.5) as usize
+    } else {
+        0
+    };
+    half_second.max(MAX_SLICE) + 8
+}
+
+/// How many frames `slice_frames` makes for `data`, without cutting any of them. Only the start of
+/// the file is looked at, for the pitch.
+pub fn frame_count(data: &SampleData, mode: SliceMode) -> usize {
+    if data.len() == 0 {
+        return 0;
+    }
+    let mono = mono_mix_head(data, head_len(data.sample_rate));
+    let period = cycle_period(&mono, data.sample_rate, mode);
+    plan_slices(data.len(), period, mode)
+        .len()
+        .min(MAX_IMPORT_FRAMES)
+}
+
+/// A preview of the first frame `slice_frames` would make, or None if it makes none. It only reads
+/// the start of the file, so it is cheap on a long one. It is scaled to its own loudest sample,
+/// where `slice_frames` scales every frame by the loudest of them all.
+pub fn first_frame(data: &SampleData, mode: SliceMode) -> Option<Vec<f32>> {
+    if data.len() == 0 {
+        return None;
+    }
+    let mono = mono_mix_head(data, head_len(data.sample_rate));
+    let period = cycle_period(&mono, data.sample_rate, mode);
+    let (start, len) = *plan_slices(data.len(), period, mode).first()?;
+    let mut frame = resample_cycle(&mono, start, len);
+    remove_dc(&mut frame);
+    align_phase(&mut frame);
+    let loudest = peak(&frame);
+    if loudest > 1e-9 {
+        for v in frame.iter_mut() {
+            *v /= loudest;
+        }
+    } else {
+        frame.fill(0.0);
+    }
+    sanitize(&mut frame);
+    Some(frame)
+}
+
 /// Cuts an audio file into single-cycle frames. The channels are mixed to mono and sliced as
 /// `mode` says. Each slice is stretched to `FRAME_SIZE` samples as one cycle, has its average
 /// removed, and is rotated to start at a rising zero crossing. Then every frame is scaled by the
@@ -388,29 +475,8 @@ pub fn slice_frames(data: &SampleData, mode: SliceMode) -> Vec<Vec<f32>> {
     if mono.is_empty() {
         return Vec::new();
     }
-    let len = mono.len();
-    let mode = match mode {
-        SliceMode::Cycles => match detect_period(&mono, data.sample_rate) {
-            Some(_) => mode,
-            None => SliceMode::Fixed(FALLBACK_SLICE),
-        },
-        fixed => fixed,
-    };
-    // Each slice is a start and a length in samples.
-    let slices: Vec<(f64, f64)> = match mode {
-        SliceMode::Fixed(n) => {
-            let n = n.clamp(MIN_SLICE, MAX_SLICE);
-            let whole = len / n;
-            let rest = len - whole * n;
-            let count = whole + usize::from(rest * 2 >= n);
-            (0..count).map(|i| ((i * n) as f64, n as f64)).collect()
-        }
-        SliceMode::Cycles => {
-            let period = detect_period(&mono, data.sample_rate).unwrap_or(FALLBACK_SLICE as f64);
-            let count = (len as f64 / period).floor() as usize;
-            (0..count).map(|i| (i as f64 * period, period)).collect()
-        }
-    };
+    let period = cycle_period(&mono, data.sample_rate, mode);
+    let slices = plan_slices(mono.len(), period, mode);
     let picked: Vec<(f64, f64)> = if slices.len() > MAX_IMPORT_FRAMES {
         (0..MAX_IMPORT_FRAMES)
             .map(|i| slices[i * slices.len() / MAX_IMPORT_FRAMES])
@@ -749,5 +815,60 @@ mod tests {
         let data = sine_data(64.0, 64 * 300, 44100.0, 1);
         let frames = slice_frames(&data, SliceMode::Fixed(64));
         assert_eq!(frames.len(), 256);
+    }
+
+    /// The cheap count agrees with the real slicing in every mode.
+    #[test]
+    fn frame_count_matches_slice_frames() {
+        let pitched = sine_data(100.0, 10_000, 44100.0, 1);
+        let noise = SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: (0..9000)
+                .map(|n| ((n * 7919) % 1000) as f32 / 500.0 - 1.0)
+                .collect(),
+        };
+        let many = sine_data(64.0, 64 * 300, 44100.0, 1);
+        let empty = SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: Vec::new(),
+        };
+        for data in [&pitched, &noise, &many, &empty] {
+            for mode in [
+                SliceMode::Cycles,
+                SliceMode::Fixed(1024),
+                SliceMode::Fixed(64),
+            ] {
+                assert_eq!(
+                    frame_count(data, mode),
+                    slice_frames(data, mode).len(),
+                    "{mode:?}"
+                );
+            }
+        }
+    }
+
+    /// The preview is a valid frame that has the shape of the real first frame.
+    #[test]
+    fn first_frame_previews_the_first_slice() {
+        let data = sine_data(100.0, 10_000, 44100.0, 1);
+        let preview = first_frame(&data, SliceMode::Cycles).expect("a frame");
+        assert_good(&preview);
+        let real = &slice_frames(&data, SliceMode::Cycles)[0];
+        let worst = preview
+            .iter()
+            .zip(real)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 1e-3, "{worst}");
+        let empty = SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: Vec::new(),
+        };
+        assert!(first_frame(&empty, SliceMode::Cycles).is_none());
+        let short = sine_data(100.0, 20, 44100.0, 1);
+        assert!(first_frame(&short, SliceMode::Fixed(1024)).is_none());
     }
 }
