@@ -7,6 +7,7 @@ pub mod delay;
 pub mod effects;
 pub mod envelope;
 pub mod frame;
+pub mod frames;
 pub mod gain;
 pub mod mix;
 pub mod monitor;
