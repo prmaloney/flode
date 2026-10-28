@@ -225,6 +225,20 @@ fn categories_hold_the_new_groupings() {
         ]
     );
     assert_eq!(
+        Category::Wavetable.kinds(),
+        &[
+            NodeKind::Wavetable,
+            NodeKind::SineWave,
+            NodeKind::SawWave,
+            NodeKind::SquareWave,
+            NodeKind::TriangleWave,
+            NodeKind::CurveFrame,
+            NodeKind::Harmonics,
+            NodeKind::Sweep,
+            NodeKind::WaveFile,
+        ]
+    );
+    assert_eq!(
         Category::Effects.kinds(),
         &[
             NodeKind::Filter,
@@ -241,6 +255,7 @@ fn categories_hold_the_new_groupings() {
     assert_eq!(
         Category::Utility.kinds(),
         &[
+            NodeKind::Noise,
             NodeKind::Mix,
             NodeKind::Gain,
             NodeKind::Monitor,

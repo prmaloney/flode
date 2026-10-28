@@ -60,6 +60,8 @@ const COLUMN_X: [f32; 5] = [24.0, 224.0, 424.0, 624.0, 840.0];
 /// Where the top node of a column sits, and the gap between stacked nodes.
 const TOP: f32 = 80.0;
 const GAP: f32 = 12.0;
+/// Where the folded wave nodes sit, in a row above the columns.
+const WAVE_BAND_Y: f32 = 8.0;
 
 /// The column of the MIDI input and the amplitude envelope.
 pub(super) const CONTROLS: usize = 0;
@@ -277,16 +279,11 @@ impl Builder {
             self.graph.nodes[index].position = Point::new(COLUMN_X[column], next[column]);
             next[column] += self.graph.nodes[index].height() + GAP;
         }
-        // The folded wave nodes are small, so each goes in whichever column has the most room left.
-        for index in 0..self.graph.nodes.len() {
-            if !self.folded.contains(&index) {
-                continue;
-            }
-            let column = (0..COLUMN_X.len())
-                .min_by(|&a, &b| next[a].total_cmp(&next[b]))
-                .unwrap_or(0);
-            self.graph.nodes[index].position = Point::new(COLUMN_X[column], next[column]);
-            next[column] += self.graph.nodes[index].height() + GAP;
+        // The folded wave nodes are small and the columns can be full, so they sit side by side in
+        // the free band above the columns, from the second column on to clear the logo.
+        for (place, &index) in self.folded.iter().enumerate() {
+            let column = (place + 1).min(COLUMN_X.len() - 1);
+            self.graph.nodes[index].position = Point::new(COLUMN_X[column], WAVE_BAND_Y);
         }
         self.graph.preset_name = Some(name.to_string());
         Preset {

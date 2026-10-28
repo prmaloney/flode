@@ -22,6 +22,7 @@ fn chord_patch() -> Patch {
         node(NodeKind::Chord),
         node(NodeKind::Oscillator),
         node(NodeKind::Output),
+        node(NodeKind::SawWave),
     ];
     nodes[3].used = 1;
     let links = vec![
@@ -42,6 +43,12 @@ fn chord_patch() -> Patch {
             out: Port::Audio,
             to: 3,
             input: Port::Slot(0),
+        },
+        Connection {
+            from: 4,
+            out: Port::Table,
+            to: 2,
+            input: Port::TableIn,
         },
     ];
     Wiring::new(&nodes, &links).patch()
@@ -84,6 +91,7 @@ fn a_chord_fed_by_an_arpeggiator_sounds() {
         node(NodeKind::Chord),
         node(NodeKind::Oscillator),
         node(NodeKind::Output),
+        node(NodeKind::SawWave),
     ];
     nodes[4].used = 1;
     let links = vec![
@@ -110,6 +118,12 @@ fn a_chord_fed_by_an_arpeggiator_sounds() {
             out: Port::Audio,
             to: 4,
             input: Port::Slot(0),
+        },
+        Connection {
+            from: 5,
+            out: Port::Table,
+            to: 3,
+            input: Port::TableIn,
         },
     ];
     let patch = Wiring::new(&nodes, &links).patch();

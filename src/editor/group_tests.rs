@@ -664,11 +664,13 @@ fn a_monitor_inside_a_group_finds_its_instance() {
             node(NodeKind::Monitor, 200.0),
             node(NodeKind::Output, 400.0),
             node(NodeKind::Input, 0.0),
+            node(NodeKind::SawWave, 0.0),
         ],
         vec![
             wire(0, Port::Audio, 1, Port::Audio),
             wire(1, Port::Audio, 2, Port::Slot(0)),
             wire(3, Port::Notes, 0, Port::Notes),
+            wire(4, Port::Table, 0, Port::TableIn),
         ],
     );
     graph.refresh_slots();

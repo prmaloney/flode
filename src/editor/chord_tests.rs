@@ -38,11 +38,13 @@ fn graph_with_chord() -> Graph {
             node(NodeKind::Chord, 200.0),
             node(NodeKind::Oscillator, 400.0),
             node(NodeKind::Output, DEFAULT_OUTPUT_X),
+            node(NodeKind::SawWave, 400.0),
         ],
         vec![
             wire(INPUT, Port::Notes, CHORD, Port::Notes),
             wire(CHORD, Port::Notes, OSC, Port::Notes),
             wire(OSC, Port::Audio, OUTPUT, Port::Slot(0)),
+            wire(4, Port::Table, OSC, Port::TableIn),
         ],
     );
     graph.refresh_slots();
@@ -82,12 +84,14 @@ fn a_chord_fed_by_an_arpeggiator_reads_the_right_upstream_slot() {
             node(NodeKind::Chord, 2.0),       // 2
             node(NodeKind::Oscillator, 3.0),  // 3
             node(NodeKind::Output, DEFAULT_OUTPUT_X),
+            node(NodeKind::SawWave, 4.0),
         ],
         vec![
             wire(0, Port::Notes, 1, Port::Notes),
             wire(1, Port::Notes, 2, Port::Notes),
             wire(2, Port::Notes, 3, Port::Notes),
             wire(3, Port::Audio, 4, Port::Slot(0)),
+            wire(5, Port::Table, 3, Port::TableIn),
         ],
     );
     graph.refresh_slots();

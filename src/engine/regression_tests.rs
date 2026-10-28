@@ -9,7 +9,7 @@ use super::tests::{engine_on, peak, render};
 use super::*;
 use crate::nodes::connection::Connection;
 use crate::nodes::{FlodeNode, NodeKind, Port};
-use crate::patch::stage::{OscillatorParams, StageParams, StageSpec};
+use crate::patch::stage::{OscillatorParams, StageParams, StageSpec, TableParams};
 use crate::patch::wiring::Wiring;
 use nih_plug_iced::Point;
 
@@ -23,6 +23,7 @@ fn compiled_patch() -> Patch {
         node(NodeKind::Input),
         node(NodeKind::Oscillator),
         node(NodeKind::Output),
+        node(NodeKind::SawWave),
     ];
     nodes[2].used = 1;
     let links = vec![
@@ -38,6 +39,12 @@ fn compiled_patch() -> Patch {
             to: 2,
             input: Port::Slot(0),
         },
+        Connection {
+            from: 3,
+            out: Port::Table,
+            to: 1,
+            input: Port::TableIn,
+        },
     ];
     Wiring::new(&nodes, &links).patch()
 }
@@ -45,15 +52,26 @@ fn compiled_patch() -> Patch {
 /// The same sound, built the way every other test in this codebase still builds a `Patch` by hand:
 /// a bare oscillator stage with no note-routing slot of its own. This is the shape a `Patch` had
 /// before `notes_slot` and `note_sources` existed, and it is what `LaneGraph::silent` still
-/// defaults to, so this is the behavior the slot-based engine has to keep matching exactly.
+/// defaults to, so this is the behavior the slot-based engine has to keep matching exactly. An
+/// oscillator plays only a wired wavetable, so the hand-built one takes the compiled one's table.
 fn hand_built_patch() -> Patch {
     let mut patch = Patch::silent();
     patch.lanes[0]
         .stages
-        .push(StageSpec::new(StageParams::Oscillator(
-            OscillatorParams::default(),
-        )));
+        .push(StageSpec::new(StageParams::Oscillator(OscillatorParams {
+            table: compiled_table(),
+            ..OscillatorParams::default()
+        })));
     patch
+}
+
+/// The wavetable the compiler builds for the compiled graph's oscillator.
+fn compiled_table() -> Option<TableParams> {
+    let compiled = compiled_patch();
+    let StageParams::Oscillator(ref osc) = compiled.lanes[0].stages[0].params else {
+        panic!("expected an oscillator stage");
+    };
+    osc.table.clone()
 }
 
 /// Plays a chord through `patch` and returns what came out.
@@ -87,10 +105,12 @@ fn the_compiler_fills_in_the_new_slot_fields_and_nothing_else() {
     };
     assert_eq!(osc.notes, Some(0));
     assert_eq!(compiled.lanes[0].notes_slot, Some(0));
+    assert!(osc.table.is_some(), "the wired saw becomes the table");
     assert_eq!(
         *osc,
         OscillatorParams {
             notes: Some(0),
+            table: osc.table.clone(),
             ..OscillatorParams::default()
         }
     );

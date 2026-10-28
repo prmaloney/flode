@@ -40,6 +40,7 @@ fn graph_with_both_paths() -> Graph {
             node(NodeKind::Oscillator, 400.0),
             node(NodeKind::Oscillator, 400.0),
             node(NodeKind::Output, DEFAULT_OUTPUT_X),
+            node(NodeKind::SawWave, 400.0),
         ],
         vec![
             wire(INPUT, Port::Notes, ARP, Port::Notes),
@@ -47,6 +48,8 @@ fn graph_with_both_paths() -> Graph {
             wire(INPUT, Port::Notes, RAW_OSC, Port::Notes),
             wire(ARPED_OSC, Port::Audio, OUTPUT, Port::Slot(0)),
             wire(RAW_OSC, Port::Audio, OUTPUT, Port::Slot(1)),
+            wire(5, Port::Table, ARPED_OSC, Port::TableIn),
+            wire(5, Port::Table, RAW_OSC, Port::TableIn),
         ],
     );
     graph.refresh_slots();
