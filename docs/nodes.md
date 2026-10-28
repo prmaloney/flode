@@ -40,6 +40,31 @@ neutral header, since audio is most of a graph.
   Notes wire, and goes through its own envelope and level. A modulator that has passed through an
   effect is already summed across voices, so it is ignored. Shift-right-drag and the other
   automatic wiring never pick this pin. Drag a wire to it.
+- **Wavetables.** Five nodes in their own Wavetable menu build a table for an oscillator to play.
+  Table wires and pins are rose, and their pins are diamonds. A table is an ordered list of
+  frames, each one cycle of a wave.
+  - *Frame nodes* make the frames. **Curve frame** is one cycle you draw by dragging points in its
+    viewer, as with an LFO's custom wave. **Harmonics** builds one frame from a count of
+    harmonics, a Tilt for how fast the upper ones fall away, and an Odd/even lean. **Sweep** makes
+    many frames at once (2 to 64) as one thing changes from the first to the last: Harmonics
+    building up, PWM narrowing, a Sync ratio rising, or Fold deepening. **Wave file** cuts an
+    audio file into frames, either one pitch period each (Cycles) or a fixed 1024, 2048 or 4096
+    samples, lines each frame up to start at a rising zero crossing so frames blend cleanly, and
+    says how many frames it made when it loads. Their knobs have no pins, since a frame is worked
+    out when the patch is built.
+  - **Wavetable** collects frames. It has a Frame pin for each connected input and one empty pin
+    below the last, up to eight. A ramp bar shows one colored region per connected input, in the
+    color of its pin, with the pin's number on it. Drag the handle between two regions to trade
+    share between them, and double-click the bar to share equally again. A region with several
+    frames plays through them, and a one-frame region holds still. The Blend dropdown (Linear,
+    Smooth, Step) and the Blend width knob set how neighbouring regions meet. Position, which a
+    wire can drive, moves along the whole ramp, and a green dot on the bar shows where it is.
+    Hovering a pin lights its region, and hovering a region lights its pin.
+  - Wire a Wavetable's Table output to the **Table pin on an oscillator's viewer row**. The table
+    then plays in place of the Wave dropdown, which is ignored, and warp, unison, detune and the
+    rest still apply. The oscillator's viewer draws the table's wave at the current Position. A
+    Wavetable can also feed another Wavetable. One table can feed several oscillators, which then
+    share its Position.
 - **Sampler.** Plays back a loaded audio file, one voice per held note, pitch-shifted from the note
   relative to a Root key. The Load sample row opens a file picker; it shows the loaded file's name
   once one is chosen. WAV, AIFF, FLAC, MP3, Ogg Vorbis, and AAC/M4A load, mono or stereo. Drag an

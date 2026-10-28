@@ -1,16 +1,18 @@
-//! The nodes that make frames for a wavetable: a drawn curve, a list of harmonics, a sweep that
-//! makes many frames at once, and frames cut from an audio file. Each has one table output, which
-//! goes to a frame input of a wavetable node. Their knobs have no pins, since a frame is worked
-//! out when the patch is built, not while the sound plays.
+//! The nodes that make frames for a wavetable: the four plain waves, a drawn curve, a list of
+//! harmonics, a sweep that makes many frames at once, and frames cut from an audio file. Each has
+//! one table output, which goes to an oscillator's table pin or to a frame input of a wavetable
+//! node. Their knobs have no pins, since a frame is worked out when the patch is built, not while
+//! the sound plays.
 
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::viewer::{sample, Live, Trace};
-use super::{Control, FlodeNode, KnobId, NodeBehavior, Port, Row};
+use super::{Control, FlodeNode, KnobId, NodeBehavior, NodeKind, Port, Row};
 use crate::dsp::curve::Curve;
 use crate::dsp::frames::{first_frame, harmonic_frame, sweep_frames, SliceMode, SweepKind};
 use crate::dsp::sample::SampleData;
+use crate::dsp::wavetable::Waveform;
 
 /// The row every frame node starts with: the table output.
 fn output_row() -> Row {
@@ -73,6 +75,51 @@ impl NodeBehavior for CurveFrame {
             points: sample(samples, |x| curve.eval(x)),
             ..Trace::default()
         })
+    }
+}
+
+/// A plain wave as a one frame table: a sine, saw, square or triangle. It has no knobs, only a
+/// table output and a picture of its wave, to wire to an oscillator or a wavetable node.
+pub struct Shape(pub Waveform);
+
+pub static SINE: Shape = Shape(Waveform::Sine);
+pub static SAW: Shape = Shape(Waveform::Saw);
+pub static SQUARE: Shape = Shape(Waveform::Square);
+pub static TRIANGLE: Shape = Shape(Waveform::Triangle);
+
+impl NodeBehavior for Shape {
+    fn title(&self) -> &'static str {
+        match self.0 {
+            Waveform::Sine => "Sine",
+            Waveform::Saw => "Saw",
+            Waveform::Square => "Square",
+            Waveform::Triangle => "Triangle",
+            Waveform::Noise => "Noise",
+        }
+    }
+
+    fn rows(&self, _node: &FlodeNode) -> Vec<Row> {
+        vec![output_row(), Row::control(Control::Viewer)]
+    }
+
+    /// One cycle of the wave.
+    fn trace(&self, _node: &FlodeNode, _live: &Live, samples: usize) -> Option<Trace> {
+        let wave = self.0;
+        Some(Trace {
+            points: sample(samples, |x| wave.naive(x) * 0.5 + 0.5),
+            ..Trace::default()
+        })
+    }
+}
+
+/// The plain wave a shape node makes, or None for any other kind of node.
+pub fn shape_of(kind: NodeKind) -> Option<Waveform> {
+    match kind {
+        NodeKind::SineWave => Some(Waveform::Sine),
+        NodeKind::SawWave => Some(Waveform::Saw),
+        NodeKind::SquareWave => Some(Waveform::Square),
+        NodeKind::TriangleWave => Some(Waveform::Triangle),
+        _ => None,
     }
 }
 

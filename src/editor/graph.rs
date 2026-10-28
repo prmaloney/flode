@@ -429,19 +429,31 @@ pub(super) const DEFAULT_OSC_X: f32 = DEFAULT_ENVELOPE_X + NODE_WIDTH + 48.0;
 pub(super) const DEFAULT_OUTPUT_X: f32 = 1024.0 - 24.0 - NODE_WIDTH;
 
 /// The graph a new instance starts with: an oscillator, wired to the output, with an envelope
-/// shaping its amplitude and a MIDI input feeding it notes. The oscillator is node 0 and the
-/// output is node 1, the envelope is node 2, and the MIDI input is node 3. The MIDI input is at
-/// the left edge, with the envelope to its right.
+/// shaping its amplitude and a MIDI input feeding it notes. The oscillator plays a saw wave, made
+/// by a saw node wired to its table pin. The oscillator is node 0 and the output is node 1, the
+/// envelope is node 2, and the MIDI input is node 3, with the saw node 4. The MIDI input is at
+/// the left edge, with the envelope to its right and the saw node under the envelope.
 impl Default for Graph {
     fn default() -> Self {
+        let mut nodes = vec![
+            FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
+            FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
+            FlodeNode::new(NodeKind::Envelope, Point::new(DEFAULT_ENVELOPE_X, 80.0)),
+            FlodeNode::new(NodeKind::Input, Point::new(DEFAULT_INPUT_X, 80.0)),
+            FlodeNode::new(NodeKind::SawWave, Point::new(0.0, 0.0)),
+        ];
+        // The oscillator's sound comes from a saw node. It sits under the envelope, next to the
+        // oscillator it feeds.
+        nodes[4].position = Point::new(DEFAULT_ENVELOPE_X, 80.0 + nodes[2].height() + 24.0);
         let mut graph = Self::with(
+            nodes,
             vec![
-                FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
-                FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
-                FlodeNode::new(NodeKind::Envelope, Point::new(DEFAULT_ENVELOPE_X, 80.0)),
-                FlodeNode::new(NodeKind::Input, Point::new(DEFAULT_INPUT_X, 80.0)),
-            ],
-            vec![
+                Connection {
+                    from: 4,
+                    out: Port::Table,
+                    to: 0,
+                    input: Port::TableIn,
+                },
                 Connection {
                     from: 3,
                     out: Port::Notes,

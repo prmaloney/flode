@@ -6,6 +6,7 @@ use std::f64::consts::TAU;
 
 use crate::dsp::curve::Curve;
 use crate::dsp::sample::SampleData;
+use crate::dsp::wavetable::Waveform;
 
 /// How many samples one frame holds. It is the table's frame size, so the two never differ.
 pub use crate::dsp::table::FRAME_SIZE;
@@ -65,6 +66,17 @@ fn sanitize(frame: &mut [f32]) {
             0.0
         };
     }
+}
+
+/// One cycle of a plain wave: sine, saw, square or triangle, at full amplitude. The saw and the
+/// square are the ideal shapes with their sharp edges, and the oscillator band-limits them for
+/// the pitch it plays. Noise has no cycle, so it gives silence.
+pub fn shape_frame(wave: Waveform) -> Vec<f32> {
+    let mut frame: Vec<f32> = (0..FRAME_SIZE)
+        .map(|n| wave.naive(n as f32 / FRAME_SIZE as f32))
+        .collect();
+    remove_dc(&mut frame);
+    frame
 }
 
 /// One cycle from a drawn curve, read the way the LFO's Custom wave reads it: x is the place in
@@ -515,6 +527,50 @@ pub fn slice_frames(data: &SampleData, mode: SliceMode) -> Vec<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each plain wave is a full-size, centered cycle with the harmonics it should have: a sine
+    /// has only the first, a square has the odd ones at one over their number, a saw has all of
+    /// them at one over their number, and a triangle has the odd ones at one over their number
+    /// squared.
+    #[test]
+    fn the_plain_waves_have_their_harmonics() {
+        let sine = shape_frame(Waveform::Sine);
+        let saw = shape_frame(Waveform::Saw);
+        let square = shape_frame(Waveform::Square);
+        let triangle = shape_frame(Waveform::Triangle);
+        for frame in [&sine, &saw, &square, &triangle] {
+            assert_eq!(frame.len(), FRAME_SIZE);
+            assert!(frame.iter().all(|v| v.abs() <= 1.0001));
+            assert!(frame.iter().sum::<f32>().abs() < 1e-2);
+        }
+        assert!((partial(&sine, 1) - 1.0).abs() < 1e-3);
+        assert!(partial(&sine, 2) < 1e-3 && partial(&sine, 3) < 1e-3);
+        let first = partial(&saw, 1);
+        for k in 2..8 {
+            assert!(
+                (partial(&saw, k) - first / k as f32).abs() < 0.01,
+                "saw {k}"
+            );
+        }
+        let first = partial(&square, 1);
+        assert!(partial(&square, 2) < 1e-3 && partial(&square, 4) < 1e-3);
+        for k in [3, 5, 7] {
+            assert!(
+                (partial(&square, k) - first / k as f32).abs() < 0.01,
+                "square {k}"
+            );
+        }
+        let first = partial(&triangle, 1);
+        assert!(partial(&triangle, 2) < 1e-3);
+        for k in [3, 5, 7] {
+            assert!(
+                (partial(&triangle, k) - first / (k * k) as f32).abs() < 0.01,
+                "triangle {k}"
+            );
+        }
+        // Noise has no cycle.
+        assert!(shape_frame(Waveform::Noise).iter().all(|v| *v == 0.0));
+    }
 
     /// The size of partial `k` in `frame`, by a plain DFT.
     fn partial(frame: &[f32], k: usize) -> f32 {

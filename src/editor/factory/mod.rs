@@ -81,6 +81,11 @@ pub(super) struct Builder {
     column: Vec<usize>,
     /// The macro knobs' values the preset loads with, from 0 to 1.
     pub(super) macros: [f32; 4],
+    /// The wavetable node made for each plain wave an oscillator was given, so oscillators that
+    /// play the same wave share one.
+    waves: Vec<(Waveform, usize)>,
+    /// The nodes to fold to their header when the preset is finished.
+    folded: Vec<usize>,
 }
 
 impl Builder {
@@ -89,6 +94,8 @@ impl Builder {
             graph: Graph::with(Vec::new(), Vec::new()),
             column: Vec::new(),
             macros: [0.0; 4],
+            waves: Vec::new(),
+            folded: Vec::new(),
         }
     }
 
@@ -122,9 +129,33 @@ impl Builder {
         self.graph.nodes[node].sections_collapsed[section] = folded;
     }
 
-    /// Sets an oscillator's waveform.
+    /// Gives an oscillator the plain wave `waveform` to play. An oscillator has no waveform of its
+    /// own, so this wires it to the sine, saw, square or triangle node. Oscillators that play the
+    /// same wave share one node. The node is folded to its header, in whichever column has the
+    /// most room, so it takes little space.
+    /// An LFO still has a Wave dropdown of its own, so for one this just picks the row.
     pub(super) fn waveform(&mut self, oscillator: usize, waveform: Waveform) {
-        self.choose(oscillator, 0, waveform.index());
+        if self.graph.nodes[oscillator].kind != NodeKind::Oscillator {
+            self.choose(oscillator, 0, waveform.index());
+            return;
+        }
+        let frame = match self.waves.iter().find(|(wave, _)| *wave == waveform) {
+            Some(&(_, frame)) => frame,
+            None => {
+                let kind = match waveform {
+                    Waveform::Saw => NodeKind::SawWave,
+                    Waveform::Square => NodeKind::SquareWave,
+                    Waveform::Triangle => NodeKind::TriangleWave,
+                    _ => NodeKind::SineWave,
+                };
+                let frame = self.add(kind, CONTROLS);
+                // Folded when the preset is finished, since a folded node can't be wired to.
+                self.folded.push(frame);
+                self.waves.push((waveform, frame));
+                frame
+            }
+        };
+        self.wire(frame, Port::Table, oscillator, Port::TableIn);
     }
 
     /// Sets an oscillator's warp mode by the name on its dropdown, such as "PWM".
@@ -234,9 +265,26 @@ impl Builder {
 
     /// Lays the nodes out, names the preset, and returns it.
     pub(super) fn finish(mut self, name: &str) -> Preset {
+        for &node in &self.folded {
+            self.graph.nodes[node].collapsed = true;
+        }
         let mut next = [TOP; COLUMN_X.len()];
         for index in 0..self.graph.nodes.len() {
+            if self.folded.contains(&index) {
+                continue;
+            }
             let column = self.column[index];
+            self.graph.nodes[index].position = Point::new(COLUMN_X[column], next[column]);
+            next[column] += self.graph.nodes[index].height() + GAP;
+        }
+        // The folded wave nodes are small, so each goes in whichever column has the most room left.
+        for index in 0..self.graph.nodes.len() {
+            if !self.folded.contains(&index) {
+                continue;
+            }
+            let column = (0..COLUMN_X.len())
+                .min_by(|&a, &b| next[a].total_cmp(&next[b]))
+                .unwrap_or(0);
             self.graph.nodes[index].position = Point::new(COLUMN_X[column], next[column]);
             next[column] += self.graph.nodes[index].height() + GAP;
         }

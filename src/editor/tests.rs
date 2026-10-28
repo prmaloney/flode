@@ -15,14 +15,26 @@ use super::{curve::*, draw::*, graph::*, menus::*, saved::*};
 /// input at node 2 feeding it notes. Most tests want exactly this, so they start from it and add
 /// what they need. The default graph a new instance loads has an envelope as well, and its own
 /// tests are in `default_graph_tests`.
+/// A saw node, for an oscillator's table pin, since an oscillator with no table is silent.
+fn saw_frame(at: Point) -> FlodeNode {
+    FlodeNode::new(NodeKind::SawWave, at)
+}
+
 fn minimal_graph() -> Graph {
     let mut graph = Graph::with(
         vec![
             FlodeNode::new(NodeKind::Oscillator, Point::new(DEFAULT_OSC_X, 80.0)),
             FlodeNode::new(NodeKind::Output, Point::new(DEFAULT_OUTPUT_X, 80.0)),
             FlodeNode::new(NodeKind::Input, Point::new(0.0, 80.0)),
+            saw_frame(Point::new(0.0, 400.0)),
         ],
         vec![
+            Connection {
+                from: 3,
+                out: Port::Table,
+                to: 0,
+                input: Port::TableIn,
+            },
             Connection {
                 from: 0,
                 out: Port::Audio,
@@ -255,11 +267,14 @@ mod slot_tests {
     fn saving_and_loading_keeps_node_state() {
         let mut graph = minimal_graph();
         graph.nodes[0].set_value(KnobId::Unison, KnobId::Unison.to_normalized(5.0));
-        graph.nodes[0].choose(0, 2);
+        graph.nodes[0].choose(1, 2);
         graph.nodes[1].switches = vec![true, true];
         let loaded = Graph::from_saved(&graph.to_saved());
         assert_eq!(loaded.nodes[0].plain(KnobId::Unison), 5.0);
-        assert_eq!(oscillator::waveform(&loaded.nodes[0]), Waveform::Square);
+        assert_eq!(
+            oscillator::warp_mode(&loaded.nodes[0]),
+            crate::dsp::warp::WarpMode::Sync
+        );
         assert_eq!(loaded.nodes[1].switches, vec![true, true]);
 
         let legacy = SavedNode {
@@ -285,10 +300,9 @@ mod slot_tests {
             names: Vec::new(),
             sample_path: None,
         };
-        assert_eq!(
-            oscillator::waveform(&legacy.into_node()),
-            Waveform::Triangle
-        );
+        // An old save's waveform still loads into the first dropdown, which an oscillator no
+        // longer shows. It plays no part in the sound.
+        assert_eq!(legacy.into_node().choice(0), Waveform::Triangle.index());
     }
 
     /// A node dropped on the wire into an output slot splices into that wire.
@@ -1550,7 +1564,7 @@ mod bypass_and_duplicate_tests {
     fn a_duplicate_copies_the_settings_but_not_the_wires() {
         let mut graph = minimal_graph();
         graph.nodes[0].set_value(KnobId::Unison, KnobId::Unison.to_normalized(5.0));
-        graph.nodes[0].choose(0, 2);
+        graph.nodes[0].choose(1, 2);
         graph.nodes[0].toggle_bypass();
         let wires = graph.connections.len();
         let count = graph.nodes.len();
@@ -1559,7 +1573,10 @@ mod bypass_and_duplicate_tests {
         assert_eq!(graph.nodes.len(), count + 1);
         assert_eq!(graph.nodes[copy].kind, NodeKind::Oscillator);
         assert_eq!(graph.nodes[copy].plain(KnobId::Unison), 5.0);
-        assert_eq!(oscillator::waveform(&graph.nodes[copy]), Waveform::Square);
+        assert_eq!(
+            oscillator::warp_mode(&graph.nodes[copy]),
+            crate::dsp::warp::WarpMode::Sync
+        );
         assert!(graph.nodes[copy].bypassed);
         assert!(graph.nodes[copy].position.x > graph.nodes[0].position.x);
         assert!(graph.nodes[copy].position.y > graph.nodes[0].position.y);

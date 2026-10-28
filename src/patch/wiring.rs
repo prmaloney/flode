@@ -18,15 +18,19 @@ use super::{
     ArpeggiatorSettings, ChordSettings, EnvelopeSettings, Globals, LfoSettings, NoteSourceSpec,
     Patch,
 };
-use crate::dsp::frames::{curve_frame, harmonic_frame, sweep_frames, SliceMode, SweepKind};
+use crate::dsp::frames::{
+    curve_frame, harmonic_frame, shape_frame, sweep_frames, SliceMode, SweepKind,
+};
+use crate::dsp::noise::NoiseType;
 use crate::dsp::table::{self, BlendMode, Ramp, MAX_REGIONS};
+use crate::dsp::wavetable::Waveform;
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::sampler;
 use crate::nodes::{
     arpeggiator, chord, compressor, delay, distortion, eq, filter, frames, gain, input, lfo, map,
-    math, mix, monitor, oscillator, phaser, wavetable, Bypass, FlodeNode, NodeKind, Port,
+    math, mix, monitor, noise, oscillator, phaser, wavetable, Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 use std::cell::OnceCell;
@@ -447,6 +451,12 @@ impl<'a> Wiring<'a> {
         };
         let plain = |id: KnobId| id.to_plain(n.value(id));
         match n.kind {
+            NodeKind::SineWave
+            | NodeKind::SawWave
+            | NodeKind::SquareWave
+            | NodeKind::TriangleWave => frames::shape_of(n.kind)
+                .map(|wave| vec![shape_frame(wave)])
+                .unwrap_or_default(),
             NodeKind::CurveFrame => vec![curve_frame(&n.points)],
             NodeKind::Harmonics => vec![harmonic_frame(
                 plain(KnobId::HarmCount).round().max(1.0) as usize,
@@ -493,14 +503,30 @@ impl<'a> Wiring<'a> {
         inputs
     }
 
-    /// The custom wavetable an oscillator plays, if its table input is wired to a wavetable node
-    /// that makes at least one frame. Builds the frames and gets the table from the build cache,
-    /// so an unchanged graph gives the same table back.
+    /// The wavetable an oscillator plays, if its table input is wired to a wavetable node or a
+    /// frame node that makes at least one frame. Builds the frames and gets the table from the
+    /// build cache, so an unchanged graph gives the same table back.
     fn table_params(&self, oscillator: usize) -> Option<TableParams> {
         let wavetable = self.input_link(oscillator, Port::TableIn)?.from;
         let node = self.nodes.get(wavetable)?;
         if node.kind != NodeKind::Wavetable {
-            return None;
+            // A frame node wired straight to the oscillator is a table of its own frames, with
+            // nothing to move along it, so it plays from its first frame. A curve or a harmonics
+            // node has just the one, which is all a plain wave needs. A wavetable node in
+            // between is what adds a Position, a ramp, and the blending.
+            let frames = self.frames_of(wavetable, &mut Vec::new());
+            if frames.is_empty() {
+                return None;
+            }
+            let data = table::build_cached(vec![frames]);
+            return Some(TableParams {
+                frame_counts: data.regions.iter().map(|r| r.frames.len()).collect(),
+                data,
+                position: Param::fixed(KnobId::WtPosition, 0.0),
+                width: Param::default_of(KnobId::WtBlendWidth),
+                blend: BlendMode::default(),
+                shares: std::iter::once(Param::default_of(KnobId::Share1)).collect(),
+            });
         }
         let inputs = self.frame_inputs(wavetable, &mut Vec::new());
         if inputs.iter().all(|(_, frames)| frames.is_empty()) {
@@ -695,10 +721,23 @@ impl<'a> Wiring<'a> {
         let n = &self.nodes[node];
         let knob = |id| self.param(node, id);
         match n.kind {
+            // The noise node is an oscillator stage that plays noise. It has no pitch, so its
+            // transpose, unison and warp stay at their defaults.
+            NodeKind::Noise => Some(StageParams::Oscillator(OscillatorParams {
+                waveform: Waveform::Noise,
+                noise: noise::noise_type(n),
+                envelope: self.amp_envelope(node),
+                notes: self.notes_source(node),
+                level: knob(KnobId::OscGain),
+                pan: knob(KnobId::Pan),
+                ..OscillatorParams::default()
+            })),
+            // An oscillator with no table wired makes no stage: it has no waveform of its own to
+            // fall back on, so it is silent.
             NodeKind::Oscillator => Some(StageParams::Oscillator(OscillatorParams {
-                table: self.table_params(node),
-                waveform: oscillator::waveform(n),
-                noise: oscillator::noise_type(n),
+                table: Some(self.table_params(node)?),
+                waveform: Waveform::default(),
+                noise: NoiseType::default(),
                 warp: oscillator::warp_mode(n),
                 envelope: self.amp_envelope(node),
                 notes: self.notes_source(node),
@@ -821,6 +860,10 @@ impl<'a> Wiring<'a> {
             | NodeKind::Envelope
             // A table makes no audio stage. It reaches an oscillator through its params.
             | NodeKind::Wavetable
+            | NodeKind::SineWave
+            | NodeKind::SawWave
+            | NodeKind::SquareWave
+            | NodeKind::TriangleWave
             | NodeKind::CurveFrame
             | NodeKind::Harmonics
             | NodeKind::Sweep
@@ -985,12 +1028,12 @@ impl<'p> LaneBuilder<'p> {
             }
         }
 
-        // An oscillator or a sampler plays only the notes wired into it: a MIDI input directly, or
-        // a transform such as an arpeggiator that reads one. With nothing feeding its notes pin it
-        // is silent.
+        // An oscillator, a noise node or a sampler plays only the notes wired into it: a MIDI
+        // input directly, or a transform such as an arpeggiator that reads one. With nothing
+        // feeding its notes pin it is silent.
         if matches!(
             wiring.nodes[node].kind,
-            NodeKind::Oscillator | NodeKind::Sampler
+            NodeKind::Oscillator | NodeKind::Noise | NodeKind::Sampler
         ) && wiring.notes_source(node).is_none()
         {
             return None;
@@ -1091,15 +1134,34 @@ mod tests {
     }
 
     /// Adds a MIDI input node at the end and wires its notes to every oscillator, so the
-    /// oscillators sound. The nodes already there keep their indices.
+    /// oscillators sound. An oscillator with no table of its own gets a saw node wired to its
+    /// table pin, since an oscillator with no table is silent. The nodes already there keep
+    /// their indices.
     pub(super) fn with_notes(nodes: &mut Vec<FlodeNode>, links: &mut Vec<Connection>) {
         nodes.push(node(NodeKind::Input));
         let input = nodes.len() - 1;
         for oscillator in 0..input {
             if nodes[oscillator].kind == NodeKind::Oscillator {
                 links.push(notes(input, oscillator));
+                if !links
+                    .iter()
+                    .any(|c| c.to == oscillator && c.input == Port::TableIn)
+                {
+                    nodes.push(saw_frame());
+                    links.push(Connection {
+                        from: nodes.len() - 1,
+                        out: Port::Table,
+                        to: oscillator,
+                        input: Port::TableIn,
+                    });
+                }
             }
         }
+    }
+
+    /// A saw node, for an oscillator's table pin.
+    pub(super) fn saw_frame() -> FlodeNode {
+        node(NodeKind::SawWave)
     }
 
     pub(super) fn notes(from: usize, to: usize) -> Connection {
@@ -1132,7 +1194,19 @@ mod tests {
         let links = vec![audio(0, 1, Port::Slot(0)), notes(2, 0)];
         assert!(!Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
 
+        // Notes alone are not enough. With no table the oscillator has nothing to play.
         nodes[2] = node(NodeKind::Input);
+        assert!(!Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
+
+        // A frame node wired to its table pin gives it a wave, and then it sounds.
+        nodes.push(saw_frame());
+        let mut links = links;
+        links.push(Connection {
+            from: 3,
+            out: Port::Table,
+            to: 0,
+            input: Port::TableIn,
+        });
         assert!(Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
     }
 
@@ -1457,8 +1531,19 @@ mod tests {
             NodeKind::Mix,
             NodeKind::Gain,
         ] {
-            let nodes = vec![node(kind)];
-            let wiring = Wiring::new(&nodes, &[]);
+            let mut nodes = vec![node(kind)];
+            let mut links = Vec::new();
+            // An oscillator makes a stage only with a table wired in.
+            if kind == NodeKind::Oscillator {
+                nodes.push(saw_frame());
+                links.push(Connection {
+                    from: 1,
+                    out: Port::Table,
+                    to: 0,
+                    input: Port::TableIn,
+                });
+            }
+            let wiring = Wiring::new(&nodes, &links);
             let params = wiring.stage_params(0).expect("an audio node makes a stage");
             let ports = nodes[0].input_ports();
             let audio_ports = ports.iter().filter(|port| port.is_audio()).count();
@@ -2110,7 +2195,7 @@ mod effect_tests {
 
 #[cfg(test)]
 mod table_tests {
-    use super::tests::{notes, with_notes};
+    use super::tests::{notes, saw_frame, with_notes};
     use super::*;
     use crate::dsp::sample::SampleData;
     use nih_plug_iced::Point;
@@ -2176,8 +2261,14 @@ mod table_tests {
         }
     }
 
+    /// The table of the oscillator in slot 0, or None when it has none, in which case it makes no
+    /// stage at all.
     fn table_of(nodes: &[FlodeNode], links: &[Connection]) -> Option<TableParams> {
-        oscillator(nodes, links).table
+        let lanes = Wiring::new(nodes, links).lane_graphs();
+        match lanes[0].stages.first().map(|stage| &stage.params) {
+            Some(StageParams::Oscillator(osc)) => osc.table.clone(),
+            _ => None,
+        }
     }
 
     /// Each kind of frame node, wired through a wavetable, gives the oscillator a table with the
@@ -2214,20 +2305,70 @@ mod table_tests {
         assert!(table_of(&nodes, &links).is_none());
     }
 
-    /// With the table input unwired the oscillator is as it was: no table, and a different
-    /// wavetable elsewhere in the graph changes nothing.
+    /// An oscillator whose table input is unwired has no waveform of its own to fall back on, so
+    /// it makes no stage and is silent, whatever wavetable sits elsewhere in the graph.
     #[test]
-    fn an_unwired_table_input_leaves_the_oscillator_alone() {
+    fn an_unwired_table_input_is_silent() {
         let (nodes, mut links) = graph(vec![(0, node(NodeKind::CurveFrame))]);
         links.retain(|link| link.input != Port::TableIn);
-        let osc = oscillator(&nodes, &links);
-        assert_eq!(
-            osc,
-            OscillatorParams {
-                notes: Some(0),
-                ..OscillatorParams::default()
+        assert!(Wiring::new(&nodes, &links).lane_graphs()[0]
+            .stages
+            .is_empty());
+    }
+
+    /// A frame node wired straight to the oscillator is a table of its own frames, held at the
+    /// first frame, with no wavetable node in between.
+    #[test]
+    fn a_frame_node_can_feed_the_oscillator_directly() {
+        for kind in [NodeKind::CurveFrame, NodeKind::Harmonics, NodeKind::Sweep] {
+            let (mut nodes, mut links) = graph(vec![]);
+            links.retain(|link| link.input != Port::TableIn);
+            nodes.push(node(kind));
+            links.push(wire(nodes.len() - 1, 0, Port::TableIn));
+            let table = table_of(&nodes, &links).unwrap_or_else(|| panic!("{kind:?}"));
+            assert_eq!(table.data.region_count(), 1, "{kind:?}");
+            assert_eq!(table.shares.len(), 1);
+            let levels = ControlLevels::default();
+            assert_eq!(table.position.plain(&levels), 0.0, "{kind:?}");
+        }
+        // The wave display reads it too.
+        let (mut nodes, mut links) = graph(vec![]);
+        links.retain(|link| link.input != Port::TableIn);
+        nodes.push(saw_frame());
+        links.push(wire(nodes.len() - 1, 0, Port::TableIn));
+        let wave = Wiring::new(&nodes, &links)
+            .table_wave(0, &ControlLevels::default())
+            .expect("a wave");
+        assert_eq!(wave.len(), crate::dsp::table::FRAME_SIZE);
+    }
+
+    /// The noise node is an oscillator stage that plays noise, from the notes wired into it.
+    #[test]
+    fn a_noise_node_plays_noise_from_its_notes() {
+        let mut nodes = vec![node(NodeKind::Noise), node(NodeKind::Output)];
+        nodes[1].used = 1;
+        let mut links = vec![Connection {
+            from: 0,
+            out: Port::Audio,
+            to: 1,
+            input: Port::Slot(0),
+        }];
+        // Silent until notes arrive.
+        assert!(!Wiring::new(&nodes, &links).lane_graphs()[0].is_active());
+        nodes.push(node(NodeKind::Input));
+        links.push(notes(2, 0));
+        nodes[0].choose(0, 2);
+        let lanes = Wiring::new(&nodes, &links).lane_graphs();
+        assert!(lanes[0].is_active());
+        match &lanes[0].stages[0].params {
+            StageParams::Oscillator(osc) => {
+                assert_eq!(osc.waveform, Waveform::Noise);
+                assert_eq!(osc.noise, NoiseType::Brown);
+                assert!(osc.table.is_none());
+                assert_eq!(osc.notes, Some(0));
             }
-        );
+            other => panic!("expected an oscillator stage, got {other:?}"),
+        }
     }
 
     /// One region per connected frame pin, in pin order, and each region's share is the share knob

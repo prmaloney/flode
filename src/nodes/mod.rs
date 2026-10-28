@@ -29,6 +29,7 @@ pub mod map;
 pub mod math;
 pub mod mix;
 pub mod monitor;
+pub mod noise;
 pub mod oscillator;
 pub mod output;
 pub mod phaser;
@@ -162,9 +163,16 @@ pub enum NodeKind {
     Monitor,
     Macro,
     Gain,
+    /// White, pink, brown or Geiger noise, played from notes like an oscillator.
+    Noise,
     /// Collects frames into a wavetable, with a Position and a ramp of how much of the table
     /// each input gets.
     Wavetable,
+    /// The plain waves, each a one frame table: a sine, a saw, a square, a triangle.
+    SineWave,
+    SawWave,
+    SquareWave,
+    TriangleWave,
     /// One frame drawn as a curve.
     CurveFrame,
     /// One frame built from a list of harmonics.
@@ -222,6 +230,10 @@ impl Category {
             ],
             Category::Wavetable => &[
                 NodeKind::Wavetable,
+                NodeKind::SineWave,
+                NodeKind::SawWave,
+                NodeKind::SquareWave,
+                NodeKind::TriangleWave,
                 NodeKind::CurveFrame,
                 NodeKind::Harmonics,
                 NodeKind::Sweep,
@@ -239,6 +251,7 @@ impl Category {
                 NodeKind::Flanger,
             ],
             Category::Utility => &[
+                NodeKind::Noise,
                 NodeKind::Mix,
                 NodeKind::Gain,
                 NodeKind::Monitor,
@@ -262,6 +275,10 @@ impl NodeKind {
             | NodeKind::Macro => Some(Signal::Control),
             NodeKind::Input | NodeKind::Arpeggiator | NodeKind::Chord => Some(Signal::Notes),
             NodeKind::Wavetable
+            | NodeKind::SineWave
+            | NodeKind::SawWave
+            | NodeKind::SquareWave
+            | NodeKind::TriangleWave
             | NodeKind::CurveFrame
             | NodeKind::Harmonics
             | NodeKind::Sweep
@@ -270,6 +287,7 @@ impl NodeKind {
             | NodeKind::Sampler
             | NodeKind::Filter
             | NodeKind::Mix
+            | NodeKind::Noise
             | NodeKind::Output
             | NodeKind::Distortion
             | NodeKind::Compressor
@@ -288,7 +306,7 @@ impl NodeKind {
     }
 
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 31] = [
+    pub const ALL: [NodeKind; 36] = [
         NodeKind::Oscillator,
         NodeKind::Sampler,
         NodeKind::Envelope,
@@ -312,7 +330,12 @@ impl NodeKind {
         NodeKind::Monitor,
         NodeKind::Macro,
         NodeKind::Gain,
+        NodeKind::Noise,
         NodeKind::Wavetable,
+        NodeKind::SineWave,
+        NodeKind::SawWave,
+        NodeKind::SquareWave,
+        NodeKind::TriangleWave,
         NodeKind::CurveFrame,
         NodeKind::Harmonics,
         NodeKind::Sweep,
@@ -367,7 +390,12 @@ impl NodeKind {
             NodeKind::Monitor => &monitor::Monitor,
             NodeKind::Macro => &macros::Macros,
             NodeKind::Gain => &gain::Gain,
+            NodeKind::Noise => &noise::Noise,
             NodeKind::Wavetable => &wavetable::Wavetable,
+            NodeKind::SineWave => &frames::SINE,
+            NodeKind::SawWave => &frames::SAW,
+            NodeKind::SquareWave => &frames::SQUARE,
+            NodeKind::TriangleWave => &frames::TRIANGLE,
             NodeKind::CurveFrame => &frames::CurveFrame,
             NodeKind::Harmonics => &frames::Harmonics,
             NodeKind::Sweep => &frames::Sweep,
