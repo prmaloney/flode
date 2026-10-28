@@ -9,6 +9,7 @@ use crate::engine::POOL;
 use crate::groups::{self, GroupEntry};
 use crate::nodes::connection::Connection;
 use crate::nodes::eq;
+use crate::nodes::frames;
 use crate::nodes::knobs::{self, KnobId};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::mix;
@@ -1020,8 +1021,10 @@ impl Graph {
     /// `poll_save_dialog` collects a save dialog's answer. A decode that succeeds sets the node's
     /// `sample`. One that fails, including a missing file, leaves the node sample-less and reports
     /// the failure on the status line, naming the file. Either way the rest of the patch keeps
-    /// playing.
-    pub(super) fn poll_sampler_loads(&mut self) {
+    /// playing. Returns true if a decode finished and set a sample, so the caller can send the
+    /// patch to the audio thread again.
+    pub(super) fn poll_sampler_loads(&mut self) -> bool {
+        let mut loaded = false;
         let mut done = Vec::new();
         for (slot, load) in self.sampler_loads.iter().enumerate() {
             let answer = match load.receiver.lock() {
@@ -1042,14 +1045,24 @@ impl Graph {
                 .unwrap_or_default();
             match result {
                 Some(Ok(data)) => {
+                    let mut frames = None;
                     if let Some(n) = self.nodes.get_mut(node) {
                         n.sample = Some(data.clone());
+                        loaded = true;
+                        // A file node says how many frames its file will make.
+                        if n.kind == NodeKind::WaveFile {
+                            frames = frames::frame_count(n);
+                        }
                     }
                     let name = path
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string());
-                    self.say(format!("Loaded {name}"));
+                    match frames {
+                        Some(1) => self.say(format!("Loaded {name}: 1 frame")),
+                        Some(count) => self.say(format!("Loaded {name}: {count} frames")),
+                        None => self.say(format!("Loaded {name}")),
+                    }
                 }
                 Some(Err(error)) => {
                     let title = self.nodes.get(node).map(|n| n.title()).unwrap_or("Sampler");
@@ -1066,6 +1079,7 @@ impl Graph {
         for &(slot, ..) in done.iter().rev() {
             self.sampler_loads.remove(slot);
         }
+        loaded
     }
 
     /// Writes a saved group to the file the dialog chose. The file's name is the group's name in
@@ -1526,7 +1540,10 @@ impl Graph {
         // ready without the user re-browsing for it. A missing or broken file leaves the node
         // sample-less and reports why, without blocking anything else in the patch.
         for index in 0..graph.nodes.len() {
-            if graph.nodes[index].kind == NodeKind::Sampler {
+            if matches!(
+                graph.nodes[index].kind,
+                NodeKind::Sampler | NodeKind::WaveFile
+            ) {
                 if let Some(path) = graph.nodes[index].sample_path.clone() {
                     graph.start_sample_load(index, path);
                 }

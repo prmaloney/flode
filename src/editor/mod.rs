@@ -21,6 +21,8 @@ mod depth;
 mod draw;
 #[cfg(test)]
 mod factory;
+#[cfg(test)]
+mod frame_node_tests;
 pub mod graph;
 pub mod group;
 #[cfg(test)]
@@ -249,7 +251,13 @@ impl IcedEditor for FlodeEditor {
         }
         self.graph.poll_save_dialog();
         self.graph.poll_sampler_dialog();
-        self.graph.poll_sampler_loads();
+        // A finished decode puts audio on a node, so the audio thread needs the patch again.
+        if self.graph.poll_sampler_loads() {
+            self.link.publish(self.graph.patch());
+            if let Ok(mut saved) = self.params.graph.lock() {
+                *saved = self.graph.to_saved();
+            }
+        }
         self.save_pending_preset();
         self.send_macro_edits();
         Command::none()

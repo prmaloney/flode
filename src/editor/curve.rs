@@ -225,10 +225,15 @@ pub(super) fn drag_eq_point(node: &mut FlodeNode, band: usize, point: Point, dri
     }
 }
 
-/// Where the points of an LFO's custom curve sit, in editor coordinates. None unless the node is an
-/// LFO on Custom with its viewer on show.
+/// Where the points of a node's drawn curve sit, in editor coordinates. None unless the node is an
+/// LFO on Custom, or a curve frame, with its viewer on show.
 pub(super) fn lfo_handles(node: &FlodeNode) -> Option<Vec<Point>> {
-    if node.kind != NodeKind::Lfo || !lfo::is_custom(node) {
+    let drawn = match node.kind {
+        NodeKind::Lfo => lfo::is_custom(node),
+        NodeKind::CurveFrame => true,
+        _ => false,
+    };
+    if !drawn {
         return None;
     }
     let bounds = node.viewer_bounds()?;
