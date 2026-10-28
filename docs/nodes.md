@@ -26,11 +26,14 @@ A node's header leans toward the color of the wire it mainly makes: green for co
 envelope, map, math, macros), purple for notes (input, arpeggiator, chord). Audio nodes keep the
 neutral header, since audio is most of a graph.
 
-- **Oscillator.** Sine, saw, square, triangle and noise (white, pink, brown, Geiger). Up to seven
-  unison voices with detune and stereo spread, pitch controls, and warp modes (bend, sync, PWM,
-  asymmetry, flip, mirror, quantize, PM, PD). Each has its own level and pan. A held note follows
-  the Unison and Detune knobs, with copies fading in and out as the count changes. Phase only sets
-  where a note's copies start, so it takes effect on the next note.
+- **Oscillator.** Plays a wavetable wired to its Table pin, on the viewer's row. It has no
+  waveform of its own, so with nothing wired there it is silent, as it is with no notes. A new
+  one is wired to a saw node. Wire a Sine, Saw, Square or Triangle node there for a plain wave,
+  or any other table (see Wavetables below). Up to seven unison voices with detune and stereo
+  spread, pitch controls, and warp modes (bend, sync, PWM, asymmetry, flip, mirror, quantize, PM,
+  PD). Each has its own level and pan. A held note follows the Unison and Detune knobs, with
+  copies fading in and out as the count changes. Phase only sets where a note's copies start, so
+  it takes effect on the next note.
 
   The audio pin on the Warp row is read by the PM and PD warps. With another oscillator wired in,
   PM pushes the phase by that signal, with the Warp amount as the depth (up to two cycles). PD
@@ -40,9 +43,17 @@ neutral header, since audio is most of a graph.
   Notes wire, and goes through its own envelope and level. A modulator that has passed through an
   effect is already summed across voices, so it is ignored. Shift-right-drag and the other
   automatic wiring never pick this pin. Drag a wire to it.
-- **Wavetables.** Five nodes in their own Wavetable menu build a table for an oscillator to play.
+- **Noise.** White, pink, brown or Geiger noise, played from the notes wired into it and shaped by
+  an envelope, with level and pan. It has no pitch, so no transpose, unison or warp. It lives in
+  the Utility menu.
+- **Wavetables.** The Wavetable menu holds the nodes that make a table for an oscillator to play.
   Table wires and pins are rose, and their pins are diamonds. A table is an ordered list of
-  frames, each one cycle of a wave.
+  frames, each one cycle of a wave. Every node that makes a table has the same output, so any of
+  them can be wired straight to an oscillator's Table pin. A table with one frame is a plain
+  wave. A table with several frames, wired straight in, plays its first frame. Put a Wavetable
+  node in between to move along the frames.
+  - **Sine, Saw, Square and Triangle** are one frame tables of the four plain waves, with no
+    knobs.
   - *Frame nodes* make the frames. **Curve frame** is one cycle you draw by dragging points in its
     viewer, as with an LFO's custom wave. **Harmonics** builds one frame from a count of
     harmonics, a Tilt for how fast the upper ones fall away, and an Odd/even lean. **Sweep** makes
@@ -60,11 +71,10 @@ neutral header, since audio is most of a graph.
     Smooth, Step) and the Blend width knob set how neighbouring regions meet. Position, which a
     wire can drive, moves along the whole ramp, and a green dot on the bar shows where it is.
     Hovering a pin lights its region, and hovering a region lights its pin.
-  - Wire a Wavetable's Table output to the **Table pin on an oscillator's viewer row**. The table
-    then plays in place of the Wave dropdown, which is ignored, and warp, unison, detune and the
-    rest still apply. The oscillator's viewer draws the table's wave at the current Position. A
-    Wavetable can also feed another Wavetable. One table can feed several oscillators, which then
-    share its Position.
+  - Wire a table node's output to the **Table pin on an oscillator's viewer row**. Warp, unison,
+    detune and the rest still apply to it. The oscillator's viewer draws the table's wave at the
+    current Position. A Wavetable can also feed another Wavetable. One table node can feed several
+    oscillators, which then share its Position.
 - **Sampler.** Plays back a loaded audio file, one voice per held note, pitch-shifted from the note
   relative to a Root key. The Load sample row opens a file picker; it shows the loaded file's name
   once one is chosen. WAV, AIFF, FLAC, MP3, Ogg Vorbis, and AAC/M4A load, mono or stereo. Drag an

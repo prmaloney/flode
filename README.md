@@ -43,9 +43,10 @@ changes.
 ## Quick start
 
 1. Add nodes from the burger menu at the top left, beside the logo, or start from a preset. A new
-   graph has a MIDI Input, an Oscillator, an Envelope and an Output already wired.
+   graph has a MIDI Input, an Oscillator, an Envelope, a Saw wave and an Output already wired.
 2. An oscillator or a sampler plays only the notes wired into its MIDI pin, so it is silent until a
-   MIDI Input is connected.
+   MIDI Input is connected. An oscillator also has no wave of its own: it plays whatever wave or
+   wavetable node is wired to its Table pin, here the Saw.
 3. Wire audio into an output slot to hear it.
 4. A graph has one Output node and one Macro node. They cannot be added a second time or duplicated.
 
@@ -53,7 +54,7 @@ Click the key strip at the bottom of the editor to play notes, in the plugin and
 app, or press play from your DAW. The docs below cover everything else: the full node list, wiring
 and editing gestures, keyboard shortcuts, groups, and presets.
 
-![The starting graph: a MIDI Input, an Envelope, an Oscillator, and an Output, already wired](docs/images/default-graph.png)
+![The starting graph: a MIDI Input, an Envelope, a Saw wave, an Oscillator, and an Output, already wired](docs/images/default-graph.png)
 
 ## Docs
 
