@@ -380,3 +380,108 @@ mod saving {
         assert!(loaded.nodes.iter().all(|n| n.sample_path.is_none()));
     }
 }
+
+/// Dropping a wavetable node onto a table wire splices it in, the way a filter splices into an
+/// audio wire.
+mod splice {
+    use super::*;
+
+    /// A saw at node 0 wired straight into an oscillator at node 1, far enough apart for a node to
+    /// fit between them.
+    fn saw_into_oscillator() -> Graph {
+        Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::SawWave, Point::new(0.0, 100.0)),
+                FlodeNode::new(NodeKind::Oscillator, Point::new(600.0, 100.0)),
+            ],
+            vec![Connection {
+                from: 0,
+                out: Port::Table,
+                to: 1,
+                input: Port::TableIn,
+            }],
+        )
+    }
+
+    /// Adds a node of `kind` centered on the middle of the first wire.
+    fn add_on_the_wire(graph: &mut Graph, kind: NodeKind) -> usize {
+        let curve = graph.link_curve(&graph.connections[0]).unwrap();
+        let middle = super::super::draw::bezier_point(&curve, 0.5);
+        graph.add_node(kind, Point::new(middle.x - 80.0, middle.y - 20.0))
+    }
+
+    #[test]
+    fn a_wavetable_dropped_on_a_table_wire_takes_it_on_its_first_frame_pin() {
+        let mut graph = saw_into_oscillator();
+        let table = add_on_the_wire(&mut graph, NodeKind::Wavetable);
+        let link = graph
+            .link_under(table)
+            .expect("the wire from the saw to the oscillator passes under it");
+        graph.insert_into(table, link);
+        assert!(graph.connections.contains(&Connection {
+            from: 0,
+            out: Port::Table,
+            to: table,
+            input: Port::Frame(0),
+        }));
+        assert!(graph.connections.contains(&Connection {
+            from: table,
+            out: Port::Table,
+            to: 1,
+            input: Port::TableIn,
+        }));
+        assert_eq!(graph.connections.len(), 2);
+        // The wired frame pin shows the empty one below it, the same as a wire made by hand.
+        assert_eq!(graph.nodes[table].slots, 2);
+    }
+
+    #[test]
+    fn a_wavetable_feeding_a_wavetable_splices_too() {
+        let mut graph = Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::SawWave, Point::new(0.0, 100.0)),
+                FlodeNode::new(NodeKind::Wavetable, Point::new(600.0, 100.0)),
+            ],
+            vec![Connection {
+                from: 0,
+                out: Port::Table,
+                to: 1,
+                input: Port::Frame(0),
+            }],
+        );
+        let table = add_on_the_wire(&mut graph, NodeKind::Wavetable);
+        let link = graph.link_under(table).expect("a frame wire splices too");
+        graph.insert_into(table, link);
+        assert!(graph.connections.contains(&Connection {
+            from: table,
+            out: Port::Table,
+            to: 1,
+            input: Port::Frame(0),
+        }));
+    }
+
+    #[test]
+    fn a_frame_node_does_not_splice_since_it_takes_no_table() {
+        let mut graph = saw_into_oscillator();
+        let square = add_on_the_wire(&mut graph, NodeKind::SquareWave);
+        assert_eq!(graph.link_under(square), None);
+    }
+
+    #[test]
+    fn a_wavetable_does_not_splice_into_an_audio_wire() {
+        let mut graph = Graph::with(
+            vec![
+                FlodeNode::new(NodeKind::Oscillator, Point::new(0.0, 100.0)),
+                FlodeNode::new(NodeKind::Output, Point::new(600.0, 100.0)),
+            ],
+            vec![Connection {
+                from: 0,
+                out: Port::Audio,
+                to: 1,
+                input: Port::Slot(0),
+            }],
+        );
+        let table = add_on_the_wire(&mut graph, NodeKind::Wavetable);
+        assert_eq!(graph.link_under(table), None);
+    }
+}

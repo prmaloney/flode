@@ -302,6 +302,8 @@ pub struct Graph {
     /// The box for typing a knob's value, while one is open.
     pub(super) knob_entry: Option<KnobEntry>,
     pub(super) menu: Option<ContextMenu>,
+    /// Audio files just dropped on the editor, while the chooser asks what they become.
+    pub(super) drop_choice: Option<DropChoice>,
     /// The quick add box, while it is open.
     pub(super) quick_add: Option<QuickAdd>,
     /// The node whose dropdown list is open.
@@ -518,6 +520,7 @@ impl Graph {
             slides: Vec::new(),
             shift: false,
             menu: None,
+            drop_choice: None,
             dropdown_menu: None,
             link_target: None,
             ramp_hover: None,
@@ -971,35 +974,64 @@ impl Graph {
         }
     }
 
-    /// Adds a Sampler for an audio file dropped on the editor at `screen`, centered there, and
-    /// starts loading the file into it. That makes a drop a one step way to a playable Sampler.
-    /// Several files dropped together land one after the other, each offset from the last so none
-    /// hides another. A file that isn't audio is told so on the status line and adds nothing.
-    /// Returns whether a node was added.
-    pub(super) fn drop_sample(&mut self, path: PathBuf, screen: Point) -> bool {
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+    /// Opens the drop chooser for an audio file dropped on the editor at `screen`, which asks
+    /// whether the file becomes a wavetable's frames or a Sampler. Several files dropped together
+    /// arrive one by one, so a file that comes while the chooser is open joins it, and one pick
+    /// places them all. A file that isn't audio is told so on the status line and is left out.
+    /// Returns whether the file is waiting in the chooser.
+    pub(super) fn drop_file(&mut self, path: PathBuf, screen: Point) -> bool {
         if !is_audio_file(&path) {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
             self.say(format!("{name} is not an audio file flode can load"));
             return false;
         }
-        if !self.can_add(NodeKind::Sampler) {
+        if let Some(choice) = self.drop_choice.as_mut() {
+            choice.paths.push(path);
+            return true;
+        }
+        self.menu = None;
+        self.dropdown_menu = None;
+        self.burger_menu = false;
+        self.category_menu = None;
+        self.preset_list = None;
+        self.group_list = None;
+        self.drop_choice = Some(DropChoice {
+            paths: vec![path],
+            screen,
+        });
+        true
+    }
+
+    /// Closes the drop chooser and makes each of its files the node `option` names, centered on
+    /// the drop, and starts loading the file into it. Several files land one after the other,
+    /// each offset from the last so none hides another. Returns whether a node was added.
+    pub(super) fn place_drop(&mut self, option: DropOption) -> bool {
+        let Some(choice) = self.drop_choice.take() else {
+            return false;
+        };
+        let kind = option.kind();
+        if !self.can_add(kind) {
             return false;
         }
-        let mut point = self.view.to_world(screen);
-        point.x -= NODE_WIDTH / 2.0;
-        // A node already at this spot is from the same drop. Step down and right off it.
-        while self.nodes.iter().any(|node| {
-            (node.position.x - point.x).abs() < 1.0 && (node.position.y - point.y).abs() < 1.0
-        }) {
-            point.x += DROP_STAGGER;
-            point.y += DROP_STAGGER;
+        let mut added = false;
+        for path in choice.paths {
+            let mut point = self.view.to_world(choice.screen);
+            point.x -= NODE_WIDTH / 2.0;
+            // A node already at this spot is from the same drop. Step down and right off it.
+            while self.nodes.iter().any(|node| {
+                (node.position.x - point.x).abs() < 1.0 && (node.position.y - point.y).abs() < 1.0
+            }) {
+                point.x += DROP_STAGGER;
+                point.y += DROP_STAGGER;
+            }
+            let node = self.add_node(kind, point);
+            self.start_sample_load(node, path);
+            added = true;
         }
-        let node = self.add_node(NodeKind::Sampler, point);
-        self.start_sample_load(node, path);
-        true
+        added
     }
 
     /// Starts decoding `path` for Sampler node `node` on a background thread, so a large file's
@@ -1623,7 +1655,10 @@ impl Graph {
             && dragged.output_ports().contains(&Port::Shape);
         let notes_node = dragged.input_ports().contains(&Port::Notes)
             && dragged.output_ports().contains(&Port::Notes);
-        if !(audio_node || control_node || notes_node) {
+        // A wavetable node splices into a table wire, taking it on its first frame pin.
+        let table_node = dragged.input_ports().contains(&Port::Frame(0))
+            && dragged.output_ports().contains(&Port::Table);
+        if !(audio_node || control_node || notes_node || table_node) {
             return None;
         }
         if self
@@ -1639,6 +1674,8 @@ impl Graph {
                 c.out.is_audio_out() && c.input.is_audio()
             } else if control_node {
                 c.out.is_control_out() && matches!(c.input, Port::Knob(_))
+            } else if table_node {
+                c.out.signal() == Signal::Table && c.input.signal() == Signal::Table
             } else {
                 c.out.signal() == Signal::Notes && c.input.signal() == Signal::Notes
             };
@@ -1664,11 +1701,15 @@ impl Graph {
     /// Splices `node` into the connection `link`: the old source feeds the node, and the node
     /// feeds the old target. Control wires are spliced through the node's shape pins, or into A on
     /// a math node. An audio wire goes into the node's first audio input, which is the top one on a
-    /// node with several, such as signal A on a mix. A notes wire goes into the node's notes pin.
+    /// node with several, such as signal A on a mix. A notes wire goes into the node's notes pin. A
+    /// table wire goes into a wavetable's first frame pin, and the wavetable's table goes on.
     pub(super) fn insert_into(&mut self, node: usize, link: usize) {
         let old = self.connections[link];
+        let table = old.out.signal() == Signal::Table;
         let (input, out) = if old.out.signal() == Signal::Notes {
             (Port::Notes, Port::Notes)
+        } else if table {
+            (Port::Frame(0), Port::Table)
         } else if old.out.is_control_out() {
             (
                 Self::control_splice_input(&self.nodes[node]).unwrap_or(Port::Shape),
@@ -1693,6 +1734,12 @@ impl Graph {
             to: old.to,
             input: old.input,
         });
+        // The wavetable now has a wired frame pin, so it shows the empty one below it, and the
+        // new frame starts with an equal share, the same as a wire made by hand.
+        if table {
+            self.nodes[node].reset_value(KnobId::share(0));
+            self.refresh_slots();
+        }
         self.make_room(node, old.from, old.to);
     }
 
