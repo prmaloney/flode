@@ -93,6 +93,7 @@ fn the_top_level_rows_are_in_order() {
             BurgerRow::AddSampler,
             BurgerRow::Category(Category::Midi),
             BurgerRow::Category(Category::Modulation),
+            BurgerRow::Category(Category::Wavetable),
             BurgerRow::Category(Category::Effects),
             BurgerRow::Category(Category::Utility),
             BurgerRow::Presets,
@@ -256,6 +257,7 @@ fn every_kind_is_categorised_or_direct_or_group_internal() {
     let categories = [
         Category::Midi,
         Category::Modulation,
+        Category::Wavetable,
         Category::Effects,
         Category::Utility,
     ];

@@ -139,6 +139,7 @@ pub(super) fn draw_editor(
                     Signal::Audio => PENDING_WIRE_COLOR,
                     Signal::Control => CONTROL_COLOR,
                     Signal::Notes => NOTES_COLOR,
+                    Signal::Table => TABLE_COLOR,
                 };
                 draw_curve(frame, &wire_curve(start, cursor), color, 2.0);
             }
@@ -151,6 +152,7 @@ pub(super) fn draw_editor(
                     Signal::Audio => PENDING_WIRE_COLOR,
                     Signal::Control => CONTROL_COLOR,
                     Signal::Notes => NOTES_COLOR,
+                    Signal::Table => TABLE_COLOR,
                 };
                 draw_curve(frame, &wire_curve(cursor, end), color, 2.0);
             }
@@ -332,6 +334,29 @@ pub(super) fn wire_color(out: Port) -> Color {
         Signal::Audio => WIRE_COLOR,
         Signal::Control => CONTROL_COLOR,
         Signal::Notes => NOTES_COLOR,
+        Signal::Table => TABLE_COLOR,
+    }
+}
+
+/// How far a header moves from the neutral grey toward its signal's wire color. Small enough
+/// that the header stays a dark slate and the title stays easy to read.
+const HEADER_TINT: f32 = 0.28;
+
+/// A node header's color: `neutral`, moved toward the wire color of the signal the node mainly
+/// makes. Audio and nodes with no main signal keep `neutral`.
+pub(super) fn header_tint(neutral: Color, signal: Option<Signal>) -> Color {
+    let target = match signal {
+        Some(Signal::Control) => CONTROL_COLOR,
+        Some(Signal::Notes) => NOTES_COLOR,
+        Some(Signal::Table) => TABLE_COLOR,
+        Some(Signal::Audio) | None => return neutral,
+    };
+    let mix = |from: f32, to: f32| from + (to - from) * HEADER_TINT;
+    Color {
+        r: mix(neutral.r, target.r),
+        g: mix(neutral.g, target.g),
+        b: mix(neutral.b, target.b),
+        a: neutral.a,
     }
 }
 
@@ -418,9 +443,15 @@ pub(super) fn draw_node(
         .bypass_label()
         .or_else(|| over_limit_label(graph, index));
     let (body_color, header_color) = if off.is_some() {
-        (NODE_OFF_BODY_COLOR, NODE_OFF_HEADER_COLOR)
+        (
+            NODE_OFF_BODY_COLOR,
+            header_tint(NODE_OFF_HEADER_COLOR, node.kind.main_signal()),
+        )
     } else {
-        (NODE_BODY_COLOR, NODE_HEADER_COLOR)
+        (
+            NODE_BODY_COLOR,
+            header_tint(NODE_HEADER_COLOR, node.kind.main_signal()),
+        )
     };
     // The selected node sits higher, so its shadow is bigger.
     let shadow = if graph.is_selected(index) {
@@ -872,6 +903,30 @@ pub(super) fn draw_pin_dot(frame: &mut Frame, point: Point, port: Port) {
         Signal::Audio => frame.fill(&Path::circle(point, PIN_RADIUS), TERMINAL_COLOR),
         Signal::Control => frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), CONTROL_COLOR),
         Signal::Notes => frame.fill(&Path::circle(point, CONTROL_PIN_RADIUS), NOTES_COLOR),
+        Signal::Table => draw_table_pin(frame, point, port, PIN_RADIUS + 1.0),
+    }
+}
+
+/// A table pin: a diamond in the table color. A frame input of a wavetable node is a ring with its
+/// slot's color at the center, so the ring says it takes a table and the center says which slot.
+fn draw_table_pin(frame: &mut Frame, point: Point, port: Port, radius: f32) {
+    let diamond = Path::new(|builder| {
+        builder.move_to(Point::new(point.x, point.y - radius));
+        builder.line_to(Point::new(point.x + radius, point.y));
+        builder.line_to(Point::new(point.x, point.y + radius));
+        builder.line_to(Point::new(point.x - radius, point.y));
+        builder.close();
+    });
+    match port {
+        Port::Frame(slot) => {
+            frame.stroke(
+                &diamond,
+                Stroke::default().with_color(TABLE_COLOR).with_width(2.0),
+            );
+            let center = FRAME_COLORS[slot.min(FRAME_COLORS.len() - 1)];
+            frame.fill(&Path::circle(point, radius * 0.38), center);
+        }
+        _ => frame.fill(&diamond, TABLE_COLOR),
     }
 }
 
@@ -885,6 +940,7 @@ pub(super) fn draw_packed_pin_dot(frame: &mut Frame, point: Point, port: Port) {
         ),
         Signal::Control => frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), CONTROL_COLOR),
         Signal::Notes => frame.fill(&Path::circle(point, PACKED_PIN_RADIUS), NOTES_COLOR),
+        Signal::Table => draw_table_pin(frame, point, port, PACKED_PIN_RADIUS + 1.0),
     }
 }
 

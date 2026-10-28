@@ -136,6 +136,34 @@ pub enum KnobId {
     SamplerLoopEnd,
     /// A low or high pass filter's steepness: 6, 12, 18 or 24 dB per octave, as steps 0 to 3.
     Slope,
+    /// How many units the Math node's full 0 to 1 signal range stands for. A and B read and take
+    /// numbers in these units, so with a span of 24, adding a B of 5 adds 5 of the 24.
+    MathSpan,
+    /// Where a wavetable node's output sits along its ramp, from the start to the end.
+    WtPosition,
+    /// How wide the blend between neighbouring regions of a wavetable's ramp is, as a share of the
+    /// smaller region.
+    WtBlendWidth,
+    /// The relative share of a wavetable's ramp that frame input 1 to 8 gets. A node's ramp
+    /// handles move these, so they have no pin.
+    Share1,
+    Share2,
+    Share3,
+    Share4,
+    Share5,
+    Share6,
+    Share7,
+    Share8,
+    /// How many harmonics a harmonics node's frame has.
+    HarmCount,
+    /// How quickly a harmonics frame's upper harmonics fall away.
+    HarmTilt,
+    /// Leans a harmonics frame toward odd or even harmonics.
+    HarmOddEven,
+    /// How many frames a sweep node makes.
+    SweepFrames,
+    /// How far a sweep node's sweep goes.
+    SweepAmount,
 }
 
 /// Envelope times in seconds. Skewed so most of the knob travel covers short times.
@@ -149,7 +177,7 @@ fn time_range() -> FloatRange {
 
 impl KnobId {
     /// Number of knob kinds, for sizing per-knob arrays.
-    pub const COUNT: usize = 74;
+    pub const COUNT: usize = 90;
 
     /// The macro knobs, in order. The first is macro 1.
     pub const MACROS: [KnobId; 4] = [
@@ -239,7 +267,38 @@ impl KnobId {
         KnobId::SamplerLoopStart,
         KnobId::SamplerLoopEnd,
         KnobId::Slope,
+        KnobId::MathSpan,
+        KnobId::WtPosition,
+        KnobId::WtBlendWidth,
+        KnobId::Share1,
+        KnobId::Share2,
+        KnobId::Share3,
+        KnobId::Share4,
+        KnobId::Share5,
+        KnobId::Share6,
+        KnobId::Share7,
+        KnobId::Share8,
+        KnobId::HarmCount,
+        KnobId::HarmTilt,
+        KnobId::HarmOddEven,
+        KnobId::SweepFrames,
+        KnobId::SweepAmount,
     ];
+
+    /// The share knob of frame input `n` of a wavetable node.
+    pub fn share(n: usize) -> KnobId {
+        const SHARES: [KnobId; 8] = [
+            KnobId::Share1,
+            KnobId::Share2,
+            KnobId::Share3,
+            KnobId::Share4,
+            KnobId::Share5,
+            KnobId::Share6,
+            KnobId::Share7,
+            KnobId::Share8,
+        ];
+        SHARES[n.min(SHARES.len() - 1)]
+    }
 
     /// The name shown beside the knob.
     pub fn name(self) -> &'static str {
@@ -318,6 +377,22 @@ impl KnobId {
             KnobId::SamplerLoopStart => "Loop start",
             KnobId::SamplerLoopEnd => "Loop end",
             KnobId::Slope => "Slope",
+            KnobId::MathSpan => "Span",
+            KnobId::WtPosition => "Position",
+            KnobId::WtBlendWidth => "Blend width",
+            KnobId::Share1
+            | KnobId::Share2
+            | KnobId::Share3
+            | KnobId::Share4
+            | KnobId::Share5
+            | KnobId::Share6
+            | KnobId::Share7
+            | KnobId::Share8 => "Share",
+            KnobId::HarmCount => "Harmonics",
+            KnobId::HarmTilt => "Tilt",
+            KnobId::HarmOddEven => "Odd/even",
+            KnobId::SweepFrames => "Frames",
+            KnobId::SweepAmount => "Amount",
         }
     }
 
@@ -336,7 +411,14 @@ impl KnobId {
                 min: crate::dsp::gain::UTILITY_MIN_DB,
                 max: 24.0,
             },
-            KnobId::Attack | KnobId::Decay | KnobId::Release => time_range(),
+            // An attack of zero is a jump to full level in a single sample, for a plucked or
+            // struck sound. Decay and release keep a floor, since a zero there would click.
+            KnobId::Attack => FloatRange::Skewed {
+                min: 0.0,
+                max: 5.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+            KnobId::Decay | KnobId::Release => time_range(),
             KnobId::Glide => FloatRange::Skewed {
                 min: 0.0,
                 max: 2.0,
@@ -463,6 +545,39 @@ impl KnobId {
                 factor: FloatRange::skew_factor(-1.0),
             },
             KnobId::Slope => FloatRange::Linear { min: 0.0, max: 3.0 },
+            KnobId::WtPosition | KnobId::WtBlendWidth | KnobId::HarmTilt | KnobId::SweepAmount => {
+                FloatRange::Linear { min: 0.0, max: 1.0 }
+            }
+            // A share is a weight, never zero, so a region always has some room.
+            KnobId::Share1
+            | KnobId::Share2
+            | KnobId::Share3
+            | KnobId::Share4
+            | KnobId::Share5
+            | KnobId::Share6
+            | KnobId::Share7
+            | KnobId::Share8 => FloatRange::Linear {
+                min: 0.02,
+                max: 1.0,
+            },
+            KnobId::HarmCount => FloatRange::Linear {
+                min: 1.0,
+                max: 64.0,
+            },
+            KnobId::HarmOddEven => FloatRange::Linear {
+                min: -1.0,
+                max: 1.0,
+            },
+            KnobId::SweepFrames => FloatRange::Linear {
+                min: 2.0,
+                max: 64.0,
+            },
+            // From a single unit up to a thousand, weighted so the small spans get the travel.
+            KnobId::MathSpan => FloatRange::Skewed {
+                min: 1.0,
+                max: 1000.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
             // Zero is free running. Each step past it is one of the note divisions.
             KnobId::LfoSync => FloatRange::Linear {
                 min: 0.0,
@@ -551,6 +666,25 @@ impl KnobId {
             KnobId::SamplerLoopEnd => 100.0,
             // 12 dB per octave, what the filter always was.
             KnobId::Slope => 1.0,
+            // A span of 100 reads A and B as percents, as they always did.
+            KnobId::MathSpan => 100.0,
+            KnobId::WtPosition => 0.0,
+            // Half of the smaller region blends, so neighbours meet softly by default.
+            KnobId::WtBlendWidth => 0.5,
+            // Equal shares: every region starts the same size.
+            KnobId::Share1
+            | KnobId::Share2
+            | KnobId::Share3
+            | KnobId::Share4
+            | KnobId::Share5
+            | KnobId::Share6
+            | KnobId::Share7
+            | KnobId::Share8 => 0.5,
+            KnobId::HarmCount => 16.0,
+            KnobId::HarmTilt => 0.5,
+            KnobId::HarmOddEven => 0.0,
+            KnobId::SweepFrames => 16.0,
+            KnobId::SweepAmount => 1.0,
         }
     }
 
@@ -566,6 +700,8 @@ impl KnobId {
             | KnobId::LfoSync
             | KnobId::Octave
             | KnobId::ArpOctaves
+            | KnobId::HarmCount
+            | KnobId::SweepFrames
             | KnobId::Slope => plain.round(),
             KnobId::SamplerRoot => plain.round(),
             _ => plain,
@@ -583,6 +719,8 @@ impl KnobId {
             | KnobId::LfoSync
             | KnobId::Octave
             | KnobId::ArpOctaves
+            | KnobId::HarmCount
+            | KnobId::SweepFrames
             | KnobId::Slope => self.to_normalized(self.to_plain(normalized)),
             KnobId::SamplerRoot => self.to_normalized(self.to_plain(normalized)),
             _ => normalized.clamp(0.0, 1.0),
@@ -714,6 +852,20 @@ impl KnobId {
             },
             KnobId::ArpOctaves => format!("{}", plain.round() as i32),
             KnobId::Slope => format!("{} dB/oct", (plain.round() as i32 + 1) * 6),
+            KnobId::MathSpan => entry_text(plain),
+            KnobId::WtPosition | KnobId::WtBlendWidth | KnobId::HarmTilt | KnobId::SweepAmount => {
+                format!("{:.0}%", plain * 100.0)
+            }
+            KnobId::Share1
+            | KnobId::Share2
+            | KnobId::Share3
+            | KnobId::Share4
+            | KnobId::Share5
+            | KnobId::Share6
+            | KnobId::Share7
+            | KnobId::Share8 => format!("{:.0}%", plain * 100.0),
+            KnobId::HarmCount | KnobId::SweepFrames => format!("{}", plain.round() as i32),
+            KnobId::HarmOddEven => format!("{:+.0}%", plain * 100.0),
             KnobId::ArpGate => format!("{:.0}%", plain * 100.0),
             KnobId::ChordSpread => format!("{:.0}%", plain * 100.0),
             KnobId::SamplerRoot => note_name(plain.round() as i32),

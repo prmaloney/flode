@@ -716,6 +716,12 @@ impl<'a> Wiring<'a> {
             | NodeKind::Chord
             | NodeKind::Macro
             | NodeKind::Envelope
+            // A table makes no audio stage. It reaches an oscillator through its params.
+            | NodeKind::Wavetable
+            | NodeKind::CurveFrame
+            | NodeKind::Harmonics
+            | NodeKind::Sweep
+            | NodeKind::WaveFile
             // Groups are flattened away before a graph compiles, so these never reach a stage.
             | NodeKind::Group
             | NodeKind::GroupInput
@@ -909,6 +915,16 @@ impl<'p> LaneBuilder<'p> {
         }
         self.path.pop();
 
+        // An oscillator is always per voice. A modulator that is on the bus is already the voices
+        // added together, so it can't phase one voice. That input is left silent.
+        if matches!(params, StageParams::Oscillator(_)) {
+            if let Some(at) = inputs[0] {
+                if self.stages[at as usize].bus {
+                    inputs[0] = None;
+                }
+            }
+        }
+
         // A stage runs on the bus if it is an effect, or if anything on the bus feeds it. The
         // voices are added together by then, so it can only run once, on the sum.
         let bus = params.is_effect()
@@ -1092,6 +1108,44 @@ mod tests {
         assert!(matches!(lane.stages[1].params, StageParams::Filter(_)));
         assert_eq!(lane.stages[1].inputs, [Some(0), None]);
         assert!(in_signal_order(&lane));
+    }
+
+    /// An oscillator wired into another's audio pin is the carrier's input, and comes before it.
+    #[test]
+    fn a_modulator_comes_before_the_oscillator_it_phases() {
+        let nodes = vec![
+            node(NodeKind::Oscillator), // 0: the modulator
+            node(NodeKind::Oscillator), // 1: the carrier
+            node(NodeKind::Output),
+        ];
+        let links = vec![audio(0, 1, Port::AudioIn(0)), audio(1, 2, Port::Slot(0))];
+        let lane = lane(nodes, links, 2);
+        assert_eq!(lane.stages.len(), 2);
+        assert!(matches!(lane.stages[1].params, StageParams::Oscillator(_)));
+        assert_eq!(lane.stages[1].inputs, [Some(0), None]);
+        assert!(in_signal_order(&lane));
+    }
+
+    /// A modulator that has gone through an effect is on the bus, where the voices are already
+    /// summed, so it can't phase one voice. The oscillator stays per voice with its input silent.
+    #[test]
+    fn a_bus_modulator_is_left_out() {
+        let nodes = vec![
+            node(NodeKind::Oscillator), // 0
+            node(NodeKind::Reverb),     // 1: puts its output on the bus
+            node(NodeKind::Oscillator), // 2: the carrier
+            node(NodeKind::Output),
+        ];
+        let links = vec![
+            audio(0, 1, Port::Audio),
+            audio(1, 2, Port::AudioIn(0)),
+            audio(2, 3, Port::Slot(0)),
+        ];
+        let lane = lane(nodes, links, 3);
+        let carrier = lane.root().unwrap();
+        assert!(matches!(carrier.params, StageParams::Oscillator(_)));
+        assert!(!carrier.bus);
+        assert_eq!(carrier.inputs, [None, None]);
     }
 
     /// A filter sits inside one branch of a mix. The old chain could not compile this.

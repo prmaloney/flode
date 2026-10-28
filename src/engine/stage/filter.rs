@@ -47,8 +47,18 @@ impl FilterState {
     ) -> Frame {
         let cutoff_target = p.cutoff.plain(levels);
         let resonance_target = p.resonance.plain(levels);
-        self.cutoff_log2 += (cutoff_target.log2() - self.cutoff_log2) * smooth;
-        self.resonance += (resonance_target - self.resonance) * smooth;
+        // A knob move eases so it doesn't click. A wired control is already a smooth signal, and
+        // easing it as slowly smears an envelope's fast attack into a slow sweep, so it follows
+        // about ten times quicker.
+        let quick = 1.0 - (1.0 - smooth).powi(10);
+        let cutoff_ease = if p.cutoff.is_driven() { quick } else { smooth };
+        let resonance_ease = if p.resonance.is_driven() {
+            quick
+        } else {
+            smooth
+        };
+        self.cutoff_log2 += (cutoff_target.log2() - self.cutoff_log2) * cutoff_ease;
+        self.resonance += (resonance_target - self.resonance) * resonance_ease;
         // Both sides run the same response, so they share one set of coefficients.
         let cutoff = self.cutoff_log2.exp2();
         if !p.kind.is_ladder() {
@@ -185,6 +195,43 @@ mod tests {
         }
         assert!(left_peak > 0.5);
         assert_eq!(right_peak, 0.0);
+    }
+
+    /// A cutoff a control drives follows it much faster than a knob move eases, so an envelope's
+    /// fast attack opens the filter at once and doesn't sweep.
+    #[test]
+    fn a_driven_cutoff_follows_faster_than_a_knob() {
+        use crate::patch::control::{KnobValue, Route, Source};
+        let mut rig = Rig::new();
+
+        let mut driven = low_pass(1000.0);
+        driven.cutoff = Param::new(
+            KnobId::Cutoff,
+            KnobValue {
+                value: 0.0,
+                route: Some(Route {
+                    source: Source::Envelope(0),
+                }),
+            },
+        );
+        let mut levels = ControlLevels::default();
+        levels.envelope[0] = 1.0;
+        // Both targets are far from where the filter starts: the knob one is moved to 8 kHz.
+        let moved = low_pass(8000.0);
+        let smooth = rig.tick().smooth;
+        let mut after = |params: &FilterParams| {
+            let mut state = Filter::start(&low_pass(1000.0), &mut rig.start_context());
+            state.tick(params, Frame::SILENT, &levels, smooth, 44100.0);
+            state.cutoff_hz()
+        };
+        let eased = after(&moved);
+        let followed = after(&driven);
+        // Measured in octaves moved from 1 kHz, the driven one has gone several times further.
+        let octaves = |hz: f32| (hz / 1000.0).log2();
+        assert!(
+            octaves(followed) > octaves(eased) * 3.0,
+            "{followed} vs {eased}"
+        );
     }
 
     /// The cutoff eases toward a new knob value instead of jumping to it.

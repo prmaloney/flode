@@ -13,6 +13,7 @@ use crate::nodes::knobs::{self, KnobId};
 use crate::nodes::macros::MACRO_COUNT;
 use crate::nodes::mix;
 use crate::nodes::output::MAX_SLOTS;
+use crate::nodes::wavetable::MAX_FRAMES;
 use crate::nodes::{Category, FlodeNode, NodeKind, Port, Signal, HEADER_HEIGHT, NODE_WIDTH};
 use crate::patch::control::{ControlLevels, Route};
 use crate::patch::wiring::Wiring;
@@ -461,20 +462,24 @@ impl Default for Graph {
 /// shown is invalid, so a load calls this before it checks the wires it read.
 pub(super) fn show_slots(nodes: &mut [FlodeNode], connections: &[Connection]) {
     for (index, node) in nodes.iter_mut().enumerate() {
-        if node.kind != NodeKind::Output {
-            continue;
-        }
+        // An output node's slots, or a wavetable node's frame inputs. Either way a pin shows for
+        // each connected one and one empty pin below the last.
+        let limit = match node.kind {
+            NodeKind::Output => MAX_SLOTS,
+            NodeKind::Wavetable => MAX_FRAMES,
+            _ => continue,
+        };
         let used = connections
             .iter()
             .filter(|c| c.to == index)
             .filter_map(|c| match c.input {
-                Port::Slot(slot) => Some(slot + 1),
+                Port::Slot(slot) | Port::Frame(slot) => Some(slot + 1),
                 _ => None,
             })
             .max()
             .unwrap_or(0);
-        node.used = used.min(MAX_SLOTS);
-        node.slots = (node.used + 1).min(MAX_SLOTS);
+        node.used = used.min(limit);
+        node.slots = (node.used + 1).min(limit);
     }
 }
 
@@ -1880,7 +1885,14 @@ impl Graph {
     pub(super) fn best_link(&self, from: usize, to: usize) -> Option<Connection> {
         let source = self.nodes.get(from)?;
         let target = self.nodes.get(to)?;
-        let inputs = target.input_ports();
+        // An oscillator's audio pin is for phase modulation, which has to be wired on purpose. An
+        // automatic wire never picks it, or joining a chain from its far end would feed the
+        // chain back into its own source.
+        let inputs: Vec<Port> = target
+            .input_ports()
+            .into_iter()
+            .filter(|port| !(target.kind == NodeKind::Oscillator && port.is_audio()))
+            .collect();
         let links: Vec<Connection> = source
             .output_ports()
             .into_iter()

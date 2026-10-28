@@ -42,7 +42,12 @@ impl NodeBehavior for Oscillator {
         if waveform(node) == Waveform::Noise {
             rows.push(Row::control(Control::Dropdown(2)));
         }
-        rows.push(Row::control(Control::Viewer));
+        // A wavetable wired to the pin on the viewer's row plays in place of the waveform, at the
+        // table's own Position. The pin shares the row so the node stays as tall as it was.
+        rows.push(Row {
+            input: Some(Port::TableIn),
+            ..Row::control(Control::Viewer)
+        });
         // The envelope input shapes this oscillator's amplitude, one copy per voice.
         rows.push(Row::input(Port::Shape).with_output(Port::Audio));
         rows.push(Row::driven_knob(KnobId::OscGain));
@@ -61,7 +66,12 @@ impl NodeBehavior for Oscillator {
         rows.push(Row::driven_knob(KnobId::PhaseRandom));
 
         rows.push(Row::section(SECTION_WARP));
-        rows.push(Row::control(Control::Dropdown(1)));
+        // The audio pin sits on the warp dropdown's row. The PM and PD warps read it, and the
+        // others leave it alone. The dropdown starts clear of the pin, as it does for the notes.
+        rows.push(Row {
+            input: Some(Port::AudioIn(0)),
+            ..Row::control(Control::Dropdown(1))
+        });
         rows.push(Row::driven_knob(KnobId::WarpAmount));
         rows
     }
@@ -158,8 +168,8 @@ pub fn warp_mode(node: &FlodeNode) -> WarpMode {
 }
 
 /// The warp dropdown's rows.
-pub const WARP_LABELS: [&str; 8] = [
-    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize",
+pub const WARP_LABELS: [&str; 10] = [
+    "None", "Bend", "Sync", "PWM", "Asym", "Flip", "Mirror", "Quantize", "PM", "PD",
 ];
 
 #[cfg(test)]
@@ -265,14 +275,34 @@ mod tests {
         assert!(!WARP_LABELS.contains(&"FM"));
     }
 
-    /// An oscillator has no audio input under any warp. FM is a mix node mode.
+    /// An oscillator has one audio input, on the warp row, whatever the warp. Only PM and PD read
+    /// it, but the pin stays so a saved wire doesn't depend on the mode.
     #[test]
-    fn an_oscillator_has_no_audio_input() {
+    fn an_oscillator_has_one_audio_input_on_the_warp_row() {
         let mut node = oscillator();
         for choice in 0..WarpMode::ALL.len() {
             node.choose(1, choice);
-            assert!(!node.input_ports().iter().any(|port| port.is_audio()));
+            let audio: Vec<Port> = node
+                .input_ports()
+                .into_iter()
+                .filter(|port| port.is_audio())
+                .collect();
+            assert_eq!(audio, [Port::AudioIn(0)]);
         }
+        let rows = Oscillator.rows(&node);
+        let pin = rows
+            .iter()
+            .find(|row| row.input == Some(Port::AudioIn(0)))
+            .unwrap();
+        assert_eq!(pin.control, Some(Control::Dropdown(1)));
+    }
+
+    /// The two warps that read the pin are named for what they do.
+    #[test]
+    fn pm_and_pd_are_the_last_two_warps() {
+        assert_eq!(&WARP_LABELS[8..], ["PM", "PD"]);
+        assert_eq!(WarpMode::ALL[8], WarpMode::Pm);
+        assert_eq!(WarpMode::ALL[9], WarpMode::Pd);
     }
 
     /// A graph saved while the oscillator had an FM warp holds a choice past the last mode. It

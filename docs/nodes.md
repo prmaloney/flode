@@ -22,11 +22,24 @@ Flode is not affiliated with Blender or the Blender Foundation.
 
 ## Nodes
 
+A node's header leans toward the color of the wire it mainly makes: green for control (LFO,
+envelope, map, math, macros), purple for notes (input, arpeggiator, chord). Audio nodes keep the
+neutral header, since audio is most of a graph.
+
 - **Oscillator.** Sine, saw, square, triangle and noise (white, pink, brown, Geiger). Up to seven
   unison voices with detune and stereo spread, pitch controls, and warp modes (bend, sync, PWM,
-  asymmetry, flip, mirror, quantize). Each has its own level and pan. A held note follows the
-  Unison and Detune knobs, with copies fading in and out as the count changes. Phase only sets
+  asymmetry, flip, mirror, quantize, PM, PD). Each has its own level and pan. A held note follows
+  the Unison and Detune knobs, with copies fading in and out as the count changes. Phase only sets
   where a note's copies start, so it takes effect on the next note.
+
+  The audio pin on the Warp row is read by the PM and PD warps. With another oscillator wired in,
+  PM pushes the phase by that signal, with the Warp amount as the depth (up to two cycles). PD
+  bends the cycle toward one end or the other as the signal swings, like the Casio CZ's phase
+  distortion, with the amount as how far it can move. With nothing wired, both play the plain
+  wave, and the other warps ignore the pin. The modulator is another oscillator, with its own
+  Notes wire, and goes through its own envelope and level. A modulator that has passed through an
+  effect is already summed across voices, so it is ignored. Shift-right-drag and the other
+  automatic wiring never pick this pin. Drag a wire to it.
 - **Sampler.** Plays back a loaded audio file, one voice per held note, pitch-shifted from the note
   relative to a Root key. The Load sample row opens a file picker; it shows the loaded file's name
   once one is chosen. WAV, AIFF, FLAC, MP3, Ogg Vorbis, and AAC/M4A load, mono or stereo. Drag an
@@ -73,6 +86,10 @@ Flode is not affiliated with Blender or the Blender Foundation.
   constant. Signals run from 0 to 1 and the result stays in that range. Divide and modulo by zero
   give 0. Power raises A to a power that B sets, a quarter with B at 0, 1 at 50 percent, and 4 at
   100 percent. The output can drive any knob, including a map's values or another math node.
+  The Span knob says how many units the full 0 to 1 range stands for, and A and B read and take
+  numbers in those units. At the default of 100 they are percents. To add exactly 5 semitones to a
+  signal that drives a Crs knob, whose range is 24 semitones wide, set Span to 24, B to 5, and the
+  op to Add. Span only changes the numbers, not the signal, and it has no pin.
 - **Filter.** Low pass, high pass, band pass, notch and peak, run once per voice, so a filter
   envelope follows each note on its own. A notch cuts the band around the cutoff and passes the
   rest. A peak is flat with Resonance at zero and lifts the band around the cutoff as Resonance

@@ -145,6 +145,8 @@ fn natural_name(port: Port) -> Option<String> {
         Port::AudioIn(1) => Some("B".to_string()),
         Port::Midi(source) => Some(source.label().to_string()),
         Port::Macro(index) => Some(format!("Macro {}", index + 1)),
+        Port::Table => Some("Table".to_string()),
+        Port::TableIn | Port::Frame(_) => Some("Table".to_string()),
         Port::AudioIn(_) | Port::Pin(..) | Port::NewPin => None,
     }
 }

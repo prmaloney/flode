@@ -23,7 +23,7 @@ pub const MAX_STAGES: usize = 16;
 /// The most audio inputs one stage can have.
 pub const MAX_INPUTS: usize = 2;
 
-/// An oscillator stage: a source with no audio inputs.
+/// An oscillator stage. Its one audio input is the phase modulator of the PM and PD warps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OscillatorParams {
     pub waveform: Waveform,
@@ -337,8 +337,9 @@ impl StageParams {
     /// How many audio inputs the stage reads. The compiler wires that many.
     pub fn input_count(&self) -> usize {
         match self {
-            // An oscillator and a sampler are sources.
-            StageParams::Oscillator(_) | StageParams::Sampler(_) => 0,
+            // A sampler is a source. An oscillator has one input, for phase modulation.
+            StageParams::Sampler(_) => 0,
+            StageParams::Oscillator(_) => 1,
             StageParams::Filter(_) => 1,
             StageParams::Mix(_) => 2,
             _ => 1,

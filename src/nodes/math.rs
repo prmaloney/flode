@@ -114,6 +114,8 @@ impl NodeBehavior for Math {
             Row::control(Control::Dropdown(0)),
             Row::driven_knob(KnobId::MathA),
             Row::driven_knob(KnobId::MathB),
+            // No pin: the span only sets what units A and B are shown in.
+            Row::plain_knob(KnobId::MathSpan),
         ]
     }
 
@@ -225,6 +227,50 @@ mod tests {
         assert!(near(MathOp::Power.apply(0.0625, 0.0), 0.5));
         assert_eq!(MathOp::Power.apply(0.0, 0.7), 0.0);
         assert_eq!(MathOp::Power.apply(1.0, 0.2), 1.0);
+    }
+
+    /// At the default span A and B read as percents, as before. The span has no pin.
+    #[test]
+    fn the_default_span_reads_as_percents() {
+        let mut node = node();
+        node.set_value(KnobId::MathB, 0.5);
+        assert_eq!(node.knob_format(KnobId::MathB, 0.5), "50%");
+        assert_eq!(node.knob_entry_text(KnobId::MathB), "50");
+        let span = Math
+            .rows(&node)
+            .into_iter()
+            .find(|row| row.knob == Some(KnobId::MathSpan))
+            .expect("the span row");
+        assert!(span.input.is_none());
+    }
+
+    /// With a span of 24, typing 5 into B is 5 of 24 of the signal, and B reads back as 5.
+    #[test]
+    fn a_span_gives_a_and_b_units() {
+        let mut node = node();
+        node.enter_knob_value(KnobId::MathSpan, 24.0);
+        assert!((node.plain(KnobId::MathSpan) - 24.0).abs() < 1e-3);
+        node.enter_knob_value(KnobId::MathB, 5.0);
+        assert!((node.value(KnobId::MathB) - 5.0 / 24.0).abs() < 1e-4);
+        assert_eq!(node.knob_entry_text(KnobId::MathB), "5");
+        assert_eq!(
+            node.knob_format(KnobId::MathB, node.value(KnobId::MathB)),
+            "5"
+        );
+        // Adding it to a signal moves the signal by 5 of its 24.
+        assert!(near(
+            MathOp::Add.apply(0.5, node.value(KnobId::MathB)),
+            0.5 + 5.0 / 24.0
+        ));
+    }
+
+    /// A number past the span stops at the span.
+    #[test]
+    fn a_number_past_the_span_stops_at_it() {
+        let mut node = node();
+        node.enter_knob_value(KnobId::MathSpan, 24.0);
+        node.enter_knob_value(KnobId::MathA, 100.0);
+        assert_eq!(node.value(KnobId::MathA), 1.0);
     }
 
     /// Every operation stays finite and inside 0 to 1 for inputs at and past the ends.

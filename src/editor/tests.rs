@@ -69,6 +69,24 @@ fn osc_params(lane: &LaneGraph, index: usize) -> crate::patch::stage::Oscillator
 mod tests {
     use super::*;
 
+    /// A header moves toward its signal's wire color and stays dark. Audio keeps the neutral.
+    #[test]
+    fn a_header_leans_toward_its_signal() {
+        use crate::editor::style::{CONTROL_COLOR, NODE_HEADER_COLOR, NOTES_COLOR};
+        use crate::nodes::Signal;
+        let neutral = NODE_HEADER_COLOR;
+        assert_eq!(header_tint(neutral, None), neutral);
+        assert_eq!(header_tint(neutral, Some(Signal::Audio)), neutral);
+        let control = header_tint(neutral, Some(Signal::Control));
+        assert!(control.g > neutral.g && control.g < CONTROL_COLOR.g);
+        let notes = header_tint(neutral, Some(Signal::Notes));
+        assert!(notes.r > neutral.r && notes.r < NOTES_COLOR.r);
+        // Dark enough for white titles: no channel past half.
+        for color in [control, notes] {
+            assert!(color.r < 0.5 && color.g < 0.5 && color.b < 0.6, "{color:?}");
+        }
+    }
+
     fn knob_at(id: KnobId, plain: f32) -> f32 {
         id.to_normalized(plain)
     }
@@ -1407,6 +1425,11 @@ mod bypass_and_duplicate_tests {
                 | NodeKind::Map
                 | NodeKind::Math
                 | NodeKind::Monitor
+                | NodeKind::Wavetable
+                | NodeKind::CurveFrame
+                | NodeKind::Harmonics
+                | NodeKind::Sweep
+                | NodeKind::WaveFile
                 | NodeKind::GroupInput
                 | NodeKind::GroupOutput => crate::nodes::Bypass::None,
                 _ => crate::nodes::Bypass::PassThrough,
@@ -2022,8 +2045,10 @@ mod section_tests {
         let packed: Vec<usize> = (0..rows.len())
             .filter(|&i| osc.row_places()[i].shape == RowShape::Packed)
             .collect();
-        // Coarse, fine, and octave are folded and keep their pins.
-        assert_eq!(packed.len(), 4);
+        // Coarse, fine, and octave are folded and keep their pins, and so do the warp row's audio
+        // pin and the warp amount.
+        assert_eq!(packed.len(), 5);
+        assert!(osc.input_point(Port::AudioIn(0)).is_some());
         assert!(osc.input_point(Port::Knob(KnobId::Coarse)).is_some());
         assert!(osc.input_point(Port::Knob(KnobId::Fine)).is_some());
         assert!(osc.input_point(Port::Knob(KnobId::Octave)).is_some());

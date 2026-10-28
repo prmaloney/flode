@@ -30,11 +30,12 @@ pub(super) enum BurgerRow {
 }
 
 /// The burger menu's top-level rows, in the order they are drawn.
-pub(super) const BURGER_ROWS: [BurgerRow; 8] = [
+pub(super) const BURGER_ROWS: [BurgerRow; 9] = [
     BurgerRow::AddOscillator,
     BurgerRow::AddSampler,
     BurgerRow::Category(Category::Midi),
     BurgerRow::Category(Category::Modulation),
+    BurgerRow::Category(Category::Wavetable),
     BurgerRow::Category(Category::Effects),
     BurgerRow::Category(Category::Utility),
     BurgerRow::Presets,
@@ -43,8 +44,8 @@ pub(super) const BURGER_ROWS: [BurgerRow; 8] = [
 
 /// The row Presets sits on, and the one after it where Groups sits. The divider is drawn just
 /// above the Presets row.
-pub(super) const BURGER_PRESETS_ROW: usize = 6;
-pub(super) const BURGER_GROUPS_ROW: usize = 7;
+pub(super) const BURGER_PRESETS_ROW: usize = 7;
+pub(super) const BURGER_GROUPS_ROW: usize = 8;
 
 /// A row of the preset list or of a category's submenu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

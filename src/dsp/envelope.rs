@@ -172,6 +172,16 @@ mod tests {
         assert_eq!(env.level, 0.0);
     }
 
+    /// An attack of zero is at full level on the first sample, so a pluck has no ramp at all.
+    #[test]
+    fn a_zero_attack_is_full_on_the_first_sample() {
+        let config = AdsrConfig::from_values(0.0, 0.5, 0.5, 0.1, 44100.0);
+        let mut env = Adsr::START;
+        env.advance(&config);
+        assert_eq!(env.level, 1.0);
+        assert_eq!(env.phase, EnvPhase::Decay);
+    }
+
     /// The attack climbs to full, the decay falls to the sustain level, and it holds there.
     #[test]
     fn the_cycle_reaches_sustain_and_holds() {

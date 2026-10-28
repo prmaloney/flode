@@ -18,6 +18,7 @@ pub mod envelope;
 pub mod eq;
 pub mod filter;
 pub mod flanger;
+pub mod frames;
 pub mod gain;
 pub mod group;
 pub mod input;
@@ -34,6 +35,7 @@ pub mod phaser;
 pub mod reverb;
 pub mod sampler;
 pub mod viewer;
+pub mod wavetable;
 
 use crate::dsp::sample::SampleData;
 use crate::editor::knob;
@@ -156,6 +158,17 @@ pub enum NodeKind {
     Monitor,
     Macro,
     Gain,
+    /// Collects frames into a wavetable, with a Position and a ramp of how much of the table
+    /// each input gets.
+    Wavetable,
+    /// One frame drawn as a curve.
+    CurveFrame,
+    /// One frame built from a list of harmonics.
+    Harmonics,
+    /// Many frames from one sweep, such as a pulse width or a hard sync ratio.
+    Sweep,
+    /// Frames cut from an audio file.
+    WaveFile,
     /// A node that holds a graph of its own. Wires cross into it through numbered pins.
     Group,
     /// The inside edge of a group where its input pins enter. One per group graph.
@@ -172,6 +185,8 @@ pub enum Category {
     Midi,
     /// Nodes that make or shape control signals.
     Modulation,
+    /// Nodes that make frames, and the node that collects them into a wavetable.
+    Wavetable,
     /// Nodes that change the sound of a signal.
     Effects,
     /// What is left after MIDI and Modulation move out: routing, trimming, inspecting, and
@@ -184,6 +199,7 @@ impl Category {
         match self {
             Category::Midi => "MIDI",
             Category::Modulation => "Modulation",
+            Category::Wavetable => "Wavetable",
             Category::Effects => "Effects",
             Category::Utility => "Utility",
         }
@@ -199,6 +215,13 @@ impl Category {
                 NodeKind::Macro,
                 NodeKind::Map,
                 NodeKind::Math,
+            ],
+            Category::Wavetable => &[
+                NodeKind::Wavetable,
+                NodeKind::CurveFrame,
+                NodeKind::Harmonics,
+                NodeKind::Sweep,
+                NodeKind::WaveFile,
             ],
             Category::Effects => &[
                 NodeKind::Filter,
@@ -222,8 +245,46 @@ impl Category {
 }
 
 impl NodeKind {
+    /// The kind of signal the node mainly makes, which tints its header toward that wire's color.
+    /// None is the neutral header: audio nodes, since audio is most of a graph and its wire is
+    /// near white, and the nodes that make no signal of their own. A node with outputs of several
+    /// kinds goes by the one it exists for.
+    pub fn main_signal(self) -> Option<Signal> {
+        match self {
+            NodeKind::Envelope
+            | NodeKind::Lfo
+            | NodeKind::Map
+            | NodeKind::Math
+            | NodeKind::Macro => Some(Signal::Control),
+            NodeKind::Input | NodeKind::Arpeggiator | NodeKind::Chord => Some(Signal::Notes),
+            NodeKind::Wavetable
+            | NodeKind::CurveFrame
+            | NodeKind::Harmonics
+            | NodeKind::Sweep
+            | NodeKind::WaveFile => Some(Signal::Table),
+            NodeKind::Oscillator
+            | NodeKind::Sampler
+            | NodeKind::Filter
+            | NodeKind::Mix
+            | NodeKind::Output
+            | NodeKind::Distortion
+            | NodeKind::Compressor
+            | NodeKind::Reverb
+            | NodeKind::Delay
+            | NodeKind::Chorus
+            | NodeKind::Phaser
+            | NodeKind::Flanger
+            | NodeKind::Eq
+            | NodeKind::Monitor
+            | NodeKind::Gain
+            | NodeKind::Group
+            | NodeKind::GroupInput
+            | NodeKind::GroupOutput => None,
+        }
+    }
+
     /// Every kind. The quick add box searches them, and the tests walk them.
-    pub const ALL: [NodeKind; 26] = [
+    pub const ALL: [NodeKind; 31] = [
         NodeKind::Oscillator,
         NodeKind::Sampler,
         NodeKind::Envelope,
@@ -247,6 +308,11 @@ impl NodeKind {
         NodeKind::Monitor,
         NodeKind::Macro,
         NodeKind::Gain,
+        NodeKind::Wavetable,
+        NodeKind::CurveFrame,
+        NodeKind::Harmonics,
+        NodeKind::Sweep,
+        NodeKind::WaveFile,
         NodeKind::Group,
         NodeKind::GroupInput,
         NodeKind::GroupOutput,
@@ -297,6 +363,11 @@ impl NodeKind {
             NodeKind::Monitor => &monitor::Monitor,
             NodeKind::Macro => &macros::Macros,
             NodeKind::Gain => &gain::Gain,
+            NodeKind::Wavetable => &wavetable::Wavetable,
+            NodeKind::CurveFrame => &frames::CurveFrame,
+            NodeKind::Harmonics => &frames::Harmonics,
+            NodeKind::Sweep => &frames::Sweep,
+            NodeKind::WaveFile => &frames::WaveFile,
             NodeKind::Group => &group::Group,
             NodeKind::GroupInput => &group::GroupInput,
             NodeKind::GroupOutput => &group::GroupOutput,
@@ -326,6 +397,12 @@ pub enum Port {
     Notes,
     /// Macro knob `n` on a macro node, sent as a control signal.
     Macro(usize),
+    /// The table a frame node or a wavetable node makes.
+    Table,
+    /// The oscillator's input for a table.
+    TableIn,
+    /// Frame input `n` of a wavetable node, each one a region of its ramp.
+    Frame(usize),
     /// Pin `n` of a group boundary node, carrying the given kind of signal. Whether it takes a
     /// signal or sends one depends on the node and the row it is on, as with `Audio`.
     Pin(Signal, usize),
@@ -344,7 +421,15 @@ pub enum Signal {
     Control,
     /// Which notes play, and how.
     Notes,
+    /// A wavetable, or the frames that make one. It joins frame nodes to a wavetable node, and a
+    /// wavetable node to an oscillator.
+    Table,
 }
+
+/// The names of a wavetable node's frame inputs, which are also the names of its ramp's regions.
+pub const FRAME_LABELS: [&str; 8] = [
+    "Frame 1", "Frame 2", "Frame 3", "Frame 4", "Frame 5", "Frame 6", "Frame 7", "Frame 8",
+];
 
 impl Port {
     /// The kind of signal this port carries or takes.
@@ -353,6 +438,7 @@ impl Port {
             Port::Audio | Port::AudioIn(_) | Port::Slot(_) => Signal::Audio,
             Port::Shape | Port::Knob(_) | Port::Midi(_) | Port::Macro(_) => Signal::Control,
             Port::Notes => Signal::Notes,
+            Port::Table | Port::TableIn | Port::Frame(_) => Signal::Table,
             Port::Pin(signal, _) => signal,
             // An empty pin has no signal. Audio is the grey a pin falls back to.
             Port::NewPin => Signal::Audio,
@@ -383,6 +469,7 @@ impl Port {
             Port::Shape => Some("Shape"),
             Port::Midi(source) => Some(source.label()),
             Port::Notes => Some("MIDI"),
+            Port::Table => Some("Table"),
             _ => None,
         }
     }
@@ -394,6 +481,8 @@ impl Port {
             Port::AudioIn(0) => Some("A"),
             Port::AudioIn(1) => Some("B"),
             Port::Notes => Some("MIDI"),
+            Port::TableIn => Some("Table"),
+            Port::Frame(n) => Some(FRAME_LABELS[n.min(FRAME_LABELS.len() - 1)]),
             _ => None,
         }
     }
@@ -428,6 +517,9 @@ pub enum Control {
     Eq,
     /// The monitor node's screen. It draws what the audio thread measured and takes no input.
     Monitor,
+    /// A wavetable node's ramp: a bar split into a colored region for each connected frame input,
+    /// with a handle between regions that trades share, and a dot where Position is.
+    Ramp,
     /// The header of section number `n`. The rows after it, up to the next header, fold with it.
     Section(usize),
     /// A button that opens a file picker. The Sampler uses it to load a sample file; it shows
@@ -973,7 +1065,21 @@ impl FlodeNode {
 
     /// The text beside a knob that shows `normalized`, in the knob's units.
     pub fn knob_format(&self, id: KnobId, normalized: f32) -> String {
-        self.knob_kind(id).format(normalized)
+        match self.math_units(id) {
+            // The default span reads as percents, so the plain "50%" stays what it was.
+            Some(span) if (span - KnobId::MathSpan.default_plain()).abs() > 0.01 => {
+                knobs::entry_text(normalized * span)
+            }
+            _ => self.knob_kind(id).format(normalized),
+        }
+    }
+
+    /// For a Math node's A and B, how many units its 0 to 1 range stands for. None for any other
+    /// knob. The signal is always 0 to 1 underneath. The span only changes the numbers shown and
+    /// typed, so a value of 5 on a span of 24 is 5 of 24.
+    fn math_units(&self, id: KnobId) -> Option<f32> {
+        (self.kind == NodeKind::Math && matches!(id, KnobId::MathA | KnobId::MathB))
+            .then(|| self.plain(KnobId::MathSpan))
     }
 
     /// Whether section `n` is folded.
@@ -1088,13 +1194,19 @@ impl FlodeNode {
     /// The number shown in the box for typing over knob `id`: its value in the units the knob
     /// reads in.
     pub fn knob_entry_text(&self, id: KnobId) -> String {
+        if let Some(span) = self.math_units(id) {
+            return knobs::entry_text(self.value(id) * span);
+        }
         knobs::entry_text(self.knob_kind(id).to_entry(self.value(id)))
     }
 
     /// Sets knob `id` from a number typed in the units `knob_entry_text` uses. The value stops at
     /// the ends of the knob's range.
     pub fn enter_knob_value(&mut self, id: KnobId, number: f32) {
-        let normalized = self.knob_kind(id).from_entry(number);
+        let normalized = match self.math_units(id) {
+            Some(span) => (number / span).clamp(0.0, 1.0),
+            None => self.knob_kind(id).from_entry(number),
+        };
         self.set_value(id, if normalized.is_nan() { 0.0 } else { normalized });
     }
 
@@ -1511,6 +1623,23 @@ mod tests {
         first.set_value(KnobId::Detune, 1.0);
         assert_eq!(first.plain(KnobId::Detune), 100.0);
         assert_eq!(second.plain(KnobId::Detune), KnobId::Detune.default_plain());
+    }
+
+    /// A node's header tint is the signal of its first output pin. A kind with no output, or an
+    /// audio output, is neutral. The group kinds build their pins as they are used, so they
+    /// are neutral too.
+    #[test]
+    fn the_header_tint_follows_the_first_output() {
+        for kind in NodeKind::ALL {
+            if kind.is_group_part() || kind == NodeKind::Group {
+                assert_eq!(kind.main_signal(), None, "{kind:?}");
+                continue;
+            }
+            let node = FlodeNode::new(kind, Point::new(0.0, 0.0));
+            let first = node.output_ports().first().map(|port| port.signal());
+            let expected = first.filter(|signal| *signal != Signal::Audio);
+            assert_eq!(kind.main_signal(), expected, "{kind:?}");
+        }
     }
 
     /// Every kind lists each knob at most once, and every pin sits on a row.

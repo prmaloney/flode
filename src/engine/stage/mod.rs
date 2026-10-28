@@ -268,6 +268,7 @@ mod tests {
     use super::testing::Rig;
     use super::*;
     use crate::dsp::mix::MixMode;
+    use crate::dsp::warp::WarpMode;
     use crate::dsp::wavetable::Waveform;
     use crate::nodes::knobs::KnobId;
     use crate::patch::control::Param;
@@ -321,6 +322,76 @@ mod tests {
             }
         }
         peak
+    }
+
+    /// Runs one voice of a lane and returns every output sample.
+    fn render(lane: &LaneGraph, samples: usize) -> Vec<f32> {
+        let mut rig = Rig::new();
+        let mut states = start_arena(lane, &mut rig.start_context());
+        (0..samples)
+            .map(|_| {
+                evaluate(
+                    lane,
+                    &mut states,
+                    &mut rig.tick(),
+                    &mut [Frame::SILENT; MAX_STAGES],
+                )
+                .l
+            })
+            .collect()
+    }
+
+    /// A carrier oscillator under `warp`, with a second oscillator on its audio input when
+    /// `modulated`.
+    fn carrier(warp: WarpMode, modulated: bool) -> LaneGraph {
+        let mut spec = StageSpec::new(StageParams::Oscillator(OscillatorParams {
+            warp,
+            warp_amount: Param::fixed(KnobId::WarpAmount, 1.0),
+            // Every voice starts from the same phase, so two renders can be compared.
+            phase_random: Param::fixed(KnobId::PhaseRandom, 0.0),
+            ..OscillatorParams::default()
+        }));
+        if modulated {
+            spec = spec.with_input(0, 0);
+            lane(&[
+                StageSpec::new(StageParams::Oscillator(OscillatorParams {
+                    octave: Param::fixed(KnobId::Octave, 1.0),
+                    ..OscillatorParams::default()
+                })),
+                spec,
+            ])
+        } else {
+            lane(&[spec])
+        }
+    }
+
+    /// The largest gap between two renders.
+    fn gap(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// With a signal on its audio input, phase modulation changes the sound, and phase
+    /// distortion does too. With none wired the same warps are the plain wave.
+    #[test]
+    fn the_audio_input_drives_pm_and_pd_only_when_wired() {
+        let plain = render(&carrier(WarpMode::None, false), 2000);
+        for mode in [WarpMode::Pm, WarpMode::Pd] {
+            let unwired = render(&carrier(mode, false), 2000);
+            assert!(gap(&plain, &unwired) < 1e-5, "{mode:?} unwired");
+        }
+        // The modulated lane's output is the last stage, the carrier.
+        let plain_wired = render(&carrier(WarpMode::None, true), 2000);
+        for mode in [WarpMode::Pm, WarpMode::Pd] {
+            let wired = render(&carrier(mode, true), 2000);
+            assert!(gap(&plain_wired, &wired) > 0.2, "{mode:?} wired");
+        }
+        // A warp that does not read the input ignores a wire on it.
+        let sync = render(&carrier(WarpMode::Bend, true), 2000);
+        let sync_alone = render(&carrier(WarpMode::Bend, false), 2000);
+        assert!(gap(&sync, &sync_alone) < 1e-5);
     }
 
     #[test]
@@ -411,7 +482,8 @@ mod tests {
         let filter = StageParams::Filter(FilterParams::default());
         let mix = StageParams::Mix(MixParams::default());
         let gain = StageParams::Gain(GainParams::default());
-        assert_eq!(osc.input_count(), 0);
+        // The oscillator's one input is for phase modulation.
+        assert_eq!(osc.input_count(), 1);
         assert_eq!(gain.input_count(), 1);
         assert_eq!(filter.input_count(), 1);
         assert_eq!(mix.input_count(), 2);

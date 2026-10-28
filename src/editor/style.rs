@@ -86,6 +86,21 @@ pub(super) const WIRE_COLOR: Color = Color::from_rgb(0.85, 0.85, 0.90);
 pub(super) const CONTROL_COLOR: Color = Color::from_rgb(0.35, 0.85, 0.45);
 /// Notes, the MIDI signal an input node sends to an oscillator, are purple.
 pub(super) const NOTES_COLOR: Color = Color::from_rgb(0.70, 0.48, 0.95);
+/// A table, the frames of a wavetable and the wavetable itself, is rose. Purple is notes, so the
+/// table gets a hue of its own, and its pins are diamonds so the shape tells it apart too.
+pub(super) const TABLE_COLOR: Color = Color::from_rgb(0.95, 0.40, 0.56);
+/// The colors of the eight frame slots, on a wavetable node's pins and the regions of its ramp:
+/// sky, amber, teal, vermilion, yellow, blue, mint and sand.
+pub(super) const FRAME_COLORS: [Color; 8] = [
+    Color::from_rgb(0.34, 0.71, 0.91),
+    Color::from_rgb(0.91, 0.66, 0.22),
+    Color::from_rgb(0.18, 0.77, 0.71),
+    Color::from_rgb(0.89, 0.34, 0.18),
+    Color::from_rgb(0.94, 0.89, 0.26),
+    Color::from_rgb(0.23, 0.49, 0.88),
+    Color::from_rgb(0.61, 0.88, 0.36),
+    Color::from_rgb(0.79, 0.72, 0.61),
+];
 pub(super) const PENDING_WIRE_COLOR: Color = Color::from_rgb(0.50, 0.50, 0.55);
 pub(super) const PILL_COLOR: Color = Color::from_rgb(0.17, 0.175, 0.215);
 pub(super) const PILL_DIVIDER_COLOR: Color = Color::from_rgb(0.38, 0.39, 0.46);

@@ -1,5 +1,6 @@
 //! The oscillator stage: a waveform or noise, with unison, detune, warp, transpose, and the
-//! amplitude envelope. It is a source with no audio inputs.
+//! amplitude envelope. Its one audio input is read only by the phase modulation and phase
+//! distortion warps.
 
 use super::{AudioStage, StartContext, Tick};
 use crate::dsp::frame::{pan_gains, Frame};
@@ -7,7 +8,7 @@ use crate::dsp::gain::db_to_linear;
 use crate::dsp::noise::NoiseState;
 use crate::dsp::pitch::{ratio_of_semitones, semitones_of};
 use crate::dsp::rng::Rng;
-use crate::dsp::warp::{warp_phase, warp_value};
+use crate::dsp::warp::{warp_phase_with, warp_value};
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::MAX_UNISON;
 use crate::patch::control::MAX_ENVELOPES;
@@ -205,10 +206,13 @@ impl AudioStage for Oscillator {
     fn process(
         p: &OscillatorParams,
         state: &mut OscillatorState,
-        _inputs: &[Frame; MAX_INPUTS],
+        inputs: &[Frame; MAX_INPUTS],
         tick: &mut Tick,
     ) -> Frame {
         let levels = tick.levels;
+        // The signal on the audio input, as one number for the phase to follow. Only the two warp
+        // modes that read it look at it, and an unwired input is silence.
+        let modulator = (inputs[0].l + inputs[0].r) * 0.5;
         let noise = p.waveform == Waveform::Noise;
         let count = (p.unison.plain(levels).round() as usize).clamp(1, MAX_UNISON);
         if count != state.count {
@@ -241,7 +245,7 @@ impl AudioStage for Oscillator {
             for i in 0..state.running {
                 // The phase step, in cycles per sample. The waveform band-limits its edges by it.
                 let step = tick.pitch_step * state.detune_ratios[i] * transpose;
-                let phase = warp_phase(p.warp, state.phases[i], warp_amount);
+                let phase = warp_phase_with(p.warp, state.phases[i], warp_amount, modulator);
                 let sample = warp_value(
                     p.warp,
                     tick.tables.sample(p.waveform, phase, step),

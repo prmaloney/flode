@@ -382,6 +382,11 @@ impl Param {
     pub fn plain(&self, levels: &ControlLevels) -> f32 {
         self.knob.plain(self.id, levels)
     }
+
+    /// Whether a control wire drives this knob.
+    pub fn is_driven(&self) -> bool {
+        self.knob.route.is_some()
+    }
 }
 
 #[cfg(test)]
