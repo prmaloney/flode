@@ -408,6 +408,19 @@ impl Ramp {
         out
     }
 
+    /// The blend zone on each boundary, as its start and end along the position. It is centered on
+    /// the boundary and `locate` mixes inside it. The first `region_count() - 1` entries are real,
+    /// and the rest are empty at 1.0. Step has zones of no width.
+    pub fn zones(&self) -> [(f32, f32); MAX_REGIONS] {
+        let mut out = [(1.0f32, 1.0f32); MAX_REGIONS];
+        for (j, slot) in out.iter_mut().enumerate().take(self.count - 1) {
+            let edge = self.edges[j + 1];
+            let half = self.half_zone(j);
+            *slot = (edge - half, edge + half);
+        }
+        out
+    }
+
     /// The half width of the blend zone on the boundary after `region`. Step has none.
     fn half_zone(&self, region: usize) -> f32 {
         if self.blend == BlendMode::Step {
@@ -719,6 +732,29 @@ mod tests {
                 prev_end = edge + half;
             }
         }
+    }
+
+    /// `zones` gives the span `locate` mixes in: the ends are plain, and the inside blends.
+    #[test]
+    fn zones_match_where_locate_blends() {
+        let counts = [4, 4, 4];
+        let r = Ramp::new(&[1.0, 2.0, 1.0], BlendMode::Linear, 0.5);
+        let zones = r.zones();
+        assert_eq!(r.region_count(), 3);
+        for (j, &(start, end)) in zones.iter().enumerate().take(2) {
+            let edge = r.boundaries()[j];
+            assert!(start < edge && edge < end);
+            assert!(((start + end) / 2.0 - edge).abs() < 1e-6);
+            assert_eq!(r.locate(&counts, start - 0.001).t, 0.0);
+            assert!(r.locate(&counts, (start + edge) / 2.0).t > 0.0);
+            assert!(r.locate(&counts, (end + edge) / 2.0).t > 0.0);
+            assert_eq!(r.locate(&counts, end + 0.001).t, 0.0);
+        }
+        assert_eq!(zones[2], (1.0, 1.0));
+        let step = Ramp::new(&[1.0, 1.0], BlendMode::Step, 1.0).zones();
+        assert_eq!(step[0].0, step[0].1);
+        let none = Ramp::new(&[1.0, 1.0], BlendMode::Linear, 0.0).zones();
+        assert_eq!(none[0].0, none[0].1);
     }
 
     #[test]

@@ -81,6 +81,10 @@ pub const VIEWER_ROW: f32 = VIEWER_HEIGHT + 8.0;
 pub const EQ_HEIGHT: f32 = 100.0;
 /// The space the graph takes in the stack, with the same margin as a viewer.
 pub const EQ_ROW: f32 = EQ_HEIGHT + 8.0;
+/// A wavetable node's ramp: the position dot above the bar, the bar, and room for the handles.
+pub const RAMP_HEIGHT: f32 = 48.0;
+/// The space the ramp takes in the stack, with the same margin as a viewer.
+pub const RAMP_ROW: f32 = RAMP_HEIGHT + 8.0;
 /// The space the EQ's analyzer checkbox takes in the stack.
 pub const EQ_SWITCH_ROW: f32 = 28.0;
 /// The monitor node is wide and its screen tall, so a trace or a spectrum has room to read.
@@ -1141,6 +1145,7 @@ impl FlodeNode {
                         Some(Control::Viewer) => VIEWER_ROW,
                         Some(Control::Eq) => EQ_ROW,
                         Some(Control::Monitor) => MONITOR_ROW,
+                        Some(Control::Ramp) => RAMP_ROW,
                         Some(Control::Curve) => CURVE_HEIGHT,
                         // The EQ's analyzer checkbox sits close under its graph.
                         Some(Control::Switch(_)) if self.kind == NodeKind::Eq => EQ_SWITCH_ROW,
@@ -1340,6 +1345,7 @@ impl FlodeNode {
                     Some(Control::Viewer) => place.y + VIEWER_ROW / 2.0,
                     Some(Control::Eq) => place.y + EQ_ROW / 2.0,
                     Some(Control::Monitor) => place.y + MONITOR_ROW / 2.0,
+                    Some(Control::Ramp) => place.y + RAMP_ROW / 2.0,
                     Some(Control::Dropdown(_)) | Some(Control::Switch(_)) => {
                         place.y + SWITCH_ROW_HEIGHT / 2.0
                     }
@@ -1441,6 +1447,24 @@ impl FlodeNode {
             y: self.position.y + place.y - EQ_HEIGHT / 2.0,
             width: self.width() - 2.0 * DROPDOWN_INSET,
             height: EQ_HEIGHT,
+        })
+    }
+
+    /// The ramp's box, centered on its row. None if the node has no ramp, or it is folded away.
+    pub fn ramp_bounds(&self) -> Option<Rectangle> {
+        let rows = self.rows();
+        let index = rows
+            .iter()
+            .position(|row| row.control == Some(Control::Ramp))?;
+        let place = self.places_of(&rows).get(index).copied()?;
+        if place.shape != RowShape::Full {
+            return None;
+        }
+        Some(Rectangle {
+            x: self.position.x + DROPDOWN_INSET,
+            y: self.position.y + place.y - RAMP_HEIGHT / 2.0,
+            width: self.width() - 2.0 * DROPDOWN_INSET,
+            height: RAMP_HEIGHT,
         })
     }
 

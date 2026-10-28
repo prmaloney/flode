@@ -42,6 +42,9 @@ mod monitor;
 mod pack;
 mod pane;
 pub mod piano;
+mod ramp;
+#[cfg(test)]
+mod ramp_tests;
 pub mod saved;
 mod shortcuts;
 mod style;

@@ -5,6 +5,7 @@ use crate::dsp::curve::MAX_CURVE_POINTS;
 use crate::editor::knob::{self, Press};
 use crate::editor::piano::{self, Piano, PianoEvent};
 use crate::groups::GroupEntry;
+use crate::nodes::knobs::KnobId;
 use crate::nodes::{envelope, eq};
 use crate::nodes::{NodeKind, Port, ROW_KNOB_DIAMETER};
 use crate::patch::control::ControlLevels;
@@ -373,6 +374,10 @@ impl<'a> NodeEditor<'a> {
                 }
                 return (event::Status::Captured, Some(Message::GraphChanged));
             }
+            if let Some(result) = self.press_ramp(index, point, screen) {
+                return result;
+            }
+            let node = &self.graph.nodes[index];
             if let Some(band) = node.eq_toggle_at(point) {
                 self.graph.select(index);
                 let node = &mut self.graph.nodes[index];
@@ -1107,6 +1112,10 @@ impl<'a> NodeEditor<'a> {
                 knob::release(&mut self.graph.nodes[node].knob_states[first as usize]);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
+            Interaction::RampHandle { node, .. } => {
+                knob::release(&mut self.graph.nodes[node].knob_states[KnobId::share(0) as usize]);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
             Interaction::LfoPoint { .. } => (event::Status::Captured, Some(Message::GraphChanged)),
             Interaction::MovingNode { node, .. } => {
                 if let Some(link) = self.graph.link_target.take() {
@@ -1219,6 +1228,10 @@ impl<'a> NodeEditor<'a> {
                 };
                 let live = live_knobs(self.graph, node, &self.levels);
                 drag_envelope_handle(&mut self.graph.nodes[node], handle, point, &live, driven);
+                (event::Status::Captured, Some(Message::GraphChanged))
+            }
+            Interaction::RampHandle { node, boundary } => {
+                self.graph.drag_ramp_handle(node, boundary, point);
                 (event::Status::Captured, Some(Message::GraphChanged))
             }
             Interaction::LfoPoint { node, point: index } => {
@@ -1438,8 +1451,12 @@ impl<'a> Program<Message> for NodeEditor<'a> {
                     }
                 }
                 let hover = self.graph.hover_at(point);
-                let changed = hover != self.graph.hover || submenu_changed;
+                let ramp_hover = self.graph.ramp_hover_at(point);
+                let changed = hover != self.graph.hover
+                    || submenu_changed
+                    || ramp_hover != self.graph.ramp_hover;
                 self.graph.hover = hover;
+                self.graph.ramp_hover = ramp_hover;
                 match self.drag(point, screen) {
                     (event::Status::Ignored, None) if changed => {
                         (event::Status::Ignored, Some(Message::Hovered))

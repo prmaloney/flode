@@ -716,6 +716,10 @@ pub(super) fn draw_node(
         super::monitor::draw_monitor(frame, index, graph, covered, zoom);
     }
 
+    if node.ramp_bounds().is_some() {
+        draw_ramp(frame, index, graph, levels, covered, zoom);
+    }
+
     for slot in node.knob_slots() {
         let route = if slot.pinned {
             graph.control_route(index, slot.id)
@@ -1271,6 +1275,155 @@ pub(super) fn draw_viewer(frame: &mut Frame, index: usize, graph: &Graph, levels
         } else {
             let dot = Point::new(x, bounds.y + (1.0 - y.clamp(0.0, 1.0)) * bounds.height);
             frame.fill(&Path::circle(dot, 3.5), piano::SOUNDING_DOT_COLOR);
+        }
+    }
+}
+
+/// The text on a ramp region, dark so it reads on any of the slot colors.
+const RAMP_TEXT_COLOR: Color = Color::from_rgb(0.08, 0.08, 0.11);
+
+/// A wavetable node's ramp: a colored region for each connected frame input, a handle between
+/// regions, the blend zones as a faint band, and a dot where Position is. The region and pin of
+/// the slot the cursor links light together.
+pub(super) fn draw_ramp(
+    frame: &mut Frame,
+    index: usize,
+    graph: &Graph,
+    levels: ControlLevels,
+    covered: &[Rectangle],
+    zoom: f32,
+) {
+    let Some(layout) = super::ramp::ramp_layout(graph, index) else {
+        return;
+    };
+    let node = &graph.nodes[index];
+    let bar = layout.bar;
+    let lit = graph
+        .cursor_in
+        .then_some(graph.ramp_hover)
+        .flatten()
+        .filter(|(hovered, _)| *hovered == index)
+        .map(|(_, slot)| slot);
+
+    frame.fill(&rounded_rect(bar, 3.0), DROPDOWN_COLOR);
+    if layout.count() == 0 {
+        draw_text(
+            frame,
+            covered,
+            zoom,
+            Text {
+                content: "connect a frame".to_string(),
+                position: Point::new(bar.x + bar.width / 2.0, bar.y + bar.height / 2.0),
+                color: DIM_TEXT_COLOR,
+                size: 12.0,
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            },
+        );
+        return;
+    }
+
+    for (region, &slot) in layout.slots().iter().enumerate() {
+        let rect = layout.region_rect(region);
+        let color = FRAME_COLORS[slot.min(FRAME_COLORS.len() - 1)];
+        let is_lit = lit == Some(slot);
+        frame.fill(
+            &Path::rectangle(Point::new(rect.x, rect.y), rect.size()),
+            Color {
+                a: if is_lit { 1.0 } else { 0.78 },
+                ..color
+            },
+        );
+        if is_lit {
+            frame.stroke(
+                &Path::rectangle(Point::new(rect.x, rect.y), rect.size()),
+                Stroke::default().with_color(TEXT_COLOR).with_width(2.0),
+            );
+        }
+        if rect.width >= 14.0 {
+            draw_text(
+                frame,
+                covered,
+                zoom,
+                Text {
+                    content: (slot + 1).to_string(),
+                    position: Point::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                    color: RAMP_TEXT_COLOR,
+                    size: 12.0,
+                    horizontal_alignment: alignment::Horizontal::Center,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                },
+            );
+        }
+    }
+
+    // The blend zones sit over the regions as a faint lighter band.
+    for &(start, end) in layout.ramp.zones().iter().take(layout.count() - 1) {
+        if end > start {
+            frame.fill(
+                &Path::rectangle(
+                    Point::new(bar.x + start * bar.width, bar.y),
+                    nih_plug_iced::Size::new((end - start) * bar.width, bar.height),
+                ),
+                Color {
+                    a: 0.25,
+                    ..TEXT_COLOR
+                },
+            );
+        }
+    }
+
+    for boundary in 0..layout.count() - 1 {
+        let held = graph.interaction
+            == Interaction::RampHandle {
+                node: index,
+                boundary,
+            };
+        let rect = layout.handle_rect(boundary);
+        frame.fill(
+            &rounded_rect(rect, 2.0),
+            if held {
+                TEXT_COLOR
+            } else {
+                Color::from_rgb(0.88, 0.89, 0.93)
+            },
+        );
+    }
+
+    // Position: a dot above the bar, at the live value, with a thin line down to the bar.
+    let live = live_knobs(graph, index, &levels);
+    let x = layout.position_x(super::ramp::live_position(&live));
+    let tip = bar.y - 2.0;
+    frame.stroke(
+        &Path::line(Point::new(x, tip), Point::new(x, bar.y + bar.height)),
+        Stroke::default()
+            .with_color(Color {
+                a: 0.8,
+                ..CONTROL_COLOR
+            })
+            .with_width(1.0),
+    );
+    frame.fill(
+        &Path::new(|builder| {
+            builder.move_to(Point::new(x - 4.0, tip - 7.0));
+            builder.line_to(Point::new(x + 4.0, tip - 7.0));
+            builder.line_to(Point::new(x, tip));
+            builder.close();
+        }),
+        CONTROL_COLOR,
+    );
+
+    // A region the cursor is over lights its pin with a ring.
+    if let Some(slot) = lit {
+        if let Some(pin) = node.input_point(Port::Frame(slot)) {
+            frame.stroke(
+                &Path::circle(pin, PIN_RADIUS + 5.0),
+                Stroke::default()
+                    .with_color(FRAME_COLORS[slot.min(FRAME_COLORS.len() - 1)])
+                    .with_width(2.0),
+            );
         }
     }
 }

@@ -94,6 +94,12 @@ pub(super) enum Interaction {
         node: usize,
         handle: usize,
     },
+    /// Dragging a handle on a wavetable's ramp. `boundary` is 0 for the handle between the first
+    /// and second regions.
+    RampHandle {
+        node: usize,
+        boundary: usize,
+    },
     /// Dragging one point of an LFO's custom curve. `point` is 0 for the first.
     LfoPoint {
         node: usize,
@@ -301,6 +307,8 @@ pub struct Graph {
     pub(super) dropdown_menu: Option<(usize, usize)>,
     /// The audio connection a dragged node would be inserted into, if dropped now.
     pub(super) link_target: Option<usize>,
+    /// The wavetable node and frame slot the cursor is linking: over a pin or over its region.
+    pub(super) ramp_hover: Option<(usize, usize)>,
     /// The key on the strip the mouse holds down, and so the note it is playing.
     pub(super) mouse_note: Option<u8>,
     /// Whether the keyboard plays notes or sends editor shortcuts, toggled by Tab. The strip
@@ -499,6 +507,7 @@ impl Graph {
             menu: None,
             dropdown_menu: None,
             link_target: None,
+            ramp_hover: None,
             hover: None,
             mouse_note: None,
             mode: EditorMode::Keyboard,
@@ -1768,6 +1777,11 @@ impl Graph {
         self.connections
             .retain(|c| !(c.to == to && c.input == input));
         self.connections.push(link);
+        // A wavetable's frame input starts with an equal share, so a slot used before never comes
+        // back tiny.
+        if let (Port::Frame(slot), NodeKind::Wavetable) = (input, self.nodes[to].kind) {
+            self.nodes[to].reset_value(KnobId::share(slot));
+        }
         self.refresh_slots();
         self.refresh_edge_knobs();
         self.take_face_value(link);
