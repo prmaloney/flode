@@ -13,8 +13,8 @@ A few habits carried over directly:
   audio, green is control, and purple is MIDI notes.
 - A node can fold down to its sockets, packed close together, so a big patch stays on one screen.
 - Dropping a node onto a wire splices it into that wire.
-- `M` mutes a node, `Shift+D` duplicates it and lets you place the copy, and the right-click menu
-  has the same actions.
+- Muting, duplicating and the other editing actions are a key press or a right-click away. See
+  [Shortcuts and gestures](shortcuts.md).
 - The Map node plays the role of Blender's Map Range and color ramp, rescaling one signal into
   another's range.
 
@@ -65,12 +65,12 @@ neutral header, since audio is most of a graph.
     out when the patch is built.
   - **Wavetable** collects frames. It has a Frame pin for each connected input and one empty pin
     below the last, up to eight. A ramp bar shows one colored region per connected input, in the
-    color of its pin, with the pin's number on it. Drag the handle between two regions to trade
-    share between them, and double-click the bar to share equally again. A region with several
-    frames plays through them, and a one-frame region holds still. The Blend dropdown (Linear,
-    Smooth, Step) and the Blend width knob set how neighbouring regions meet. Position, which a
-    wire can drive, moves along the whole ramp, and a green dot on the bar shows where it is.
-    Hovering a pin lights its region, and hovering a region lights its pin.
+    color of its pin, with the pin's number on it. The handles between regions set how much of the
+    table each frame input gets ([how to drag them](shortcuts.md#wavetable-ramp)). A region with
+    several frames plays through them, and a one-frame region holds still. The Blend dropdown
+    (Linear, Smooth, Step) and the Blend width knob set how neighbouring regions meet. Position,
+    which a wire can drive, moves along the whole ramp, and a green dot on the bar shows where it
+    is.
   - Wire a table node's output to the **Table pin on an oscillator's viewer row**. Warp, unison,
     detune and the rest still apply to it. The oscillator's viewer draws the table's wave at the
     current Position. A Wavetable can also feed another Wavetable. One table node can feed several
@@ -91,12 +91,11 @@ neutral header, since audio is most of a graph.
 - **Envelope, LFO and Map.** An envelope shapes an oscillator's amplitude or drives any knob. Its
   curve has three handles you can drag. The first sets Attack, the second sets Decay sideways and
   Sustain up and down, and the third sets Release. They turn the same knobs, so a knob or a control
-  wire moves its handle, and double clicking a handle resets its knobs. Each stage's width follows
+  wire moves its handle. Each stage's width follows
   its own knob only, so the time axis is fixed and a long release shows as a long tail. The
   LFO runs free or locks to the host's tempo. Its Wave list has a Custom wave, a shape you draw as
-  a list of points in the viewer. Double click empty space in the viewer to add a point there, and
-  double click a point to remove it. Drag a point to move it. A curve holds up to 16 points, and
-  the two end points only move up and down. The points are saved with the patch and with presets.
+  a list of points in the viewer ([how to edit them](shortcuts.md#viewers)). A curve holds up to
+  16 points, and the two end points only move up and down. The points are saved with the patch and with presets.
   The One shot checkbox makes the LFO play exactly one cycle from each note and then hold its end
   value until the next note, which restarts it. One shot restarts on every note whether or not
   Retrigger is on, and it ignores the playhead lock of Sync. With Sync on a note division and a
@@ -149,9 +148,8 @@ neutral header, since audio is most of a graph.
   the same values as the point, so a knob moves the point and a drag turns the knob. Every knob
   has a pin, and a point follows a wire that drives it. The icon in each section header switches
   the two outer bands between a shelf and a cut, and the two inner bands between a peak and a
-  notch. A cut and a notch have no gain, so their points move sideways only. Double click a point
-  to reset its band. The Analyzer checkbox under the graph draws the spectrum of the EQ's output
-  behind the curve.
+  notch. A cut and a notch have no gain, so their points move sideways only. The Analyzer checkbox
+  under the graph draws the spectrum of the EQ's output behind the curve.
 - **Monitor.** Listens to one audio wire and shows it on a screen, with no output and no knobs. A
   dropdown picks the mode. Scope draws the left and right waveform, held steady on a rising zero
   crossing. Spectrum draws the level of each band on a log axis from 20 Hz to 20 kHz. Spectrogram
@@ -195,9 +193,8 @@ neutral header, since audio is most of a graph.
 controllers driving knobs), and purple is MIDI notes. A wire only joins ports of the same kind.
 A knob with a green pin can be driven by any control wire, and it then shows the live value.
 
-**Knobs.** Drag a knob up or down to turn it. Double click it to type an exact value in the
-units the node shows, such as Hz, dB, or a percentage. Enter sets it, Escape cancels, and a click
-elsewhere keeps what you typed. Option (Alt) and click puts a knob back to its default.
+**Knobs.** Drag a knob to turn it, double click to type a value, and Option (Alt) and click to
+reset it. See [Shortcuts and gestures](shortcuts.md#knobs).
 
 **Viewers.** The oscillator, envelope, LFO and filter each draw a small picture of their shape: the
 waveform, the ADSR curve, and the filter's response from 20 Hz to 20 kHz. The picture follows the
@@ -208,64 +205,16 @@ the sustain hold. A noise LFO has no dot. A one shot LFO's dot stops at the end 
 
 ## Editing
 
-- Click a node header to select it and drag it to move it. Drag a node onto a wire to splice it in.
-- Shift+click adds a node to the selection or drops it from it. Dragging over empty canvas draws a
-  box that selects every node it touches, and Shift keeps the current selection under it. Dragging
-  one selected node's header moves the whole group. Right-click on a selected node, then Delete or
-  Bypass, acts on the group. Auto pack, also in that menu, lines the group up in columns by its
-  wires, with sources on the left. Only a single node splices into a wire.
-- A map or math node splices into a wire that drives a knob. The old source feeds the map's shape
-  pin, or input A on a math node, and the node's output drives the knob. A math node keeps its
-  other input at its knob's number, so splicing one in changes the signal, unlike a map at its
-  defaults.
-- A node dropped on a wire needs room. If the two nodes on that wire are closer than the new node
-  and a margin on each side, the node after it, and everything that node feeds, ease to the right.
-- Drag from an input pin that has no wire and drop on an output pin to wire the two from the
-  input end. Drop on empty canvas instead and the search box from `Shift+A` opens, with only the
-  nodes that can feed that input. The one you pick is added and wired to it, and follows the
-  cursor until you click to place it. An input that already has a wire still detaches it when you
-  drag from it.
-- Shift and right drag from one node to another connects them. The orange line follows the cursor,
-  and the node it would connect to is outlined. Only pins that carry the same kind of signal can
-  join. A pair with the same name wins, such as Shape to Shape. Otherwise the first pair whose
-  input is free is used, which puts audio on the first empty audio input or output slot. If the
-  first node has nothing to give the second, the wire goes the other way.
-- Fold the sections of a tall node, or collapse the whole node down to its pins.
-- `M` mutes a source or bypasses a processor. `Shift+D` duplicates the selected node. Both are also
-  in the right-click menu.
-- `Shift+A` opens a search box at the cursor. Type part of a node's name, pick a result with the
-  arrow keys and Enter or a click, and the node follows the cursor until you click to place it.
-  Escape or a click outside closes the box.
-- Scroll to pan and pinch to zoom.
-- Click the strip at the bottom to play notes, in the plugin and in the standalone app. The strip
-  also shows the notes the host sends. The strip covers three octaves. The octave buttons at the
-  strip's left, and the Z and X keys in Keyboard mode, move the strip up or down by an octave, up
-  to three.
+Add nodes from the burger menu or the search box, wire them by dragging between pins, and move,
+select, splice, fold, mute and delete them with the mouse and a few keys. The strip at the bottom
+plays notes, in the plugin and in the standalone app. Every gesture and key is in
+[Shortcuts and gestures](shortcuts.md).
 
 ## Editor modes
 
-The editor is in one of two modes, shown by a small badge above the strip at the
-bottom right. `Tab` switches between them, everywhere, including inside an open group.
-
-- **Keyboard** (the default) is what the computer keyboard has always done: A, W, S, E, D, F, T,
-  G, Y, H, U, J, K, O, L, P, and semicolon play notes, and Z and X shift the octave. This now
-  works in the plugin as well as the standalone app; which kind of process this is no longer
-  matters, only the mode does.
-- **Edit** turns the piano off and hands those same keys to the editor instead:
-  - `G` grabs the selection: it follows the cursor with no mouse button held. A left click or
-    `Enter` sets it down where it is, splicing a lone node into the wire under it the same way an
-    ordinary drag does. `Esc` or a right click cancels and snaps every moved node back.
-  - `X` or `Delete` removes the selection.
-  - `Command+X` (`Ctrl+X` on Windows and Linux) removes the selection and reconnects around each
-    node, Blender's node editor trick of Delete and Reconnect. A node with a single clear
-    through-path, such as a filter, an effect, a map, a math node, or an arpeggiator, hands what
-    fed it straight to what it fed. A node with no such path, such as the output, is simply
-    removed. Deleting a run of several nodes in place bypasses the whole run. It is also in the
-    right-click menu, next to Delete.
-  - `A` selects every node. `Alt+A` clears the selection.
-
-  `Shift+A`, `Shift+D`, `Shift+G`, and `Shift+Alt+G` are unchanged in both modes, since holding
-  Shift already kept them off the piano's keys.
+The editor is in Keyboard mode, where the computer keyboard plays notes, or Edit mode, where the
+same keys edit the graph. A badge above the strip at the bottom right shows which, and `Tab`
+switches. Which keys do what in each mode is in [Shortcuts and gestures](shortcuts.md#editor-modes).
 
 **Presets.** The Presets row of the burger menu saves and loads whole patches, sorted into
 categories. See [Presets](presets.md).

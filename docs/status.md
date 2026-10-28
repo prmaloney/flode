@@ -32,10 +32,9 @@ filter a little. The FM mix delays the signal by a few cycles of the note, so th
 not bend the pitch.
 
 **Audio Unit.** The Audio Unit is the CLAP plugin wrapped by clap-wrapper, and it passes `auval`. It
-has not been tried in Logic Pro itself. Keyboard mode does not work in GarageBand, which takes the
-keys before the plugin sees them, a limit of the wrapper's key handling in some hosts. Clicking the
-key strip still plays notes. The bundle is signed ad hoc and not notarized, so a copy that came
-through a download needs its quarantine flag cleared.
+has not been tried in Logic Pro itself. Keyboard mode does not play notes in GarageBand, which takes
+the computer keyboard first (see [Hosts](shortcuts.md#hosts)). The bundle is signed ad hoc and not
+notarized, so a copy that came through a download needs its quarantine flag cleared.
 
 **Groups.** The Output and Macro nodes cannot go inside a group, and neither can a group's own edge
 nodes. A group node cannot be added from the add menu or the search box. Make one with `Shift+G`.

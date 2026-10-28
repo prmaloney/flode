@@ -39,10 +39,10 @@ cp -R target/bundled/flode.component ~/Library/Audio/Plug-Ins/Components/
 
 The `.component` is the Audio Unit, which Logic Pro and GarageBand need, since they host neither VST3
 nor CLAP. `build.sh` makes it with `assets/bundle-au.sh`, from the same library, wrapped by
-[clap-wrapper](https://github.com/blepfx/clap-wrapper-rs). It passes `auval`. Keyboard mode does not
-work in a few hosts, such as GarageBand, since they take the keys first. Bundles you downloaded
-rather than built carry a quarantine flag, and macOS may refuse to load them until you clear it with
-`xattr -dr com.apple.quarantine` on each bundle.
+[clap-wrapper](https://github.com/blepfx/clap-wrapper-rs). It passes `auval`. Some hosts take the
+computer keyboard before the plugin sees it (see [Hosts](docs/shortcuts.md#hosts)). Bundles you
+downloaded rather than built carry a quarantine flag, and macOS may refuse to load them until you
+clear it with `xattr -dr com.apple.quarantine` on each bundle.
 
 Restart or rescan in your DAW. The standalone app comes from a debug bundle
 (`./build.sh`), and `./build_and_watch.sh` rebuilds and relaunches it whenever a source file
@@ -59,15 +59,15 @@ changes.
 4. A graph has one Output node and one Macro node. They cannot be added a second time or duplicated.
 
 Click the key strip at the bottom of the editor to play notes, in the plugin and in the standalone
-app, or press play from your DAW. The docs below cover everything else: the full node list, wiring
-and editing gestures, keyboard shortcuts, groups, and presets.
+app, or press play from your DAW. The docs below cover everything else: the full node list,
+shortcuts and gestures, groups, and presets.
 
 ![The starting graph: a MIDI Input, an Envelope, a Saw wave, an Oscillator, and an Output, already wired](docs/images/default-graph.png)
 
 ## Docs
 
-- [Node reference](docs/nodes.md): every node, wiring and editing gestures, keyboard shortcuts,
-  editor modes
+- [Node reference](docs/nodes.md): every node, and how wires, knobs and viewers work
+- [Shortcuts and gestures](docs/shortcuts.md): every key and mouse gesture, and the editor modes
 - [Groups](docs/groups.md): grouping nodes, and saving a group to its own file
 - [Presets](docs/presets.md): saving, loading, and categories
 - [Development](docs/development.md): running tests, the source layout, and the effects pipeline
