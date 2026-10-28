@@ -58,13 +58,13 @@ impl Waveform {
 }
 
 /// Samples in one cycle of a band-limited table.
-const TABLE_SIZE: usize = 2048;
+pub(crate) const TABLE_SIZE: usize = 2048;
 /// Tables for pitch ranges that double in step. Each one holds only the partials that stay below
 /// Nyquist for the highest pitch in its range.
-const TABLE_LEVELS: usize = 11;
+pub(crate) const TABLE_LEVELS: usize = 11;
 /// The phase step per sample at the top of the lowest range. Its partial count is the most any
 /// table needs, half the sample rate over this step.
-const LOWEST_TOP_STEP: f32 = 1.0 / 2048.0;
+pub(crate) const LOWEST_TOP_STEP: f32 = 1.0 / 2048.0;
 
 /// Band-limited waveform tables. A table is one cycle built from the partials below Nyquist. The
 /// audio thread picks the table for the note's pitch and reads it with linear interpolation.
@@ -120,7 +120,7 @@ impl Default for WaveTables {
 }
 
 /// The table for a phase step. Each level covers twice the steps of the one below it.
-fn level_for(step: f32) -> usize {
+pub(crate) fn level_for(step: f32) -> usize {
     let mut level = 0;
     let mut top = LOWEST_TOP_STEP;
     while step > top && level < TABLE_LEVELS - 1 {
@@ -132,7 +132,7 @@ fn level_for(step: f32) -> usize {
 
 /// The most partials a table at this level keeps. Any partial past this one would pass Nyquist
 /// at the level's top step.
-fn max_partials(level: usize) -> usize {
+pub(crate) fn max_partials(level: usize) -> usize {
     (0.5 / (LOWEST_TOP_STEP * (1 << level) as f32)) as usize
 }
 

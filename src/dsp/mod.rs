@@ -15,5 +15,6 @@ pub mod pitch;
 pub mod rng;
 pub mod sample;
 pub mod svf;
+pub mod table;
 pub mod warp;
 pub mod wavetable;
