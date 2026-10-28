@@ -4,7 +4,7 @@
 
 A synth you build by wiring nodes together. Add oscillators, envelopes, filters, LFOs and effects
 to a canvas, drag wires between them, and play it from your DAW or the built-in keyboard. It
-builds as a VST3, a CLAP plugin, and a standalone app. It is written in Rust with
+builds as a VST3, a CLAP plugin, an Audio Unit (macOS), and a standalone app. It is written in Rust with
 [nih-plug](https://github.com/robbert-vdh/nih-plug) and draws its own interface with iced.
 
 Flode's way of working borrows from the node editors in [Blender](https://www.blender.org): you
@@ -34,7 +34,15 @@ for them:
 ```sh
 cp -R target/bundled/flode.vst3 ~/Library/Audio/Plug-Ins/VST3/
 cp -R target/bundled/flode.clap ~/Library/Audio/Plug-Ins/CLAP/
+cp -R target/bundled/flode.component ~/Library/Audio/Plug-Ins/Components/
 ```
+
+The `.component` is the Audio Unit, which Logic Pro and GarageBand need, since they host neither VST3
+nor CLAP. `build.sh` makes it with `assets/bundle-au.sh`, from the same library, wrapped by
+[clap-wrapper](https://github.com/blepfx/clap-wrapper-rs). It passes `auval`. Keyboard mode does not
+work in a few hosts, such as GarageBand, since they take the keys first. Bundles you downloaded
+rather than built carry a quarantine flag, and macOS may refuse to load them until you clear it with
+`xattr -dr com.apple.quarantine` on each bundle.
 
 Restart or rescan in your DAW. The standalone app comes from a debug bundle
 (`./build.sh`), and `./build_and_watch.sh` rebuilds and relaunches it whenever a source file

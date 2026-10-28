@@ -269,6 +269,8 @@ impl Vst3Plugin for Flode {
 
 nih_export_clap!(Flode);
 nih_export_vst3!(Flode);
+// The Audio Unit for Logic, wrapped around the CLAP entry point above. A no-op off macOS.
+clap_wrapper::export_auv2!();
 
 #[cfg(test)]
 mod tests {

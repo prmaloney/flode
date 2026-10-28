@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>CFBundleExecutable</key>
+    <string>flode</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.prmaloney.flode.auv2</string>
+    <key>CFBundleName</key>
+    <string>Flode</string>
+    <key>CFBundleDisplayName</key>
+    <string>Flode</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+      <string>MacOSX</string>
+    </array>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>AudioComponents</key>
+    <array>
+      <dict>
+        <key>name</key>
+        <string>Patrick Maloney: Flode</string>
+        <key>description</key>
+        <string>A synth you build by wiring nodes together</string>
+        <key>factoryFunction</key>
+        <string>GetPluginFactoryAUV2_0</string>
+        <key>manufacturer</key>
+        <string>Pmal</string>
+        <key>subtype</key>
+        <string>Flod</string>
+        <key>type</key>
+        <string>aumu</string>
+        <key>version</key>
+        <integer>256</integer>
+        <key>resourceUsage</key>
+        <dict>
+          <key>network.client</key>
+          <true/>
+          <key>temporary-exception.files.all.read-write</key>
+          <true/>
+        </dict>
+      </dict>
+    </array>
+  </dict>
+</plist>

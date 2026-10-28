@@ -8,8 +8,8 @@ Flode is a Rust project built with [nih-plug](https://github.com/robbert-vdh/nih
 its interface with iced. You'll need a recent stable Rust toolchain (install via
 [rustup](https://rustup.rs)).
 
-- `./build.sh` builds the CLAP, VST3, and standalone bundles into `target/bundled/` and applies
-  the icon. Pass `--release` for a release build.
+- `./build.sh` builds the CLAP, VST3, standalone, and Audio Unit bundles into `target/bundled/`
+  and applies the icon. Pass `--release` for a release build.
 - `cargo run --package xtask -- bundle flode` is the underlying bundler command, if you need more
   control than `build.sh` gives you.
 - `cargo test` runs the test suite.

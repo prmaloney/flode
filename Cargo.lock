@@ -420,6 +420,15 @@ version = "0.5.0"
 source = "git+https://github.com/micahrj/clap-sys.git?rev=25d7f53fdb6363ad63fbd80049cb7a42a97ac156#25d7f53fdb6363ad63fbd80049cb7a42a97ac156"
 
 [[package]]
+name = "clap-wrapper"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd1028157e0bb8ddb7b0f95269da629bb1b717e904752316ef7752b85c4bde82"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "clap_builder"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -811,6 +820,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec 0.7.8",
  "assert_no_alloc",
+ "clap-wrapper",
  "hound",
  "nih_plug",
  "nih_plug_iced",
