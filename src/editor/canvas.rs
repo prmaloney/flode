@@ -91,6 +91,21 @@ impl<'a> NodeEditor<'a> {
             return (event::Status::Captured, Some(Message::Hovered));
         }
 
+        // The drop chooser takes a press on it. A card makes the dropped files that kind of node.
+        // A press in the chooser off the cards does nothing, and one outside cancels the drop and
+        // then goes through as usual.
+        if let Some(choice) = &self.graph.drop_choice {
+            let area = drop_choice_bounds(bounds, choice.screen);
+            if let Some(option) = drop_option_at(area, screen) {
+                self.graph.place_drop(option);
+                return (event::Status::Captured, Some(Message::GraphChanged));
+            }
+            if area.contains(screen) {
+                return (event::Status::Captured, Some(Message::Hovered));
+            }
+            self.graph.drop_choice = None;
+        }
+
         // An open dropdown list takes the press. Its row picks the value. Any other press closes
         // the list and goes through as usual.
         if let Some((index, which)) = self.graph.dropdown_menu.take() {
@@ -704,6 +719,11 @@ impl<'a> NodeEditor<'a> {
         }
         if let Some(menu) = self.graph.menu {
             if menu_bounds(menu).contains(screen) {
+                return true;
+            }
+        }
+        if let Some(choice) = &self.graph.drop_choice {
+            if drop_choice_bounds(bounds, choice.screen).contains(screen) {
                 return true;
             }
         }

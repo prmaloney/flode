@@ -231,14 +231,10 @@ impl IcedEditor for FlodeEditor {
             // The cursor moved over or off a dropdown. The next frame draws the change.
             Message::Graph(canvas::Message::Hovered) => {}
             Message::Tick => {}
-            // An audio file becomes a Sampler under the cursor, the same as any other graph edit.
+            // An audio file opens the drop chooser under the cursor. Picking a card in it changes
+            // the graph, which reaches the audio thread like any other edit.
             Message::FileDropped(path) => {
-                if self.graph.drop_sample(path, self.graph.last_screen) {
-                    self.link.publish(self.graph.patch());
-                    if let Ok(mut saved) = self.params.graph.lock() {
-                        *saved = self.graph.to_saved();
-                    }
-                }
+                self.graph.drop_file(path, self.graph.last_screen);
             }
             // A change to the graph, a node, or a knob. The audio thread gets the new state, and
             // the project saves it.

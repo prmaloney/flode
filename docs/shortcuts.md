@@ -49,7 +49,7 @@ strip still does, and so does a MIDI keyboard.
 | `Shift`+click a node | Add it to the selection, or drop it from the selection |
 | Drag over empty canvas | Draw a box that selects every node it touches. `Shift` keeps the current selection under it |
 | Drag a selected node's header | Move the whole selection |
-| Drag a node onto a wire | Splice it in. A single node only. If the two nodes on the wire are closer than the new node and a margin on each side, the node after it, and everything that node feeds, ease to the right |
+| Drag a node onto a wire | Splice it in. A single node only, onto its own kind of wire: an effect or filter onto audio, a map or math node onto control, an arpeggiator or chord onto notes, a Wavetable onto a table wire, which it takes on its first Frame pin. If the two nodes on the wire are closer than the new node and a margin on each side, the node after it, and everything that node feeds, ease to the right |
 | Splice a map or math node onto a wire that drives a knob | The old source feeds the map's shape pin, or input A on a math node, and the node's output drives the knob. A math node keeps its other input at its knob's number, so splicing one in changes the signal. A map at its defaults does not |
 | Right-click a node | The node's menu: Delete, Bypass, Duplicate and so on. On a selection it acts on the whole group. Auto pack there lines the selection up in columns by its wires, sources on the left |
 | Drag from a pin | Draw a wire. Only pins that carry the same kind of signal can join |
@@ -62,7 +62,7 @@ strip still does, and so does a MIDI keyboard.
 | Pinch | Zoom |
 | Click the key strip | Play a note. The strip also shows the notes the host sends |
 | Octave buttons at the strip's left | Move the strip up or down an octave, up to three. `Z` and `X` do the same in Keyboard mode |
-| Drop an audio file on the editor | Make a Sampler with the file loaded |
+| Drop an audio file on the editor | Open a chooser with two cards. **Wavetable** makes a Wave file node that cuts the file into frames, and **Sampler** makes a Sampler that plays it. The node appears where you dropped the file, with the file loading. Several files dropped together share one chooser. A click outside it, or `Esc`, cancels the drop |
 
 ## Knobs
 

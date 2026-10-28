@@ -358,12 +358,14 @@ impl<'a> NodeEditor<'a> {
             }
             Shortcut::Escape => {
                 let menus = self.graph.menu.is_some()
+                    || self.graph.drop_choice.is_some()
                     || self.graph.dropdown_menu.is_some()
                     || self.graph.category_menu.is_some()
                     || self.graph.preset_list.is_some()
                     || self.graph.group_list.is_some();
                 if menus {
                     self.graph.menu = None;
+                    self.graph.drop_choice = None;
                     self.graph.dropdown_menu = None;
                     self.graph.category_menu = None;
                     self.graph.preset_list = None;

@@ -7277,7 +7277,175 @@ mod sampler_ui_tests {
         panic!("the sample load did not finish in time");
     }
 
-    /// A dropped audio file makes a Sampler centered on the drop point, with the file loading.
+    /// Drops `path` at `screen` and picks `option` in the chooser that opens.
+    fn drop_as(graph: &mut Graph, path: std::path::PathBuf, screen: Point, option: DropOption) {
+        assert!(graph.drop_file(path, screen));
+        assert!(graph.place_drop(option));
+    }
+
+    /// The editor the tests press and type into, the size of the default window.
+    fn editor_bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 712.0,
+        }
+    }
+
+    /// Presses the left button at `at`, through the editor.
+    fn press_screen(graph: &mut Graph, at: Point) {
+        use nih_plug_iced::mouse;
+        use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+        let mut editor = crate::editor::canvas::NodeEditor::new(
+            graph,
+            ControlLevels::default(),
+            [0; 2],
+            [0.0; 2],
+        );
+        editor.update(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            editor_bounds(),
+            Cursor::Available(at),
+        );
+    }
+
+    /// The middle of `option`'s card in the open drop chooser.
+    fn card_middle(graph: &Graph, option: DropOption) -> Point {
+        let choice = graph.drop_choice.as_ref().expect("the chooser is open");
+        let card = drop_card_bounds(drop_choice_bounds(editor_bounds(), choice.screen), option);
+        Point::new(card.x + card.width / 2.0, card.y + card.height / 2.0)
+    }
+
+    /// A dropped audio file adds nothing yet. It opens the chooser at the drop, holding the file.
+    #[test]
+    fn a_dropped_audio_file_opens_the_chooser() {
+        let dir = TempDir::new("drop-choice");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        let mut graph = minimal_graph();
+        let before = graph.nodes.len();
+        let screen = Point::new(400.0, 300.0);
+        assert!(graph.drop_file(path.clone(), screen));
+        assert_eq!(graph.nodes.len(), before);
+        assert_eq!(
+            graph.drop_choice,
+            Some(DropChoice {
+                paths: vec![path],
+                screen
+            })
+        );
+    }
+
+    /// Clicking the Sampler card makes a Sampler, and the Wavetable card a Wave file node, each
+    /// with the file loading into it.
+    #[test]
+    fn clicking_a_card_makes_that_node() {
+        let dir = TempDir::new("drop-click");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        for (option, kind) in [
+            (DropOption::Sampler, NodeKind::Sampler),
+            (DropOption::Wavetable, NodeKind::WaveFile),
+        ] {
+            let mut graph = minimal_graph();
+            let before = graph.nodes.len();
+            graph.drop_file(path.clone(), Point::new(400.0, 300.0));
+            let at = card_middle(&graph, option);
+            press_screen(&mut graph, at);
+            assert!(graph.drop_choice.is_none());
+            assert_eq!(graph.nodes.len(), before + 1, "{option:?}");
+            let node = graph.nodes.len() - 1;
+            assert_eq!(graph.nodes[node].kind, kind);
+            assert_eq!(graph.nodes[node].sample_path, Some(path.clone()));
+            wait_for_sample_load(&mut graph);
+            assert!(graph.nodes[node].sample.is_some());
+        }
+    }
+
+    /// A click outside the chooser cancels the drop, and Escape does too.
+    #[test]
+    fn a_click_away_or_escape_cancels_the_drop() {
+        let dir = TempDir::new("drop-cancel");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        let mut graph = minimal_graph();
+        let before = graph.nodes.len();
+        graph.drop_file(path.clone(), Point::new(400.0, 300.0));
+        press_screen(&mut graph, Point::new(900.0, 600.0));
+        assert!(graph.drop_choice.is_none());
+        assert_eq!(graph.nodes.len(), before);
+
+        graph.drop_file(path, Point::new(400.0, 300.0));
+        {
+            use nih_plug_iced::keyboard::{self, KeyCode, Modifiers};
+            use nih_plug_iced::widget::canvas::{event::Event, Cursor, Program};
+            let mut editor = crate::editor::canvas::NodeEditor::new(
+                &mut graph,
+                ControlLevels::default(),
+                [0; 2],
+                [0.0; 2],
+            );
+            editor.update(
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key_code: KeyCode::Escape,
+                    modifiers: Modifiers::default(),
+                }),
+                editor_bounds(),
+                Cursor::Unavailable,
+            );
+        }
+        assert!(graph.drop_choice.is_none());
+        assert_eq!(graph.nodes.len(), before);
+    }
+
+    /// A click in the chooser between the cards keeps it open and adds nothing.
+    #[test]
+    fn a_click_between_the_cards_keeps_the_chooser() {
+        let dir = TempDir::new("drop-gap");
+        let path = dir.0.join("clip.wav");
+        write_wav(&path);
+        let mut graph = minimal_graph();
+        let before = graph.nodes.len();
+        graph.drop_file(path, Point::new(400.0, 300.0));
+        let left = card_middle(&graph, DropOption::Wavetable);
+        let right = card_middle(&graph, DropOption::Sampler);
+        press_screen(&mut graph, Point::new((left.x + right.x) / 2.0, left.y));
+        assert!(graph.drop_choice.is_some());
+        assert_eq!(graph.nodes.len(), before);
+    }
+
+    /// A Wave file node from a drop cuts the file into frames once it loads.
+    #[test]
+    fn a_drop_as_a_wavetable_makes_frames() {
+        let dir = TempDir::new("drop-frames");
+        let path = dir.0.join("tone.wav");
+        // Half a second of a 220 Hz sine: long enough to cut frames from, unlike `write_wav`'s.
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..22050 {
+            let phase = i as f32 * 220.0 / 44100.0 * std::f32::consts::TAU;
+            writer.write_sample((phase.sin() * 20000.0) as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut graph = minimal_graph();
+        drop_as(
+            &mut graph,
+            path,
+            Point::new(400.0, 300.0),
+            DropOption::Wavetable,
+        );
+        let node = graph.nodes.len() - 1;
+        wait_for_sample_load(&mut graph);
+        assert!(crate::nodes::frames::frame_count(&graph.nodes[node]).is_some_and(|n| n >= 1));
+    }
+
+    /// A dropped audio file made a Sampler is centered on the drop point, with the file loading.
     #[test]
     fn a_dropped_audio_file_makes_a_loaded_sampler_at_the_drop() {
         let dir = TempDir::new("drop");
@@ -7285,7 +7453,12 @@ mod sampler_ui_tests {
         write_wav(&path);
         let mut graph = minimal_graph();
         let before = graph.nodes.len();
-        assert!(graph.drop_sample(path.clone(), Point::new(400.0, 300.0)));
+        drop_as(
+            &mut graph,
+            path.clone(),
+            Point::new(400.0, 300.0),
+            DropOption::Sampler,
+        );
         assert_eq!(graph.nodes.len(), before + 1);
         let node = graph.nodes.len() - 1;
         assert_eq!(graph.nodes[node].kind, NodeKind::Sampler);
@@ -7310,7 +7483,7 @@ mod sampler_ui_tests {
         graph.view.zoom = 2.0;
         graph.view.offset = nih_plug_iced::Vector::new(100.0, 50.0);
         let screen = Point::new(500.0, 250.0);
-        assert!(graph.drop_sample(path, screen));
+        drop_as(&mut graph, path, screen, DropOption::Sampler);
         let node = &graph.nodes[graph.nodes.len() - 1];
         let world = graph.view.to_world(screen);
         assert_eq!(
@@ -7319,29 +7492,35 @@ mod sampler_ui_tests {
         );
     }
 
-    /// A file that is not audio adds nothing and says so.
+    /// A file that is not audio adds nothing, opens no chooser, and says so.
     #[test]
     fn a_dropped_non_audio_file_adds_nothing() {
         let mut graph = minimal_graph();
         let before = graph.nodes.len();
-        assert!(!graph.drop_sample(
+        assert!(!graph.drop_file(
             std::path::PathBuf::from("/x/notes.txt"),
             Point::new(1.0, 1.0)
         ));
         assert_eq!(graph.nodes.len(), before);
+        assert!(graph.drop_choice.is_none());
         assert!(graph.status.as_ref().unwrap().0.contains("notes.txt"));
     }
 
-    /// Several files dropped on one spot don't stack on each other.
+    /// Several files dropped together share one chooser, and one pick places them all, offset so
+    /// none stacks on another.
     #[test]
     fn files_dropped_together_are_staggered() {
         let dir = TempDir::new("drop-many");
         let mut graph = minimal_graph();
+        let before = graph.nodes.len();
         for name in ["a.wav", "b.wav", "c.wav"] {
             let path = dir.0.join(name);
             write_wav(&path);
-            assert!(graph.drop_sample(path, Point::new(400.0, 300.0)));
+            assert!(graph.drop_file(path, Point::new(400.0, 300.0)));
         }
+        assert_eq!(graph.drop_choice.as_ref().unwrap().paths.len(), 3);
+        assert!(graph.place_drop(DropOption::Sampler));
+        assert_eq!(graph.nodes.len(), before + 3);
         let n = graph.nodes.len();
         let spots: Vec<(f32, f32)> = graph.nodes[n - 3..]
             .iter()

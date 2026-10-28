@@ -661,6 +661,170 @@ pub(super) fn quick_add_row_at(area: Rectangle, point: Point, rows: usize) -> Op
     (row < rows).then_some(row)
 }
 
+/// What a dropped audio file can become. The drop chooser shows one card for each, side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DropOption {
+    /// A Wave file node, which cuts the file into frames for a wavetable.
+    Wavetable,
+    /// A Sampler, which plays the file back.
+    Sampler,
+}
+
+impl DropOption {
+    /// Every option, left to right.
+    pub(super) const ALL: [DropOption; 2] = [DropOption::Wavetable, DropOption::Sampler];
+
+    /// The node a file dropped with this option becomes.
+    pub(super) fn kind(self) -> NodeKind {
+        match self {
+            DropOption::Wavetable => NodeKind::WaveFile,
+            DropOption::Sampler => NodeKind::Sampler,
+        }
+    }
+
+    /// The card's name.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            DropOption::Wavetable => "Wavetable",
+            DropOption::Sampler => "Sampler",
+        }
+    }
+
+    /// The line under the name, saying what the card makes.
+    pub(super) fn hint(self) -> &'static str {
+        match self {
+            DropOption::Wavetable => "Cut into frames",
+            DropOption::Sampler => "Play it back",
+        }
+    }
+}
+
+/// Audio files dropped on the editor, waiting for the drop chooser to say what they become.
+/// `screen` is where they were dropped, in screen coordinates. Files dropped together all join
+/// the one chooser.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DropChoice {
+    pub(super) paths: Vec<std::path::PathBuf>,
+    pub(super) screen: Point,
+}
+
+/// How big one card of the drop chooser is, the gap between the two, and the margin around them.
+pub(super) const DROP_CARD_WIDTH: f32 = 150.0;
+pub(super) const DROP_CARD_HEIGHT: f32 = 64.0;
+pub(super) const DROP_CARD_GAP: f32 = 6.0;
+pub(super) const DROP_PADDING: f32 = 6.0;
+/// The height of the line over the cards that names the file.
+pub(super) const DROP_TITLE_HEIGHT: f32 = 26.0;
+
+/// Where the drop chooser sits: centered on the drop, moved to keep the whole box inside the
+/// editor and above the key strip.
+pub(super) fn drop_choice_bounds(bounds: Rectangle, at: Point) -> Rectangle {
+    let cards = DropOption::ALL.len() as f32;
+    let width = 2.0 * DROP_PADDING + cards * DROP_CARD_WIDTH + (cards - 1.0) * DROP_CARD_GAP;
+    let height = DROP_TITLE_HEIGHT + DROP_CARD_HEIGHT + DROP_PADDING;
+    let lowest = bounds.height - super::piano::STRIP_HEIGHT - height;
+    Rectangle {
+        x: (at.x - width / 2.0).min(bounds.width - width).max(0.0),
+        y: (at.y - height / 2.0).min(lowest).max(0.0),
+        width,
+        height,
+    }
+}
+
+/// The card for `option` in the drop chooser at `area`.
+pub(super) fn drop_card_bounds(area: Rectangle, option: DropOption) -> Rectangle {
+    let index = DropOption::ALL
+        .iter()
+        .position(|o| *o == option)
+        .unwrap_or(0);
+    Rectangle {
+        x: area.x + DROP_PADDING + index as f32 * (DROP_CARD_WIDTH + DROP_CARD_GAP),
+        y: area.y + DROP_TITLE_HEIGHT,
+        width: DROP_CARD_WIDTH,
+        height: DROP_CARD_HEIGHT,
+    }
+}
+
+/// The card of the drop chooser at `area` under `point`, if any.
+pub(super) fn drop_option_at(area: Rectangle, point: Point) -> Option<DropOption> {
+    DropOption::ALL
+        .into_iter()
+        .find(|option| drop_card_bounds(area, *option).contains(point))
+}
+
+#[cfg(test)]
+mod drop_choice_tests {
+    use super::*;
+
+    const EDITOR: Rectangle = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1024.0,
+        height: 712.0,
+    };
+
+    #[test]
+    fn the_cards_sit_side_by_side_inside_the_chooser() {
+        let area = drop_choice_bounds(EDITOR, Point::new(500.0, 300.0));
+        let left = drop_card_bounds(area, DropOption::Wavetable);
+        let right = drop_card_bounds(area, DropOption::Sampler);
+        assert_eq!(left.y, right.y);
+        assert!(left.x + left.width < right.x);
+        for card in [left, right] {
+            assert!(card.x >= area.x && card.x + card.width <= area.x + area.width);
+            assert!(card.y >= area.y && card.y + card.height <= area.y + area.height);
+        }
+    }
+
+    #[test]
+    fn a_press_on_a_card_picks_it_and_a_press_between_them_picks_nothing() {
+        let area = drop_choice_bounds(EDITOR, Point::new(500.0, 300.0));
+        let left = drop_card_bounds(area, DropOption::Wavetable);
+        let right = drop_card_bounds(area, DropOption::Sampler);
+        let middle = |r: Rectangle| Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0);
+        assert_eq!(
+            drop_option_at(area, middle(left)),
+            Some(DropOption::Wavetable)
+        );
+        assert_eq!(
+            drop_option_at(area, middle(right)),
+            Some(DropOption::Sampler)
+        );
+        let gap = Point::new(left.x + left.width + DROP_CARD_GAP / 2.0, middle(left).y);
+        assert_eq!(drop_option_at(area, gap), None);
+        assert_eq!(
+            drop_option_at(area, Point::new(area.x + 1.0, area.y + 1.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_drop_near_an_edge_keeps_the_chooser_on_screen_and_above_the_keys() {
+        let strip = super::super::piano::STRIP_HEIGHT;
+        for at in [
+            Point::new(0.0, 0.0),
+            Point::new(1024.0, 712.0),
+            Point::new(1020.0, 10.0),
+        ] {
+            let area = drop_choice_bounds(EDITOR, at);
+            assert!(
+                area.x >= 0.0 && area.x + area.width <= EDITOR.width,
+                "{at:?}"
+            );
+            assert!(
+                area.y >= 0.0 && area.y + area.height <= EDITOR.height - strip,
+                "{at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wavetable_card_makes_a_wave_file_node() {
+        assert_eq!(DropOption::Wavetable.kind(), NodeKind::WaveFile);
+        assert_eq!(DropOption::Sampler.kind(), NodeKind::Sampler);
+    }
+}
+
 #[cfg(test)]
 mod quick_add_tests {
     use super::*;

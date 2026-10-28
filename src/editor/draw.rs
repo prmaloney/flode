@@ -68,6 +68,9 @@ pub(super) fn draw_editor(
     if let Some(menu) = graph.menu {
         overlays.push(view.rect_to_world(menu_bounds(menu)));
     }
+    if let Some(choice) = &graph.drop_choice {
+        overlays.push(view.rect_to_world(drop_choice_bounds(bounds, choice.screen)));
+    }
     if let Some(category) = graph.category_menu {
         overlays.push(view.rect_to_world(category_list_bounds(bounds, category)));
     }
@@ -307,6 +310,7 @@ pub(super) fn draw_editor(
         if graph.quick_add.is_some() {
             draw_quick_add(frame, bounds, graph);
         }
+        draw_drop_choice(frame, bounds, graph);
         pane::draw_rename(frame, bounds, graph);
     };
     // A pane's graph is a layer of its own, which sits over everything drawn so far. The menus
@@ -2381,6 +2385,146 @@ pub(super) fn draw_menu(
             ..Text::default()
         });
     }
+}
+
+/// The drop chooser: a line naming what was dropped, and under it a card for each kind of node the
+/// files can become, side by side. The card under the cursor is lit. Each card has a small picture
+/// of what it makes: a stack of waves in the table color for a wavetable, a burst of sound in the
+/// audio color for a sampler.
+fn draw_drop_choice(frame: &mut Frame, bounds: Rectangle, graph: &Graph) {
+    let Some(choice) = &graph.drop_choice else {
+        return;
+    };
+    let area = drop_choice_bounds(bounds, choice.screen);
+    draw_shadow(frame, area, MENU_CORNER_RADIUS, FLOAT_SHADOW);
+    frame.fill(&rounded_rect(area, MENU_CORNER_RADIUS), MENU_COLOR);
+
+    let title = match choice.paths.as_slice() {
+        [one] => {
+            let name = one
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!("Drop {} as", shorten_to(&name, 28))
+        }
+        many => format!("Drop {} files as", many.len()),
+    };
+    frame.fill_text(Text {
+        content: title,
+        position: Point::new(
+            area.x + DROP_PADDING + 6.0,
+            area.y + DROP_TITLE_HEIGHT / 2.0,
+        ),
+        color: DIM_TEXT_COLOR,
+        size: 12.0,
+        vertical_alignment: alignment::Vertical::Center,
+        ..Text::default()
+    });
+
+    let hovered = if graph.cursor_in {
+        drop_option_at(area, graph.last_screen)
+    } else {
+        None
+    };
+    for option in DropOption::ALL {
+        let card = drop_card_bounds(area, option);
+        let fill = if hovered == Some(option) {
+            LIST_ROW_HOVER_COLOR
+        } else {
+            DROPDOWN_COLOR
+        };
+        frame.fill(&rounded_rect(card, DROPDOWN_CORNER_RADIUS), fill);
+        frame.fill_text(Text {
+            content: option.label().to_string(),
+            position: Point::new(card.x + 10.0, card.y + 22.0),
+            color: TEXT_COLOR,
+            size: 14.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+        frame.fill_text(Text {
+            content: option.hint().to_string(),
+            position: Point::new(card.x + 10.0, card.y + 44.0),
+            color: DIM_TEXT_COLOR,
+            size: 11.0,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
+        let glyph = Rectangle {
+            x: card.x + card.width - 40.0,
+            y: card.y + 12.0,
+            width: 30.0,
+            height: 20.0,
+        };
+        match option {
+            DropOption::Wavetable => draw_table_glyph(frame, glyph),
+            DropOption::Sampler => draw_sample_glyph(frame, glyph),
+        }
+    }
+}
+
+/// `name` cut to at most `max` characters, with an ellipsis if it was longer.
+fn shorten_to(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Three sine cycles, each a little higher and fainter than the last, like frames stacked into a
+/// table.
+fn draw_table_glyph(frame: &mut Frame, area: Rectangle) {
+    const STEPS: usize = 24;
+    for layer in 0..3 {
+        let lift = layer as f32 * 4.0;
+        let alpha = 1.0 - layer as f32 * 0.3;
+        let amplitude = area.height * 0.3;
+        let middle = area.y + area.height - amplitude - lift;
+        let wave = Path::new(|builder| {
+            for step in 0..=STEPS {
+                let t = step as f32 / STEPS as f32;
+                let x = area.x + layer as f32 * 3.0 + t * (area.width - 6.0);
+                let y = middle - amplitude * (t * std::f32::consts::TAU).sin();
+                if step == 0 {
+                    builder.move_to(Point::new(x, y));
+                } else {
+                    builder.line_to(Point::new(x, y));
+                }
+            }
+        });
+        frame.stroke(
+            &wave,
+            Stroke::default()
+                .with_color(Color {
+                    a: alpha,
+                    ..TABLE_COLOR
+                })
+                .with_width(1.4),
+        );
+    }
+}
+
+/// A row of bars that swell and die away, like a recorded sound's waveform.
+fn draw_sample_glyph(frame: &mut Frame, area: Rectangle) {
+    const HEIGHTS: [f32; 9] = [0.25, 0.6, 1.0, 0.8, 0.9, 0.55, 0.4, 0.25, 0.12];
+    let middle = area.y + area.height / 2.0;
+    let step = area.width / (HEIGHTS.len() - 1) as f32;
+    let bars = Path::new(|builder| {
+        for (i, height) in HEIGHTS.iter().enumerate() {
+            let x = area.x + i as f32 * step;
+            let half = height * area.height / 2.0;
+            builder.move_to(Point::new(x, middle - half));
+            builder.line_to(Point::new(x, middle + half));
+        }
+    });
+    frame.stroke(
+        &bars,
+        Stroke::default()
+            .with_color(WIRE_COLOR)
+            .with_width(2.0)
+            .with_line_cap(LineCap::Round),
+    );
 }
 
 /// A rectangle with rounded corners of radius `r`. Each corner is a quadratic curve whose control
