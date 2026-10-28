@@ -312,7 +312,11 @@ impl SavedNode {
         if self.kind == NodeKind::Group {
             if let Some(saved) = &self.group {
                 // The graph inside loads like any other, so a group in a group does too.
-                let nodes: Vec<FlodeNode> = saved.nodes.iter().map(SavedNode::into_node).collect();
+                let mut nodes: Vec<FlodeNode> =
+                    saved.nodes.iter().map(SavedNode::into_node).collect();
+                // Slot and frame pins show only for connected wires, so they are counted before
+                // the wires are checked. Otherwise every wire past the first would look pinless.
+                super::graph::show_slots(&mut nodes, &saved.links);
                 let links = saved
                     .links
                     .iter()
