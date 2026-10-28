@@ -82,13 +82,13 @@ fn a_compiled_graph_matches_the_old_hand_built_shape_bit_for_bit() {
 #[test]
 fn the_compiler_fills_in_the_new_slot_fields_and_nothing_else() {
     let compiled = compiled_patch();
-    let StageParams::Oscillator(osc) = compiled.lanes[0].stages[0].params else {
+    let StageParams::Oscillator(ref osc) = compiled.lanes[0].stages[0].params else {
         panic!("expected an oscillator stage");
     };
     assert_eq!(osc.notes, Some(0));
     assert_eq!(compiled.lanes[0].notes_slot, Some(0));
     assert_eq!(
-        osc,
+        *osc,
         OscillatorParams {
             notes: Some(0),
             ..OscillatorParams::default()

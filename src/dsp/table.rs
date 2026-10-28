@@ -1,9 +1,6 @@
 //! Custom wavetables: band-limited frames grouped into regions, and the ramp that maps a position
 //! from 0 to 1 onto the frames that play.
 
-// Nothing outside this file uses these yet. Remove this once the table node is wired in.
-#![allow(dead_code)]
-
 use super::wavetable::{level_for, max_partials, TABLE_LEVELS, TABLE_SIZE};
 use std::collections::hash_map::DefaultHasher;
 use std::f64::consts::TAU;
@@ -183,11 +180,15 @@ impl TableData {
     }
 
     /// How many regions the table has.
+    // Only tests read this so far.
+    #[allow(dead_code)]
     pub fn region_count(&self) -> usize {
         self.regions.len()
     }
 
     /// How many frames there are in all regions.
+    // Only tests read this so far.
+    #[allow(dead_code)]
     pub fn frame_count(&self) -> usize {
         self.regions.iter().map(|r| r.frames.len()).sum()
     }
@@ -321,6 +322,8 @@ impl BlendMode {
     }
 
     /// The dropdown row for this mode.
+    // Not read yet: the node reads its own choice. Kept as the inverse of `from_index`.
+    #[allow(dead_code)]
     pub fn index(self) -> usize {
         self as usize
     }
@@ -388,6 +391,8 @@ impl Ramp {
     }
 
     /// How many regions the ramp has.
+    // For the editor's ramp control, which is built separately. Remove this once it reads it.
+    #[allow(dead_code)]
     pub fn region_count(&self) -> usize {
         self.count
     }
@@ -400,6 +405,8 @@ impl Ramp {
 
     /// The boundaries between regions. The first `region_count() - 1` entries are real, and the
     /// rest are 1.0.
+    // For the editor's ramp control, which is built separately. Remove this once it reads it.
+    #[allow(dead_code)]
     pub fn boundaries(&self) -> [f32; MAX_REGIONS] {
         let mut out = [1.0f32; MAX_REGIONS];
         for (i, slot) in out.iter_mut().enumerate().take(self.count - 1) {

@@ -7,22 +7,26 @@ use super::control::{
     ControlLevels, KnobValue, MapNode, MapValue, MathNode, Param, Route, SignalNode, SignalTable,
     Source, MAX_ENVELOPES, MAX_LFOS, MAX_NOTE_SOURCES, MAX_SAMPLERS,
 };
+use super::stage::TableParams;
 use super::stage::{
     ChorusParams, CompressorParams, DelayParams, DistortionParams, EqBandParams, EqParams,
     FilterParams, FlangerParams, GainParams, LaneGraph, MixParams, MonitorParams, OscillatorParams,
     PhaserParams, ReverbParams, SamplerParams, StageParams, StageSpec, MAX_INPUTS, MAX_STAGES,
 };
+use super::tables::cached_slice_frames;
 use super::{
     ArpeggiatorSettings, ChordSettings, EnvelopeSettings, Globals, LfoSettings, NoteSourceSpec,
     Patch,
 };
+use crate::dsp::frames::{curve_frame, harmonic_frame, sweep_frames, SliceMode, SweepKind};
+use crate::dsp::table::{self, BlendMode, Ramp, MAX_REGIONS};
 use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::output::{slot_knob, MAX_SLOTS};
 use crate::nodes::sampler;
 use crate::nodes::{
-    arpeggiator, chord, compressor, delay, distortion, eq, filter, gain, input, lfo, map, math,
-    mix, monitor, oscillator, phaser, Bypass, FlodeNode, NodeKind, Port,
+    arpeggiator, chord, compressor, delay, distortion, eq, filter, frames, gain, input, lfo, map,
+    math, mix, monitor, oscillator, phaser, wavetable, Bypass, FlodeNode, NodeKind, Port,
 };
 use arrayvec::ArrayVec;
 use std::cell::OnceCell;
@@ -430,6 +434,104 @@ impl<'a> Wiring<'a> {
         }
     }
 
+    /// The frames a node makes: one for a curve or a harmonics node, many for a sweep or an audio
+    /// file, and for a wavetable node the frames of all its connected inputs, in pin order. Any
+    /// other node, a file still loading, and a loop all make none. `path` holds the nodes on the
+    /// way here, so a loop is cut where it closes.
+    fn frames_of(&self, node: usize, path: &mut Vec<usize>) -> Vec<Vec<f32>> {
+        if path.contains(&node) {
+            return Vec::new();
+        }
+        let Some(n) = self.nodes.get(node) else {
+            return Vec::new();
+        };
+        let plain = |id: KnobId| id.to_plain(n.value(id));
+        match n.kind {
+            NodeKind::CurveFrame => vec![curve_frame(&n.points)],
+            NodeKind::Harmonics => vec![harmonic_frame(
+                plain(KnobId::HarmCount).round().max(1.0) as usize,
+                plain(KnobId::HarmTilt),
+                plain(KnobId::HarmOddEven),
+            )],
+            NodeKind::Sweep => sweep_frames(
+                SweepKind::from_index(frames::sweep_index(n)),
+                plain(KnobId::SweepFrames).round().max(2.0) as usize,
+                plain(KnobId::SweepAmount),
+            ),
+            NodeKind::WaveFile => match &n.sample {
+                Some(sample) => {
+                    let mode = match frames::slice_index(n) {
+                        1 => SliceMode::Fixed(1024),
+                        2 => SliceMode::Fixed(2048),
+                        3 => SliceMode::Fixed(4096),
+                        _ => SliceMode::Cycles,
+                    };
+                    cached_slice_frames(sample, mode).as_ref().clone()
+                }
+                None => Vec::new(),
+            },
+            NodeKind::Wavetable => self
+                .frame_inputs(node, path)
+                .into_iter()
+                .flat_map(|(_, frames)| frames)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The frames each connected frame input of a wavetable node brings, with the pin number,
+    /// in pin order. An empty pin has no entry, and a connected one can bring no frames.
+    fn frame_inputs(&self, wavetable: usize, path: &mut Vec<usize>) -> Vec<(usize, Vec<Vec<f32>>)> {
+        path.push(wavetable);
+        let inputs = (0..MAX_REGIONS)
+            .filter_map(|pin| {
+                let link = self.input_link(wavetable, Port::Frame(pin))?;
+                Some((pin, self.frames_of(link.from, path)))
+            })
+            .collect();
+        path.pop();
+        inputs
+    }
+
+    /// The custom wavetable an oscillator plays, if its table input is wired to a wavetable node
+    /// that makes at least one frame. Builds the frames and gets the table from the build cache,
+    /// so an unchanged graph gives the same table back.
+    fn table_params(&self, oscillator: usize) -> Option<TableParams> {
+        let wavetable = self.input_link(oscillator, Port::TableIn)?.from;
+        let node = self.nodes.get(wavetable)?;
+        if node.kind != NodeKind::Wavetable {
+            return None;
+        }
+        let inputs = self.frame_inputs(wavetable, &mut Vec::new());
+        if inputs.iter().all(|(_, frames)| frames.is_empty()) {
+            return None;
+        }
+        let pins: Vec<usize> = inputs.iter().map(|(pin, _)| *pin).collect();
+        let data = table::build_cached(inputs.into_iter().map(|(_, frames)| frames).collect());
+        Some(TableParams {
+            frame_counts: data.regions.iter().map(|r| r.frames.len()).collect(),
+            data,
+            position: self.param(wavetable, KnobId::WtPosition),
+            width: self.param(wavetable, KnobId::WtBlendWidth),
+            blend: BlendMode::from_index(wavetable::blend_index(node)),
+            shares: pins
+                .into_iter()
+                .map(|pin| self.param(wavetable, KnobId::share(pin)))
+                .collect(),
+        })
+    }
+
+    /// The full-bandwidth cycle an oscillator's table makes right now, for the editor's wave
+    /// display. The position is the wavetable node's, read from `levels` so a control wire that
+    /// drives it moves the picture. None if the oscillator has no table.
+    pub fn table_wave(&self, oscillator: usize, levels: &ControlLevels) -> Option<Vec<f32>> {
+        let table = self.table_params(oscillator)?;
+        let shares: Vec<f32> = table.shares.iter().map(|s| s.plain(levels)).collect();
+        let ramp = Ramp::new(&shares, table.blend, table.width.plain(levels));
+        let at = ramp.locate(&table.frame_counts, table.position.plain(levels));
+        Some(table.data.frame_at(&at))
+    }
+
     /// The note-emitting nodes the audio thread runs, in graph order.
     pub fn note_source_settings(&self) -> [Option<NoteSourceSpec>; MAX_NOTE_SOURCES] {
         let mut out = [None; MAX_NOTE_SOURCES];
@@ -594,6 +696,7 @@ impl<'a> Wiring<'a> {
         let knob = |id| self.param(node, id);
         match n.kind {
             NodeKind::Oscillator => Some(StageParams::Oscillator(OscillatorParams {
+                table: self.table_params(node),
                 waveform: oscillator::waveform(n),
                 noise: oscillator::noise_type(n),
                 warp: oscillator::warp_mode(n),
@@ -1276,7 +1379,7 @@ mod tests {
             audio(1, 2, Port::Slot(0)),
         ];
         let lane = lane(nodes, links, 2);
-        let StageParams::Oscillator(osc) = lane.stages[0].params else {
+        let StageParams::Oscillator(ref osc) = lane.stages[0].params else {
             panic!("not an oscillator");
         };
         assert_eq!(osc.envelope, Some(0));
@@ -2002,5 +2105,269 @@ mod effect_tests {
         assert!(wiring.control_route(0, KnobId::UtilGain).is_some());
         assert!(wiring.control_route(0, KnobId::Pan).is_some());
         assert!(matches!(wiring.stage_params(0), Some(StageParams::Gain(_))));
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::tests::{notes, with_notes};
+    use super::*;
+    use crate::dsp::sample::SampleData;
+    use nih_plug_iced::Point;
+    use std::sync::Arc;
+
+    fn node(kind: NodeKind) -> FlodeNode {
+        FlodeNode::new(kind, Point::new(0.0, 0.0))
+    }
+
+    fn wire(from: usize, to: usize, input: Port) -> Connection {
+        Connection {
+            from,
+            out: Port::Table,
+            to,
+            input,
+        }
+    }
+
+    fn sine_file() -> FlodeNode {
+        let mut file = node(NodeKind::WaveFile);
+        file.sample = Some(Arc::new(SampleData {
+            sample_rate: 44100.0,
+            channels: 1,
+            frames: (0..8192).map(|i| (i as f32 * 0.05).sin()).collect(),
+        }));
+        // Fixed 2048 samples a frame.
+        file.choose(0, 2);
+        file
+    }
+
+    /// An oscillator (0) with notes, a wavetable (1) feeding its table input, an output (2), and
+    /// a MIDI input (3). Each source goes to the given frame pin of the wavetable, and sits at
+    /// index 4 and up.
+    fn graph(sources: Vec<(usize, FlodeNode)>) -> (Vec<FlodeNode>, Vec<Connection>) {
+        let mut nodes = vec![
+            node(NodeKind::Oscillator),
+            node(NodeKind::Wavetable),
+            node(NodeKind::Output),
+            node(NodeKind::Input),
+        ];
+        nodes[2].used = 1;
+        let mut links = vec![
+            Connection {
+                from: 0,
+                out: Port::Audio,
+                to: 2,
+                input: Port::Slot(0),
+            },
+            notes(3, 0),
+            wire(1, 0, Port::TableIn),
+        ];
+        for (pin, source) in sources {
+            nodes.push(source);
+            links.push(wire(nodes.len() - 1, 1, Port::Frame(pin)));
+        }
+        (nodes, links)
+    }
+
+    fn oscillator(nodes: &[FlodeNode], links: &[Connection]) -> OscillatorParams {
+        match &Wiring::new(nodes, links).lane_graphs()[0].stages[0].params {
+            StageParams::Oscillator(osc) => osc.clone(),
+            other => panic!("expected an oscillator, got {other:?}"),
+        }
+    }
+
+    fn table_of(nodes: &[FlodeNode], links: &[Connection]) -> Option<TableParams> {
+        oscillator(nodes, links).table
+    }
+
+    /// Each kind of frame node, wired through a wavetable, gives the oscillator a table with the
+    /// frames the node makes.
+    #[test]
+    fn every_frame_node_makes_a_table() {
+        for (source, frames) in [
+            (node(NodeKind::CurveFrame), 1),
+            (node(NodeKind::Harmonics), 1),
+            (node(NodeKind::Sweep), 16),
+        ] {
+            let kind = source.kind;
+            let (nodes, links) = graph(vec![(0, source)]);
+            let table = table_of(&nodes, &links).unwrap_or_else(|| panic!("{kind:?}"));
+            assert_eq!(table.frame_counts.as_slice(), [frames], "{kind:?}");
+            assert_eq!(table.data.region_count(), 1);
+        }
+        let (nodes, links) = graph(vec![(0, sine_file())]);
+        let table = table_of(&nodes, &links).expect("a file table");
+        assert!(table.frame_counts[0] > 1);
+    }
+
+    /// A file still loading makes no frames, so the oscillator plays its waveform.
+    #[test]
+    fn a_file_with_nothing_loaded_leaves_no_table() {
+        let (nodes, links) = graph(vec![(0, node(NodeKind::WaveFile))]);
+        assert!(table_of(&nodes, &links).is_none());
+    }
+
+    /// A wavetable with nothing wired makes no table.
+    #[test]
+    fn an_empty_wavetable_leaves_no_table() {
+        let (nodes, links) = graph(vec![]);
+        assert!(table_of(&nodes, &links).is_none());
+    }
+
+    /// With the table input unwired the oscillator is as it was: no table, and a different
+    /// wavetable elsewhere in the graph changes nothing.
+    #[test]
+    fn an_unwired_table_input_leaves_the_oscillator_alone() {
+        let (nodes, mut links) = graph(vec![(0, node(NodeKind::CurveFrame))]);
+        links.retain(|link| link.input != Port::TableIn);
+        let osc = oscillator(&nodes, &links);
+        assert_eq!(
+            osc,
+            OscillatorParams {
+                notes: Some(0),
+                ..OscillatorParams::default()
+            }
+        );
+    }
+
+    /// One region per connected frame pin, in pin order, and each region's share is the share knob
+    /// of its own pin, so an empty pin between two leaves its share out.
+    #[test]
+    fn regions_are_the_connected_pins() {
+        let (mut nodes, links) = graph(vec![
+            (0, node(NodeKind::CurveFrame)),
+            (2, node(NodeKind::Sweep)),
+        ]);
+        let share = |id: KnobId, plain: f32| id.to_normalized(plain);
+        nodes[1].set_value(KnobId::Share1, share(KnobId::Share1, 0.25));
+        nodes[1].set_value(KnobId::Share2, share(KnobId::Share2, 0.5));
+        nodes[1].set_value(KnobId::Share3, share(KnobId::Share3, 0.75));
+        let table = table_of(&nodes, &links).expect("a table");
+        assert_eq!(table.data.region_count(), 2);
+        assert_eq!(table.frame_counts.as_slice(), [1, 16]);
+        let levels = ControlLevels::default();
+        let shares: Vec<f32> = table.shares.iter().map(|s| s.plain(&levels)).collect();
+        assert_eq!(shares.len(), 2);
+        assert!((shares[0] - 0.25).abs() < 1e-4, "{shares:?}");
+        assert!((shares[1] - 0.75).abs() < 1e-4, "{shares:?}");
+    }
+
+    /// The blend mode, the width and the position come from the wavetable node, and a wire on
+    /// the position drives it.
+    #[test]
+    fn the_wavetable_settings_reach_the_table() {
+        let (mut nodes, mut links) = graph(vec![(0, node(NodeKind::CurveFrame))]);
+        nodes[1].choose(0, 2);
+        nodes[1].set_value(KnobId::WtBlendWidth, 0.9);
+        let table = table_of(&nodes, &links).expect("a table");
+        assert_eq!(table.blend, BlendMode::Step);
+        let levels = ControlLevels::default();
+        assert!((table.width.plain(&levels) - 0.9).abs() < 1e-4);
+        assert!(!table.position.is_driven());
+
+        nodes.push(node(NodeKind::Lfo));
+        links.push(Connection {
+            from: nodes.len() - 1,
+            out: Port::Shape,
+            to: 1,
+            input: Port::Knob(KnobId::WtPosition),
+        });
+        let table = table_of(&nodes, &links).expect("a table");
+        assert!(table.position.is_driven());
+    }
+
+    /// A wavetable can feed another: the inner one's frames join the outer one's, as one region.
+    #[test]
+    fn a_wavetable_can_feed_a_wavetable() {
+        let (mut nodes, mut links) = graph(vec![(0, node(NodeKind::Sweep))]);
+        // An inner wavetable (5) with a curve (6) and a harmonics node (7), on the outer's pin 1.
+        nodes.push(node(NodeKind::Wavetable));
+        nodes.push(node(NodeKind::CurveFrame));
+        nodes.push(node(NodeKind::Harmonics));
+        links.push(wire(5, 1, Port::Frame(1)));
+        links.push(wire(6, 5, Port::Frame(0)));
+        links.push(wire(7, 5, Port::Frame(1)));
+        let table = table_of(&nodes, &links).expect("a table");
+        assert_eq!(table.frame_counts.as_slice(), [16, 2]);
+    }
+
+    /// A loop of wavetables makes no frames and does not hang. A loop beside real frames leaves
+    /// those frames.
+    #[test]
+    fn a_loop_makes_no_frames() {
+        // A wavetable that feeds itself.
+        let (nodes, mut links) = graph(vec![]);
+        links.push(wire(1, 1, Port::Frame(0)));
+        assert!(table_of(&nodes, &links).is_none());
+
+        // Two that feed each other, with a curve beside the loop.
+        let (mut nodes, mut links) = graph(vec![(0, node(NodeKind::CurveFrame))]);
+        nodes.push(node(NodeKind::Wavetable));
+        links.push(wire(5, 1, Port::Frame(1)));
+        links.push(wire(1, 5, Port::Frame(0)));
+        let table = table_of(&nodes, &links).expect("the curve still plays");
+        assert_eq!(table.frame_counts[0], 1);
+    }
+
+    /// Two compiles of one graph share one built table, so a knob drag elsewhere does not rebuild
+    /// it. A change to a frame builds a new one.
+    #[test]
+    fn an_unchanged_graph_reuses_its_table() {
+        let (mut nodes, links) = graph(vec![(0, node(NodeKind::Sweep)), (1, sine_file())]);
+        let first = table_of(&nodes, &links).expect("a table");
+        let second = table_of(&nodes, &links).expect("a table");
+        assert!(Arc::ptr_eq(&first.data, &second.data));
+        // The position and the shares are not part of the frames.
+        nodes[1].set_value(KnobId::WtPosition, 0.7);
+        nodes[1].set_value(KnobId::Share1, 0.3);
+        let moved = table_of(&nodes, &links).expect("a table");
+        assert!(Arc::ptr_eq(&first.data, &moved.data));
+        nodes[4].set_value(KnobId::SweepAmount, 0.3);
+        let changed = table_of(&nodes, &links).expect("a table");
+        assert!(!Arc::ptr_eq(&first.data, &changed.data));
+    }
+
+    /// The wave display's cycle follows the position along the ramp.
+    #[test]
+    fn the_wave_display_follows_the_position() {
+        let (mut nodes, mut links) = graph(vec![
+            (0, node(NodeKind::Harmonics)),
+            (1, node(NodeKind::CurveFrame)),
+        ]);
+        let wave = |nodes: &[FlodeNode], links: &[Connection], position: f32| {
+            let mut levels = ControlLevels::default();
+            levels.macros[0] = position;
+            Wiring::new(nodes, links).table_wave(0, &levels)
+        };
+        // Position driven by macro 0.
+        nodes.push(node(NodeKind::Macro));
+        links.push(Connection {
+            from: nodes.len() - 1,
+            out: Port::Macro(0),
+            to: 1,
+            input: Port::Knob(KnobId::WtPosition),
+        });
+        let start = wave(&nodes, &links, 0.0).expect("a cycle");
+        let end = wave(&nodes, &links, 1.0).expect("a cycle");
+        assert_eq!(start.len(), crate::dsp::table::FRAME_SIZE);
+        let gap = start
+            .iter()
+            .zip(&end)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(gap > 0.1, "{gap}");
+        // No table, no cycle.
+        links.retain(|link| link.input != Port::TableIn);
+        assert!(wave(&nodes, &links, 0.0).is_none());
+    }
+
+    /// Notes still come from the MIDI input, and the compiled table sits on the right stage.
+    #[test]
+    fn the_table_oscillator_keeps_its_notes() {
+        let (mut nodes, mut links) = graph(vec![(0, node(NodeKind::CurveFrame))]);
+        with_notes(&mut nodes, &mut links);
+        let osc = oscillator(&nodes, &links);
+        assert_eq!(osc.notes, Some(0));
+        assert!(osc.table.is_some());
     }
 }

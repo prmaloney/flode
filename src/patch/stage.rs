@@ -11,6 +11,7 @@ use crate::dsp::monitor::MonitorMode;
 use crate::dsp::noise::NoiseType;
 use crate::dsp::sample::SampleData;
 use crate::dsp::svf::FilterType;
+use crate::dsp::table::{BlendMode, TableData, MAX_REGIONS};
 use crate::dsp::warp::WarpMode;
 use crate::dsp::wavetable::Waveform;
 use crate::nodes::knobs::KnobId;
@@ -23,9 +24,43 @@ pub const MAX_STAGES: usize = 16;
 /// The most audio inputs one stage can have.
 pub const MAX_INPUTS: usize = 2;
 
+/// A custom wavetable an oscillator plays, in place of its waveform. The frames are built once
+/// when the patch compiles. The audio thread only reads them, and the knobs below.
+#[derive(Debug, Clone)]
+pub struct TableParams {
+    /// The built frames, one region per connected frame input of the Wavetable node, in pin order.
+    pub data: Arc<TableData>,
+    /// How many frames each region of `data` holds.
+    pub frame_counts: ArrayVec<usize, MAX_REGIONS>,
+    /// Where the output sits along the ramp, from 0.0 to 1.0. A control wire can drive it.
+    pub position: Param,
+    /// How wide the blend between neighbouring regions is.
+    pub width: Param,
+    pub blend: BlendMode,
+    /// The ramp share of each region, in the same order as the regions. Each is the share knob of
+    /// the region's own frame pin, so an empty pin between two others leaves its share unused.
+    pub shares: ArrayVec<Param, MAX_REGIONS>,
+}
+
+impl PartialEq for TableParams {
+    /// `TableData` is large, so two tables are equal only if they share the same built data, by
+    /// `Arc` pointer.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+            && self.frame_counts == other.frame_counts
+            && self.position == other.position
+            && self.width == other.width
+            && self.blend == other.blend
+            && self.shares == other.shares
+    }
+}
+
 /// An oscillator stage. Its one audio input is the phase modulator of the PM and PD warps.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OscillatorParams {
+    /// The custom wavetable wired to the table input, if any. While it is set the oscillator plays
+    /// it, and the waveform and noise settings are ignored.
+    pub table: Option<TableParams>,
     pub waveform: Waveform,
     /// The noise type, under the noise waveform.
     pub noise: NoiseType,
@@ -53,6 +88,7 @@ pub struct OscillatorParams {
 impl Default for OscillatorParams {
     fn default() -> Self {
         Self {
+            table: None,
             waveform: Waveform::default(),
             noise: NoiseType::default(),
             warp: WarpMode::default(),

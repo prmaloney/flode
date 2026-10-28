@@ -63,7 +63,7 @@ fn a_chord_compiles_and_feeds_its_oscillator() {
     assert_eq!(settings.input, Some(0));
     assert_eq!(settings.chord, ChordType::Major);
 
-    let StageParams::Oscillator(osc) = patch.lanes[0].stages[0].params else {
+    let StageParams::Oscillator(ref osc) = patch.lanes[0].stages[0].params else {
         panic!("expected an oscillator");
     };
     assert_eq!(osc.notes, Some(1));

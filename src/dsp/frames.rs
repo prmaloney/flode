@@ -2,16 +2,13 @@
 //! `FRAME_SIZE` samples with values from -1.0 to 1.0, from a drawn curve, a harmonic recipe, a
 //! sweep, or a slice of an audio file. Nothing in here knows about nodes or the editor.
 
-// Nothing calls these yet. Remove this once the wavetable nodes use them.
-#![allow(dead_code)]
-
 use std::f64::consts::TAU;
 
 use crate::dsp::curve::Curve;
 use crate::dsp::sample::SampleData;
 
-/// How many samples one frame holds.
-pub const FRAME_SIZE: usize = 2048;
+/// How many samples one frame holds. It is the table's frame size, so the two never differ.
+pub use crate::dsp::table::FRAME_SIZE;
 
 /// The most partials any recipe adds up.
 const MAX_PARTIALS: usize = 64;
@@ -148,6 +145,8 @@ impl SweepKind {
     ];
 
     /// The menu label of each kind, in the same order as `ALL`.
+    // Only tests read this: the node's own dropdown keeps its own list of labels.
+    #[allow(dead_code)]
     pub const LABELS: [&'static str; 4] = ["Harmonics", "PWM", "Sync", "Fold"];
 
     /// The kind at menu position `i`, or the default when `i` is out of range.
@@ -156,6 +155,8 @@ impl SweepKind {
     }
 
     /// This kind's menu position.
+    // Not read yet: the node reads its own choice. Kept as the inverse of `from_index`.
+    #[allow(dead_code)]
     pub fn index(self) -> usize {
         self as usize
     }

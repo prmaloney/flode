@@ -68,13 +68,13 @@ fn an_arpeggiated_slot_and_a_raw_slot_both_compile_from_one_input() {
     };
     assert_eq!(settings.input, Some(0));
 
-    let StageParams::Oscillator(arped) = patch.lanes[0].stages[0].params else {
+    let StageParams::Oscillator(ref arped) = patch.lanes[0].stages[0].params else {
         panic!("expected an oscillator");
     };
     assert_eq!(arped.notes, Some(1));
     assert_eq!(patch.lanes[0].notes_slot, Some(1));
 
-    let StageParams::Oscillator(raw) = patch.lanes[1].stages[0].params else {
+    let StageParams::Oscillator(ref raw) = patch.lanes[1].stages[0].params else {
         panic!("expected an oscillator");
     };
     assert_eq!(raw.notes, Some(0));
