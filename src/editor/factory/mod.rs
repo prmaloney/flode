@@ -27,7 +27,7 @@ use crate::nodes::connection::Connection;
 use crate::nodes::knobs::KnobId;
 use crate::nodes::oscillator::WARP_LABELS;
 use crate::nodes::output::slot_knob;
-use crate::nodes::{FlodeNode, NodeKind, Port};
+use crate::nodes::{FlodeNode, NodeKind, Port, NODE_WIDTH};
 use crate::presets::Preset;
 use nih_plug_iced::Point;
 
@@ -62,6 +62,8 @@ const TOP: f32 = 80.0;
 const GAP: f32 = 12.0;
 /// Where the folded wave nodes sit, in a row above the columns.
 const WAVE_BAND_Y: f32 = 8.0;
+/// Where the first of them sits, just right of the burger menu.
+const WAVE_BAND_X: f32 = 100.0;
 
 /// The column of the MIDI input and the amplitude envelope.
 pub(super) const CONTROLS: usize = 0;
@@ -280,10 +282,11 @@ impl Builder {
             next[column] += self.graph.nodes[index].height() + GAP;
         }
         // The folded wave nodes are small and the columns can be full, so they sit side by side in
-        // the free band above the columns, from the second column on to clear the logo.
+        // the free band above the columns, starting past the burger menu. Starting as far left as
+        // that allows keeps the wire to the oscillator short, since it leaves a node on its right.
         for (place, &index) in self.folded.iter().enumerate() {
-            let column = (place + 1).min(COLUMN_X.len() - 1);
-            self.graph.nodes[index].position = Point::new(COLUMN_X[column], WAVE_BAND_Y);
+            let x = WAVE_BAND_X + place as f32 * (NODE_WIDTH + GAP);
+            self.graph.nodes[index].position = Point::new(x, WAVE_BAND_Y);
         }
         self.graph.preset_name = Some(name.to_string());
         Preset {
