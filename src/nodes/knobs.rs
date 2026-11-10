@@ -607,9 +607,13 @@ impl KnobId {
     /// The value a new node starts with, in the knob's own units.
     pub fn default_plain(self) -> f32 {
         match self {
-            KnobId::Gain => -10.0,
-            KnobId::Slot1 | KnobId::Slot2 | KnobId::Slot3 | KnobId::Slot4 | KnobId::OscGain => 0.0,
-            KnobId::UtilGain => 0.0,
+            KnobId::Gain
+            | KnobId::Slot1
+            | KnobId::Slot2
+            | KnobId::Slot3
+            | KnobId::Slot4
+            | KnobId::OscGain
+            | KnobId::UtilGain => 0.0,
             KnobId::Attack => 0.001,
             KnobId::Decay => 1.0,
             KnobId::Sustain => 1.0,
