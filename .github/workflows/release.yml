@@ -85,8 +85,34 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  linux:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the VST3, CLAP, and standalone
+        run: cargo run --package xtask --release -- bundle flode --release
+      - name: Make the tarball
+        run: |
+          label="${{ needs.meta.outputs.label }}"
+          mkdir -p dist "Flode-$label-Linux"
+          cp -R target/bundled/flode.vst3 target/bundled/flode.clap target/bundled/flode "Flode-$label-Linux/"
+          tar -czf "dist/Flode-$label-Linux.tar.gz" "Flode-$label-Linux"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
   publish:
-    needs: [meta, macos, windows]
+    needs: [meta, macos, windows, linux]
     # Manual runs only check that the builds work.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest

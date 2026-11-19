@@ -16,13 +16,13 @@ on that, and the full node reference.
 
 ## Install
 
-Flode has been built and tested on macOS, and used in Ableton Live 12. The Windows build comes from
-CI and is untested, and there is no Linux build yet.
+Flode has been built and tested on macOS, and used in Ableton Live 12. The Windows and Linux builds
+come from CI and are untested.
 
 ### Download
 
 Get the latest build from the [Releases page](https://github.com/prmaloney/flode/releases). Each
-release has, for macOS and Windows, an installer and a zip of the plain plugin files:
+release has downloads for each platform, an installer where there is one and the plain plugin files:
 
 - **macOS**: `Flode-<version>-macOS.pkg` installs the VST3, CLAP, Audio Unit and standalone app
   (universal, Apple silicon and Intel), and lets you pick which. `Flode-<version>-macOS.zip` has the
@@ -30,6 +30,8 @@ release has, for macOS and Windows, an installer and a zip of the plain plugin f
 - **Windows**: `Flode-<version>-Windows-Setup.exe` installs the VST3, CLAP and standalone app.
   `Flode-<version>-Windows.zip` has the plain files: put `flode.vst3` in
   `C:\Program Files\Common Files\VST3` and `flode.clap` in `C:\Program Files\Common Files\CLAP`.
+- **Linux**: `Flode-<version>-Linux.tar.gz` has the plain files, with no installer. Put
+  `flode.vst3` in `~/.vst3` and `flode.clap` in `~/.clap`; `flode` is the standalone app.
 
 The **Nightly** pre-release is rebuilt from every push to `main`, so it has the newest changes and
 may be unstable. The installers are not signed or notarized, so macOS and Windows will warn about
