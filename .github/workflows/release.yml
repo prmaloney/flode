@@ -95,7 +95,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev \
             libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev libxkbcommon-x11-dev
       - uses: Swatinem/rust-cache@v2
       - name: Build the VST3, CLAP, and standalone
         run: cargo run --package xtask --release -- bundle flode --release
@@ -130,6 +130,12 @@ jobs:
             gh release create "$GITHUB_REF_NAME" dist/* \
               --title "Flode ${{ needs.meta.outputs.version }}" --generate-notes
           else
+            # GitHub rejects a release targeting a commit that is not the head of main, so a run
+            # that main has moved past stops here. The newer push has its own run.
+            if [ "$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" -q .sha)" != "$GITHUB_SHA" ]; then
+              echo "main has moved past ${GITHUB_SHA::7}; leaving the nightly release to the newer run."
+              exit 0
+            fi
             # Replace the nightly release, and move its tag to this commit.
             gh release delete nightly --cleanup-tag --yes || true
             gh release create nightly dist/* --prerelease --target "$GITHUB_SHA" \
