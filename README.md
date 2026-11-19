@@ -16,8 +16,28 @@ on that, and the full node reference.
 
 ## Install
 
-Flode has been built and tested on macOS, and used in Ableton Live 12. Other systems may work but
-are untested.
+Flode has been built and tested on macOS, and used in Ableton Live 12. The Windows build comes from
+CI and is untested, and there is no Linux build yet.
+
+### Download
+
+Get the latest build from the [Releases page](https://github.com/prmaloney/flode/releases). Each
+release has, for macOS and Windows, an installer and a zip of the plain plugin files:
+
+- **macOS**: `Flode-<version>-macOS.pkg` installs the VST3, CLAP, Audio Unit and standalone app
+  (universal, Apple silicon and Intel), and lets you pick which. `Flode-<version>-macOS.zip` has the
+  same bundles to copy yourself (see the paths below).
+- **Windows**: `Flode-<version>-Windows-Setup.exe` installs the VST3, CLAP and standalone app.
+  `Flode-<version>-Windows.zip` has the plain files: put `flode.vst3` in
+  `C:\Program Files\Common Files\VST3` and `flode.clap` in `C:\Program Files\Common Files\CLAP`.
+
+The **Nightly** pre-release is rebuilt from every push to `main`, so it has the newest changes and
+may be unstable. The installers are not signed or notarized, so macOS and Windows will warn about
+an unknown developer: on macOS, right-click the `.pkg` and choose Open (or allow it in System
+Settings, Privacy & Security), and on Windows choose More info, then Run anyway. If you use the
+macOS zip, also clear the quarantine flag with `xattr -dr com.apple.quarantine` on each bundle.
+
+### Build from source
 
 You need a recent stable Rust toolchain and a network connection for the first build, since
 nih-plug is fetched from git.

@@ -1,0 +1,112 @@
+# Builds the macOS and Windows downloads and puts them on the GitHub Releases page.
+#   - Every push to main replaces the "Nightly" pre-release with a build of that commit.
+#   - Pushing a tag named v<version> (matching Cargo.toml) makes a permanent release.
+# Run it by hand from the Actions tab to test the builds. That builds but does not publish.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Runs for one ref queue up rather than cancel, so a newer push never interrupts a publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      label: ${{ steps.meta.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml"
+              exit 1
+            fi
+            label=$version
+          else
+            label=nightly
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: meta
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: sh assets/package-macos.sh "${{ needs.meta.outputs.label }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: meta
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the VST3, CLAP, and standalone
+        run: cargo run --package xtask --release -- bundle flode --release
+      - name: Zip the plain bundles
+        run: |
+          label="${{ needs.meta.outputs.label }}"
+          mkdir -p dist "Flode-$label-Windows"
+          cp -R target/bundled/flode.vst3 target/bundled/flode.clap target/bundled/flode.exe "Flode-$label-Windows/"
+          powershell -NoProfile -Command "Compress-Archive -Path 'Flode-$label-Windows' -DestinationPath 'dist/Flode-$label-Windows.zip'"
+      - name: Build the installer
+        run: |
+          choco install innosetup -y --no-progress
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+            "//DAppVersion=${{ needs.meta.outputs.version }}" \
+            "//DLabel=${{ needs.meta.outputs.label }}" \
+            assets/windows/installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, macos, windows]
+    # Manual runs only check that the builds work.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish a release
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Flode ${{ needs.meta.outputs.version }}" --generate-notes
+          else
+            # Replace the nightly release, and move its tag to this commit.
+            gh release delete nightly --cleanup-tag --yes || true
+            gh release create nightly dist/* --prerelease --target "$GITHUB_SHA" \
+              --title "Nightly" \
+              --notes "Built from the latest commit on main (${GITHUB_SHA::7}). Unreleased and may be unstable; see the [latest release](https://github.com/${GITHUB_REPOSITORY}/releases/latest) for a stable build."
+          fi

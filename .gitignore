@@ -4,3 +4,4 @@
 /.claude/worktrees/
 # Marker files cargo leaves in a crate it unpacked.
 .cargo-ok
+/dist

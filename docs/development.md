@@ -42,3 +42,16 @@ details for the effects.
 
 `vendor/` holds two crates the build patches: `baseview`, for a nil-window check on newer macOS,
 and `iced_baseview`, for a method that needs a newer baseview API. They keep their own licenses.
+
+## Releases
+
+`.github/workflows/release.yml` builds the downloads and publishes them on the GitHub Releases page.
+Every push to `main` replaces the **Nightly** pre-release. To make a permanent release, bump
+`version` in `Cargo.toml`, commit, then push a tag named `v<version>` (for example `v0.2.0`); the
+workflow refuses a tag that does not match `Cargo.toml`. You can also run the workflow by hand from
+the Actions tab to check that the builds work, without publishing.
+
+`assets/package-macos.sh <label>` makes the macOS installer and zip into `dist/`, and runs the same
+way on your machine. `assets/windows/installer.iss` is the Windows installer, built with Inno Setup
+after `cargo run --package xtask --release -- bundle flode --release`. Neither is signed or
+notarized.
